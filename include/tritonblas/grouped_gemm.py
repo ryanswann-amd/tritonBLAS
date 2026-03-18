@@ -109,22 +109,18 @@ def grouped_gemm(
         assert A.shape[1] == B.shape[0], f"Group {i}: incompatible A={A.shape}, B={B.shape}"
         group_shapes.append((A.shape[0], B.shape[1], A.shape[1]))
 
-    if _is_homogeneous(group_shapes):
-        m, n, k = group_shapes[0]
-        _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size)
-    else:
-        if BLK_M is None or BLK_N is None or BLK_K is None:
-            selector = GroupedGemmSelector(
-                group_shapes, in_dtype, in_dtype, out_dtype,
-                device_index=current_device_index,
-            )
-            BLK_M, BLK_N, BLK_K = selector.get_config()
+    if BLK_M is None or BLK_N is None or BLK_K is None:
+        selector = GroupedGemmSelector(
+            group_shapes, in_dtype, in_dtype, out_dtype,
+            device_index=current_device_index,
+        )
+        BLK_M, BLK_N, BLK_K = selector.get_config()
 
-        triton_dtype = _torch_to_triton_dtype.get(in_dtype)
-        if triton_dtype is None:
-            raise ValueError(f"Unsupported dtype: {in_dtype}")
+    triton_dtype = _torch_to_triton_dtype.get(in_dtype)
+    if triton_dtype is None:
+        raise ValueError(f"Unsupported dtype: {in_dtype}")
 
-        _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes,
-                                group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
+    _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes,
+                            group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
 
     return group_c

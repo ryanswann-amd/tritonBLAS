@@ -93,9 +93,21 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
         all_i32[ofs_gemm + i + 1] = cumulative
 
-    # 2 CPU→GPU transfers instead of 6
+    # Build tile_to_group mapping (O(1) lookup in kernel)
+    total_tiles = cumulative
+    tile_to_group_host = [0] * total_tiles
+    offset = 0
+    for g_idx in range(G):
+        m, n, k = group_shapes[g_idx]
+        tiles = ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
+        for t in range(tiles):
+            tile_to_group_host[offset + t] = g_idx
+        offset += tiles
+
+    # 3 CPU→GPU transfers: int64 pointers, int32 metadata, int32 tile map
     d_ptrs = torch.tensor(all_ptrs, device="cuda", dtype=torch.int64)
     d_i32 = torch.tensor(all_i32, device="cuda", dtype=torch.int32)
+    d_tile_to_group = torch.tensor(tile_to_group_host, device="cuda", dtype=torch.int32)
 
     # Slices are already contiguous (sequential layout)
     d_a_ptrs = d_ptrs[:G]
@@ -105,11 +117,12 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     d_g_lds = d_i32[ofs_lds:ofs_gemm]
     d_gemm_offsets = d_i32[ofs_gemm:]
 
-    chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, cumulative // _NUM_XCDS))
+    chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, total_tiles // _NUM_XCDS))
 
     grouped_persistent_matmul[(MAX_SMS,)](
         d_a_ptrs, d_b_ptrs, d_c_ptrs,
         d_g_sizes, d_gemm_offsets, d_g_lds,
+        d_tile_to_group,
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=_GROUP_SIZE_M,
         GROUP_COUNT=group_size,

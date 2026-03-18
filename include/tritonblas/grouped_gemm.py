@@ -186,7 +186,7 @@ def grouped_gemm(
         Ns = set(s[1] for s in group_shapes)
         max_M = max(Ms)
         avg_M = sum(Ms) / len(Ms)
-        if len(Ks) == 1 and len(Ns) == 1 and group_size <= 4 and max_M / avg_M < 2.0:
+        if len(Ks) == 1 and len(Ns) == 1 and max_M / avg_M < 2.0:
             results = _padded_bmm_dispatch(group_a, group_b)
             for i in range(group_size):
                 group_c[i].copy_(results[i])

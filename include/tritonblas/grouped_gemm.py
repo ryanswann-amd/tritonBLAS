@@ -36,13 +36,12 @@ def _is_homogeneous(group_shapes):
     return all(s == group_shapes[0] for s in group_shapes)
 
 
-def _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size):
-    """Fast path: persistent_matmul per group with shared selector."""
-    selector = _cached_homogeneous_selector(
-        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype,
-    )
-    for i in range(group_size):
-        persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
+def _homogeneous_bmm_dispatch(group_a, group_b):
+    """Fast path for homogeneous groups: single batched GEMM launch."""
+    A_batch = torch.stack(group_a)  # [G, M, K]
+    B_batch = torch.stack(group_b)  # [G, K, N]
+    C_batch = torch.bmm(A_batch, B_batch)  # [G, M, N]
+    return list(C_batch.unbind(0))
 
 
 def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
@@ -125,8 +124,9 @@ def grouped_gemm(
         group_shapes.append((A.shape[0], B.shape[1], A.shape[1]))
 
     if _is_homogeneous(group_shapes):
-        m, n, k = group_shapes[0]
-        _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size)
+        results = _homogeneous_bmm_dispatch(group_a, group_b)
+        for i in range(group_size):
+            group_c[i].copy_(results[i])
     else:
         if BLK_M is None or BLK_N is None or BLK_K is None:
             BLK_M, BLK_N, BLK_K = _cached_grouped_config(

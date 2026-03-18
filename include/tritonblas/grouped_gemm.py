@@ -36,53 +36,76 @@ def _is_homogeneous(group_shapes):
     return all(s == group_shapes[0] for s in group_shapes)
 
 
+def _homogeneous_per_group_dispatch(group_a, group_b, group_c, m, n, k, group_size):
+    """Per-group cached dispatch for small group counts (G<4)."""
+    selector = _cached_homogeneous_selector(
+        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype,
+    )
+    for i in range(group_size):
+        persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
+
+
 def _homogeneous_bmm_dispatch(group_a, group_b):
-    """Fast path for homogeneous groups: single batched GEMM launch."""
+    """Fast path for homogeneous groups (G>=4): single batched GEMM launch."""
     A_batch = torch.stack(group_a)  # [G, M, K]
     B_batch = torch.stack(group_b)  # [G, K, N]
     C_batch = torch.bmm(A_batch, B_batch)  # [G, M, N]
     return list(C_batch.unbind(0))
 
 
+_NUM_XCDS = 8
+_GROUP_SIZE_M = int(math.ceil(math.sqrt(MAX_SMS / _NUM_XCDS)))
+
+
 def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
                              BLK_M, BLK_N, BLK_K, triton_dtype):
     """Single-kernel dispatch for heterogeneous groups."""
-    # Check if ALL groups have K divisible by BLK_K
     even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
 
-    a_addrs = [a.data_ptr() for a in group_a]
-    b_addrs = [b.data_ptr() for b in group_b]
-    c_addrs = [c.data_ptr() for c in group_c]
-    g_sizes, g_lds = [], []
-    for i, (m, n, k) in enumerate(group_shapes):
-        g_sizes.extend([m, n, k])
-        g_lds.extend([group_a[i].stride(0), group_a[i].stride(1),
-                       group_b[i].stride(0), group_b[i].stride(1),
-                       group_c[i].stride(0), group_c[i].stride(1)])
+    # Build all metadata arrays in single passes
+    g_sizes = []
+    g_lds = []
+    a_addrs = []
+    b_addrs = []
+    c_addrs = []
+    cumulative = 0
+    gemm_offsets = [0]
+    ceil_m = math.ceil
+    for i in range(group_size):
+        m, n, k = group_shapes[i]
+        a, b, c = group_a[i], group_b[i], group_c[i]
+        a_addrs.append(a.data_ptr())
+        b_addrs.append(b.data_ptr())
+        c_addrs.append(c.data_ptr())
+        g_sizes.append(m)
+        g_sizes.append(n)
+        g_sizes.append(k)
+        g_lds.append(a.stride(0))
+        g_lds.append(a.stride(1))
+        g_lds.append(b.stride(0))
+        g_lds.append(b.stride(1))
+        g_lds.append(c.stride(0))
+        g_lds.append(c.stride(1))
+        cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
+        gemm_offsets.append(cumulative)
 
     d_a_ptrs = torch.tensor(a_addrs, device="cuda", dtype=torch.int64)
     d_b_ptrs = torch.tensor(b_addrs, device="cuda", dtype=torch.int64)
     d_c_ptrs = torch.tensor(c_addrs, device="cuda", dtype=torch.int64)
     d_g_sizes = torch.tensor(g_sizes, device="cuda", dtype=torch.int32)
     d_g_lds = torch.tensor(g_lds, device="cuda", dtype=torch.int32)
-
-    gemm_offsets = [0]
-    for m, n, k in group_shapes:
-        gemm_offsets.append(gemm_offsets[-1] + math.ceil(m / BLK_M) * math.ceil(n / BLK_N))
     d_gemm_offsets = torch.tensor(gemm_offsets, dtype=torch.int32, device="cuda")
 
-    num_xcds = 8
-    group_size_m = int(math.ceil(math.sqrt(MAX_SMS / num_xcds)))
-    total_output_tiles = gemm_offsets[-1]
-    chunk_size = max(1, min(group_size_m * group_size_m, total_output_tiles // num_xcds))
+    total_output_tiles = cumulative
+    chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, total_output_tiles // _NUM_XCDS))
 
     grouped_persistent_matmul[(MAX_SMS,)](
         d_a_ptrs, d_b_ptrs, d_c_ptrs,
         d_g_sizes, d_gemm_offsets, d_g_lds,
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=group_size_m,
+        GROUP_SIZE_M=_GROUP_SIZE_M,
         GROUP_COUNT=group_size,
-        NUM_SMS=MAX_SMS, NUM_XCDS=num_xcds, CHUNK_SIZE=chunk_size,
+        NUM_SMS=MAX_SMS, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
         EVEN_K=even_k,
         num_stages=2, num_warps=8,
@@ -124,9 +147,13 @@ def grouped_gemm(
         group_shapes.append((A.shape[0], B.shape[1], A.shape[1]))
 
     if _is_homogeneous(group_shapes):
-        results = _homogeneous_bmm_dispatch(group_a, group_b)
-        for i in range(group_size):
-            group_c[i].copy_(results[i])
+        m, n, k = group_shapes[0]
+        if group_size >= 4:
+            results = _homogeneous_bmm_dispatch(group_a, group_b)
+            for i in range(group_size):
+                group_c[i].copy_(results[i])
+        else:
+            _homogeneous_per_group_dispatch(group_a, group_b, group_c, m, n, k, group_size)
     else:
         if BLK_M is None or BLK_N is None or BLK_K is None:
             BLK_M, BLK_N, BLK_K = _cached_grouped_config(

@@ -22,15 +22,12 @@ def grouped_persistent_matmul(
     CHUNK_SIZE: tl.constexpr,
     MATMUL_DTYPE: tl.constexpr,
     EVEN_K: tl.constexpr,
-    CONTIG: tl.constexpr = False,
 ):
     """Persistent grouped GEMM kernel for heterogeneous groups.
 
     Flat iteration over all output tiles across all groups. Each tile
     finds its group via a scan of gemm_offsets. GROUP_COUNT is constexpr
-    for compiler unrolling. When CONTIG=True, assumes row-major contiguous
-    inputs and derives strides from shapes (stride_am=K, stride_bk=N,
-    stride_cm=N), saving 3 global loads per tile.
+    for compiler unrolling. Assumes row-major contiguous inputs.
     """
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -56,15 +53,9 @@ def grouped_persistent_matmul(
         B = tl.load(group_b_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
         C = tl.load(group_c_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
 
-        if CONTIG:
-            # Row-major contiguous: stride_am=K, stride_bk=N, stride_cm=N
-            stride_am = K
-            stride_bk = N
-            stride_cm = N
-        else:
-            stride_am = tl.load(g_lds + g * 6)
-            stride_bk = tl.load(g_lds + g * 6 + 2)
-            stride_cm = tl.load(g_lds + g * 6 + 4)
+        stride_am = tl.load(g_lds + g * 6)
+        stride_bk = tl.load(g_lds + g * 6 + 2)
+        stride_cm = tl.load(g_lds + g * 6 + 4)
 
         tl.assume(stride_am > 0)
         tl.assume(stride_bk > 0)

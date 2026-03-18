@@ -62,13 +62,20 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     """Single-kernel dispatch for heterogeneous groups."""
     even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
 
-    # Build all metadata in a single pass, pack into 2 transfers (int64 + int32)
-    # Pointers: [a0..aG | b0..bG | c0..cG] → 3*G int64 values (contiguous blocks)
+    # Check if all tensors are row-major contiguous (inner stride = 1)
+    contig = all(
+        group_a[i].stride(1) == 1 and group_b[i].stride(1) == 1 and group_c[i].stride(1) == 1
+        for i in range(group_size)
+    )
+
     G = group_size
     all_ptrs = [0] * (3 * G)
-    # Int32 metadata: [g_sizes (3*G) | g_lds (6*G) | gemm_offsets (G+1)]
+    # Int32 metadata: [g_sizes (3*G) | g_lds (6*G if not contig) | gemm_offsets (G+1)]
     ofs_lds = 3 * G
-    ofs_gemm = 9 * G
+    if contig:
+        ofs_gemm = ofs_lds  # skip g_lds entirely
+    else:
+        ofs_gemm = 9 * G
     all_i32 = [0] * (ofs_gemm + G + 1)
 
     cumulative = 0
@@ -83,26 +90,28 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         all_i32[j] = m
         all_i32[j + 1] = n
         all_i32[j + 2] = k
-        j = ofs_lds + 6 * i
-        all_i32[j] = a.stride(0)
-        all_i32[j + 1] = a.stride(1)
-        all_i32[j + 2] = b.stride(0)
-        all_i32[j + 3] = b.stride(1)
-        all_i32[j + 4] = c.stride(0)
-        all_i32[j + 5] = c.stride(1)
+        if not contig:
+            j = ofs_lds + 6 * i
+            all_i32[j] = a.stride(0)
+            all_i32[j + 1] = a.stride(1)
+            all_i32[j + 2] = b.stride(0)
+            all_i32[j + 3] = b.stride(1)
+            all_i32[j + 4] = c.stride(0)
+            all_i32[j + 5] = c.stride(1)
         cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
         all_i32[ofs_gemm + i + 1] = cumulative
 
-    # 2 CPU→GPU transfers instead of 6
     d_ptrs = torch.tensor(all_ptrs, device="cuda", dtype=torch.int64)
     d_i32 = torch.tensor(all_i32, device="cuda", dtype=torch.int32)
 
-    # Slices are already contiguous (sequential layout)
     d_a_ptrs = d_ptrs[:G]
     d_b_ptrs = d_ptrs[G:2 * G]
     d_c_ptrs = d_ptrs[2 * G:]
     d_g_sizes = d_i32[:ofs_lds]
-    d_g_lds = d_i32[ofs_lds:ofs_gemm]
+    if contig:
+        d_g_lds = d_g_sizes  # unused when CONTIG=True, pass dummy
+    else:
+        d_g_lds = d_i32[ofs_lds:ofs_gemm]
     d_gemm_offsets = d_i32[ofs_gemm:]
 
     chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, cumulative // _NUM_XCDS))
@@ -116,6 +125,7 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         NUM_SMS=MAX_SMS, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
         EVEN_K=even_k,
+        CONTIG=contig,
         num_stages=2, num_warps=8,
         waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
     )

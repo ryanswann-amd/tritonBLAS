@@ -12,7 +12,6 @@ def grouped_persistent_matmul(
     group_gemm_sizes,
     gemm_offsets,
     g_lds,
-    tile_to_group,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -27,8 +26,8 @@ def grouped_persistent_matmul(
     """Persistent grouped GEMM kernel for heterogeneous groups.
 
     Flat iteration over all output tiles across all groups. Each tile
-    uses an O(1) lookup into tile_to_group to find its group, replacing
-    the previous O(GROUP_COUNT) scan. Assumes row-major contiguous inputs.
+    finds its group via a scan of gemm_offsets. GROUP_COUNT is constexpr
+    for compiler unrolling. Assumes row-major contiguous inputs.
     """
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -37,8 +36,11 @@ def grouped_persistent_matmul(
     total_tiles = tl.load(gemm_offsets + GROUP_COUNT)
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # O(1) group lookup
-        g = tl.load(tile_to_group + tile_id)
+        # Find group (GROUP_COUNT is constexpr → compiler can unroll)
+        g = 0
+        for g_idx in range(GROUP_COUNT):
+            if tile_id >= tl.load(gemm_offsets + g_idx + 1):
+                g = g_idx + 1
 
         g_start = tl.load(gemm_offsets + g)
         tile_in_group = tile_id - g_start

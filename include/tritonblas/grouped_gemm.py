@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 import math
+import functools
 from .internal.grouped_persistent_matmul import grouped_persistent_matmul
 from .origami import GroupedGemmSelector, MatmulHeuristicResult
 from .matmul import persistent_matmul_lt
@@ -17,14 +18,28 @@ _torch_to_triton_dtype = {
 }
 
 
+@functools.lru_cache(maxsize=32)
+def _cached_homogeneous_selector(m, n, k, a_dtype, b_dtype, c_dtype):
+    return MatmulHeuristicResult(m, n, k, a_dtype, b_dtype, c_dtype, streamk=False)
+
+
+@functools.lru_cache(maxsize=32)
+def _cached_grouped_config(group_shapes, in_dtype, out_dtype, device_index):
+    selector = GroupedGemmSelector(
+        list(group_shapes), in_dtype, in_dtype, out_dtype,
+        device_index=device_index,
+    )
+    return selector.get_config()
+
+
 def _is_homogeneous(group_shapes):
     return all(s == group_shapes[0] for s in group_shapes)
 
 
 def _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size):
     """Fast path: persistent_matmul per group with shared selector."""
-    selector = MatmulHeuristicResult(
-        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype, streamk=False,
+    selector = _cached_homogeneous_selector(
+        m, n, k, group_a[0].dtype, group_b[0].dtype, group_c[0].dtype,
     )
     for i in range(group_size):
         persistent_matmul_lt(group_a[i], group_b[i], group_c[i], selector)
@@ -114,11 +129,9 @@ def grouped_gemm(
         _homogeneous_dispatch(group_a, group_b, group_c, m, n, k, group_size)
     else:
         if BLK_M is None or BLK_N is None or BLK_K is None:
-            selector = GroupedGemmSelector(
-                group_shapes, in_dtype, in_dtype, out_dtype,
-                device_index=current_device_index,
+            BLK_M, BLK_N, BLK_K = _cached_grouped_config(
+                tuple(group_shapes), in_dtype, out_dtype, current_device_index,
             )
-            BLK_M, BLK_N, BLK_K = selector.get_config()
 
         triton_dtype = _torch_to_triton_dtype.get(in_dtype)
         if triton_dtype is None:

@@ -62,42 +62,50 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     """Single-kernel dispatch for heterogeneous groups."""
     even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
 
-    # Build all metadata arrays in single passes
-    g_sizes = []
-    g_lds = []
-    a_addrs = []
-    b_addrs = []
-    c_addrs = []
+    # Build all metadata in a single pass, pack into 2 transfers (int64 + int32)
+    # Pointers: [a0..aG | b0..bG | c0..cG] → 3*G int64 values (contiguous blocks)
+    G = group_size
+    all_ptrs = [0] * (3 * G)
+    # Int32 metadata: [g_sizes (3*G) | g_lds (6*G) | gemm_offsets (G+1)]
+    ofs_lds = 3 * G
+    ofs_gemm = 9 * G
+    all_i32 = [0] * (ofs_gemm + G + 1)
+
     cumulative = 0
-    gemm_offsets = [0]
     ceil_m = math.ceil
-    for i in range(group_size):
+    for i in range(G):
         m, n, k = group_shapes[i]
         a, b, c = group_a[i], group_b[i], group_c[i]
-        a_addrs.append(a.data_ptr())
-        b_addrs.append(b.data_ptr())
-        c_addrs.append(c.data_ptr())
-        g_sizes.append(m)
-        g_sizes.append(n)
-        g_sizes.append(k)
-        g_lds.append(a.stride(0))
-        g_lds.append(a.stride(1))
-        g_lds.append(b.stride(0))
-        g_lds.append(b.stride(1))
-        g_lds.append(c.stride(0))
-        g_lds.append(c.stride(1))
+        all_ptrs[i] = a.data_ptr()
+        all_ptrs[G + i] = b.data_ptr()
+        all_ptrs[2 * G + i] = c.data_ptr()
+        j = 3 * i
+        all_i32[j] = m
+        all_i32[j + 1] = n
+        all_i32[j + 2] = k
+        j = ofs_lds + 6 * i
+        all_i32[j] = a.stride(0)
+        all_i32[j + 1] = a.stride(1)
+        all_i32[j + 2] = b.stride(0)
+        all_i32[j + 3] = b.stride(1)
+        all_i32[j + 4] = c.stride(0)
+        all_i32[j + 5] = c.stride(1)
         cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
-        gemm_offsets.append(cumulative)
+        all_i32[ofs_gemm + i + 1] = cumulative
 
-    d_a_ptrs = torch.tensor(a_addrs, device="cuda", dtype=torch.int64)
-    d_b_ptrs = torch.tensor(b_addrs, device="cuda", dtype=torch.int64)
-    d_c_ptrs = torch.tensor(c_addrs, device="cuda", dtype=torch.int64)
-    d_g_sizes = torch.tensor(g_sizes, device="cuda", dtype=torch.int32)
-    d_g_lds = torch.tensor(g_lds, device="cuda", dtype=torch.int32)
-    d_gemm_offsets = torch.tensor(gemm_offsets, dtype=torch.int32, device="cuda")
+    # 2 CPU→GPU transfers instead of 6
+    d_ptrs = torch.tensor(all_ptrs, device="cuda", dtype=torch.int64)
+    d_i32 = torch.tensor(all_i32, device="cuda", dtype=torch.int32)
 
-    total_output_tiles = cumulative
-    chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, total_output_tiles // _NUM_XCDS))
+    # Slices are already contiguous (sequential layout)
+    d_a_ptrs = d_ptrs[:G]
+    d_b_ptrs = d_ptrs[G:2 * G]
+    d_c_ptrs = d_ptrs[2 * G:]
+    d_g_sizes = d_i32[:ofs_lds]
+    d_g_lds = d_i32[ofs_lds:ofs_gemm]
+    d_gemm_offsets = d_i32[ofs_gemm:]
+
+    chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, cumulative // _NUM_XCDS))
 
     grouped_persistent_matmul[(MAX_SMS,)](
         d_a_ptrs, d_b_ptrs, d_c_ptrs,

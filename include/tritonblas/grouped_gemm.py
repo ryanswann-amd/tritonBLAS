@@ -93,21 +93,21 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
         all_i32[ofs_gemm + i + 1] = cumulative
 
-    # Build tile_to_group mapping (O(1) lookup in kernel)
+    # Build tile_to_group mapping appended to all_i32 (avoids extra transfer)
     total_tiles = cumulative
-    tile_to_group_host = [0] * total_tiles
+    ofs_ttg = len(all_i32)
+    all_i32.extend([0] * total_tiles)
     offset = 0
     for g_idx in range(G):
         m, n, k = group_shapes[g_idx]
         tiles = ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
         for t in range(tiles):
-            tile_to_group_host[offset + t] = g_idx
+            all_i32[ofs_ttg + offset + t] = g_idx
         offset += tiles
 
-    # 3 CPU→GPU transfers: int64 pointers, int32 metadata, int32 tile map
+    # 2 CPU→GPU transfers: int64 pointers, int32 metadata+tile_map
     d_ptrs = torch.tensor(all_ptrs, device="cuda", dtype=torch.int64)
     d_i32 = torch.tensor(all_i32, device="cuda", dtype=torch.int32)
-    d_tile_to_group = torch.tensor(tile_to_group_host, device="cuda", dtype=torch.int32)
 
     # Slices are already contiguous (sequential layout)
     d_a_ptrs = d_ptrs[:G]
@@ -115,7 +115,8 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     d_c_ptrs = d_ptrs[2 * G:]
     d_g_sizes = d_i32[:ofs_lds]
     d_g_lds = d_i32[ofs_lds:ofs_gemm]
-    d_gemm_offsets = d_i32[ofs_gemm:]
+    d_gemm_offsets = d_i32[ofs_gemm:ofs_gemm + G + 1]
+    d_tile_to_group = d_i32[ofs_ttg:]
 
     chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, total_tiles // _NUM_XCDS))
 

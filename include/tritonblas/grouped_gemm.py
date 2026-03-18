@@ -53,23 +53,6 @@ def _homogeneous_bmm_dispatch(group_a, group_b):
     return list(C_batch.unbind(0))
 
 
-def _padded_bmm_dispatch(group_a, group_b):
-    """Pad to max_M and use single bmm -- trades compute for fewer launches."""
-    G = len(group_a)
-    K = group_a[0].shape[1]
-    N = group_b[0].shape[1]
-    max_M = max(a.shape[0] for a in group_a)
-
-    A_batch = torch.zeros(G, max_M, K, dtype=group_a[0].dtype, device=group_a[0].device)
-    B_batch = torch.stack(group_b)
-    for i, a in enumerate(group_a):
-        A_batch[i, :a.shape[0], :] = a
-
-    C_batch = torch.bmm(A_batch, B_batch)
-
-    return [C_batch[i, :group_a[i].shape[0], :].contiguous() for i in range(G)]
-
-
 _NUM_XCDS = 8
 _GROUP_SIZE_M = int(math.ceil(math.sqrt(MAX_SMS / _NUM_XCDS)))
 
@@ -180,27 +163,16 @@ def grouped_gemm(
         else:
             _homogeneous_per_group_dispatch(group_a, group_b, group_c, m, n, k, group_size)
     else:
-        # Check if padded bmm is viable: all groups share K,N and padding waste < 2x
-        Ms = [s[0] for s in group_shapes]
-        Ks = set(s[2] for s in group_shapes)
-        Ns = set(s[1] for s in group_shapes)
-        max_M = max(Ms)
-        avg_M = sum(Ms) / len(Ms)
-        if len(Ks) == 1 and len(Ns) == 1 and max_M / avg_M < 2.0:
-            results = _padded_bmm_dispatch(group_a, group_b)
-            for i in range(group_size):
-                group_c[i].copy_(results[i])
-        else:
-            if BLK_M is None or BLK_N is None or BLK_K is None:
-                BLK_M, BLK_N, BLK_K = _cached_grouped_config(
-                    tuple(group_shapes), in_dtype, out_dtype, current_device_index,
-                )
+        if BLK_M is None or BLK_N is None or BLK_K is None:
+            BLK_M, BLK_N, BLK_K = _cached_grouped_config(
+                tuple(group_shapes), in_dtype, out_dtype, current_device_index,
+            )
 
-            triton_dtype = _torch_to_triton_dtype.get(in_dtype)
-            if triton_dtype is None:
-                raise ValueError(f"Unsupported dtype: {in_dtype}")
+        triton_dtype = _torch_to_triton_dtype.get(in_dtype)
+        if triton_dtype is None:
+            raise ValueError(f"Unsupported dtype: {in_dtype}")
 
-            _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes,
-                                    group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
+        _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes,
+                                group_size, BLK_M, BLK_N, BLK_K, triton_dtype)
 
     return group_c

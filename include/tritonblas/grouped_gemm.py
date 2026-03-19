@@ -61,6 +61,8 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
                              BLK_M, BLK_N, BLK_K, triton_dtype):
     """Single-kernel dispatch for heterogeneous groups."""
     even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
+    even_m = all(m % BLK_M == 0 for m, _, _ in group_shapes)
+    even_n = all(n % BLK_N == 0 for _, n, _ in group_shapes)
 
     # Build all metadata in a single pass, pack into 2 transfers (int64 + int32)
     # Pointers: [a0..aG | b0..bG | c0..cG] → 3*G int64 values (contiguous blocks)
@@ -116,6 +118,8 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         NUM_SMS=MAX_SMS, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
         EVEN_K=even_k,
+        EVEN_M=even_m,
+        EVEN_N=even_n,
         num_stages=2, num_warps=8,
         waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
     )

@@ -22,6 +22,8 @@ def grouped_persistent_matmul(
     CHUNK_SIZE: tl.constexpr,
     MATMUL_DTYPE: tl.constexpr,
     EVEN_K: tl.constexpr,
+    EVEN_M: tl.constexpr,
+    EVEN_N: tl.constexpr,
 ):
     """Persistent grouped GEMM kernel for heterogeneous groups.
 
@@ -74,9 +76,16 @@ def grouped_persistent_matmul(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        # Modulo wrapping (no masking on loads)
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        # Conditional modulo wrapping: EVEN_M/EVEN_N constexpr eliminates
+        # Barrett reduction (15 VALU) when M/N are multiples of BLOCK_SIZE.
+        if EVEN_M:
+            rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        else:
+            rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        if EVEN_N:
+            rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        else:
+            rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)

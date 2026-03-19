@@ -779,9 +779,8 @@ _WEIRD_EDGE_PARAMS = [
     pytest.param([(1, 1, 1)] * 4, id="M1_K1_N1_G4"),
     # Extreme K with tiny M/N
     pytest.param([(1, 1, 16384)] * 2, id="M1_K16384_N1_G2"),
-    # Very tall, K=1 — kernel returns all zeros (known bug: M=65536 with K=1,N=1)
-    pytest.param([(65536, 1, 1)], id="M65536_K1_N1_G1",
-                 marks=pytest.mark.xfail(reason="kernel produces zeros for M=65536,K=1,N=1")),
+    # Very tall, K=1
+    pytest.param([(65536, 1, 1)], id="M65536_K1_N1_G1"),
     # Single element GEMM
     pytest.param([(1, 1, 1)], id="single_element_G1"),
     # 128 groups of single-row GEMM
@@ -938,3 +937,47 @@ class TestNumericalStability:
             results[0], ref, atol=1e-6, rtol=FP16_RTOL,
             msg="Small values underflow test failed",
         )
+
+
+# ---------------------------------------------------------------------------
+# 24. Variable K and N per group — true heterogeneous grouped GEMM
+# ---------------------------------------------------------------------------
+
+_VARIABLE_KN_PARAMS = [
+    pytest.param(
+        [(256, 512, 128), (512, 256, 64), (128, 128, 256), (64, 1024, 512)],
+        id="4groups_varied",
+    ),
+    pytest.param(
+        [(1024, 2048, 512), (512, 1024, 1024)],
+        id="2groups_large",
+    ),
+    pytest.param(
+        [(100, 200, 300), (200, 300, 100), (300, 100, 200)],
+        id="3groups_non_pow2",
+    ),
+    pytest.param(
+        [(1, 1, 1), (2, 3, 4), (5, 6, 7)],
+        id="3groups_tiny",
+    ),
+    pytest.param(
+        [(4096, 128, 256), (128, 4096, 128)],
+        id="2groups_skewed_K",
+    ),
+    pytest.param(
+        [(64, 64, 64), (128, 128, 128), (256, 256, 256), (512, 512, 512)],
+        id="4groups_doubling",
+    ),
+    pytest.param(
+        [(1024, 1, 1024), (1024, 1024, 1)],
+        id="2groups_extreme_KN_ratio",
+    ),
+]
+
+
+class TestVariableKN:
+    """True grouped GEMM: M, K, and N all vary per group."""
+
+    @pytest.mark.parametrize("shapes", _VARIABLE_KN_PARAMS)
+    def test_variable_kn(self, shapes):
+        _run_and_check(shapes)

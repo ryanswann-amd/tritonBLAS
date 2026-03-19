@@ -62,23 +62,10 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     """Single-kernel dispatch for heterogeneous groups."""
     even_k = all(k % BLK_K == 0 for _, _, k in group_shapes)
 
+    # Build all metadata in a single pass, pack into 2 transfers (int64 + int32)
+    # Pointers: [a0..aG | b0..bG | c0..cG] → 3*G int64 values (contiguous blocks)
     G = group_size
-    device = group_a[0].device
-    out_dtype = group_c[0].dtype
-
-    # Contiguous output buffer for vectorized stores (base+offset pattern)
-    # Allocate a flat buffer large enough for all groups' outputs
-    total_c_elems = sum(m * n for m, n, _ in group_shapes)
-    C_concat = torch.empty(total_c_elems, dtype=out_dtype, device=device)
-    c_offsets_list = []
-    c_elem_offset = 0
-    for i in range(G):
-        m, n, _ = group_shapes[i]
-        c_offsets_list.append(c_elem_offset)  # element offset
-        c_elem_offset += m * n
-
-    # Build metadata: pointers [a0..aG | b0..bG] and int32 metadata
-    all_ptrs = [0] * (2 * G)
+    all_ptrs = [0] * (3 * G)
     # Int32 metadata: [g_sizes (3*G) | g_lds (6*G) | gemm_offsets (G+1)]
     ofs_lds = 3 * G
     ofs_gemm = 9 * G
@@ -88,9 +75,10 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     ceil_m = math.ceil
     for i in range(G):
         m, n, k = group_shapes[i]
-        a, b = group_a[i], group_b[i]
+        a, b, c = group_a[i], group_b[i], group_c[i]
         all_ptrs[i] = a.data_ptr()
         all_ptrs[G + i] = b.data_ptr()
+        all_ptrs[2 * G + i] = c.data_ptr()
         j = 3 * i
         all_i32[j] = m
         all_i32[j + 1] = n
@@ -100,17 +88,19 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         all_i32[j + 1] = a.stride(1)
         all_i32[j + 2] = b.stride(0)
         all_i32[j + 3] = b.stride(1)
-        all_i32[j + 4] = n   # stride_cm = N (row-major within each group's block)
-        all_i32[j + 5] = 1   # stride_cn = 1 (contiguous columns)
+        all_i32[j + 4] = c.stride(0)
+        all_i32[j + 5] = c.stride(1)
         cumulative += ceil_m(m / BLK_M) * ceil_m(n / BLK_N)
         all_i32[ofs_gemm + i + 1] = cumulative
 
+    # 2 CPU→GPU transfers instead of 6
     d_ptrs = torch.tensor(all_ptrs, device="cuda", dtype=torch.int64)
     d_i32 = torch.tensor(all_i32, device="cuda", dtype=torch.int32)
-    d_c_offsets = torch.tensor(c_offsets_list, device="cuda", dtype=torch.int64)
 
+    # Slices are already contiguous (sequential layout)
     d_a_ptrs = d_ptrs[:G]
     d_b_ptrs = d_ptrs[G:2 * G]
+    d_c_ptrs = d_ptrs[2 * G:]
     d_g_sizes = d_i32[:ofs_lds]
     d_g_lds = d_i32[ofs_lds:ofs_gemm]
     d_gemm_offsets = d_i32[ofs_gemm:]
@@ -118,7 +108,7 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, cumulative // _NUM_XCDS))
 
     grouped_persistent_matmul[(MAX_SMS,)](
-        d_a_ptrs, d_b_ptrs, C_concat, d_c_offsets,
+        d_a_ptrs, d_b_ptrs, d_c_ptrs,
         d_g_sizes, d_gemm_offsets, d_g_lds,
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=_GROUP_SIZE_M,
@@ -129,13 +119,6 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         num_stages=2, num_warps=8,
         waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
     )
-
-    # Copy results back to caller's output tensors from flat buffer
-    elem_offset = 0
-    for i in range(G):
-        m, n, _ = group_shapes[i]
-        group_c[i].copy_(C_concat[elem_offset:elem_offset + m * n].view(m, n))
-        elem_offset += m * n
 
 
 def grouped_gemm(

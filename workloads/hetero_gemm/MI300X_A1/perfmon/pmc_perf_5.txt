@@ -1,5 +1,0 @@
-pmc: SQ_WAVES_SAVED SQ_WAVE_CYCLES
-
-gpu:
-range:
-kernel:

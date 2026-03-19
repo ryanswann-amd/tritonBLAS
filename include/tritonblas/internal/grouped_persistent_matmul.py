@@ -8,8 +8,7 @@ from .pid_transforms import chiplet_transform_chunked
 def grouped_persistent_matmul(
     group_a_ptrs,
     group_b_ptrs,
-    c_base,
-    c_offsets,
+    group_c_ptrs,
     group_gemm_sizes,
     gemm_offsets,
     g_lds,
@@ -52,8 +51,7 @@ def grouped_persistent_matmul(
 
         A = tl.load(group_a_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
         B = tl.load(group_b_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
-        c_offset = tl.load(c_offsets + g)
-        C = (c_base + c_offset).to(tl.pointer_type(MATMUL_DTYPE))
+        C = tl.load(group_c_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
 
         stride_am = tl.load(g_lds + g * 6)
         stride_bk = tl.load(g_lds + g * 6 + 2)

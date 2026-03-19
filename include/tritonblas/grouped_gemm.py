@@ -168,9 +168,9 @@ def grouped_gemm(
             _homogeneous_per_group_dispatch(group_a, group_b, group_c, m, n, k, group_size)
     else:
         if BLK_M is None or BLK_N is None or BLK_K is None:
-            # Sweep-optimized tile for heterogeneous fused kernel
-            # 128x256x64 beats origami's selection by ~11% (iter 18)
-            BLK_M, BLK_N, BLK_K = 128, 256, 64
+            BLK_M, BLK_N, BLK_K = _cached_grouped_config(
+                tuple(group_shapes), in_dtype, out_dtype, current_device_index,
+            )
 
         triton_dtype = _torch_to_triton_dtype.get(in_dtype)
         if triton_dtype is None:

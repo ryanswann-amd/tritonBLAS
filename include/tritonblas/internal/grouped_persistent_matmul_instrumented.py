@@ -1,18 +1,49 @@
+"""Instrumented grouped persistent GEMM kernel with s_memrealtime timing probes.
+
+This is a separate copy of grouped_persistent_matmul.py with cycle-accurate
+timing instrumentation.  The original kernel is NOT modified.
+
+Timing probes use s_memrealtime (CDNA3 / gfx942) via tl.inline_asm_elementwise.
+Each SM writes 7 int64 deltas for its first tile into a timing buffer:
+  [group_search, metadata_load, tile_setup, k_loop, store_epilogue, total, total_with_loop]
+"""
+
 import triton
 import triton.language as tl
 
 from .pid_transforms import chiplet_transform_chunked
 
 
+# ---------------------------------------------------------------------------
+# Helper: read the GPU 64-bit memory-realtime counter
+# ---------------------------------------------------------------------------
+@triton.jit
+def _read_clock() -> tl.int64:
+    """Read s_memrealtime after draining all pending memory/compute ops.
+
+    s_waitcnt 0 ensures every prior load/store/MFMA has retired so the
+    timestamp is not speculative.  The result is a scalar 64-bit cycle count.
+    """
+    return tl.inline_asm_elementwise(
+        "s_waitcnt 0\n"
+        "s_memrealtime $0",
+        "=s",
+        [],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+
+
 @triton.jit()
-def grouped_persistent_matmul(
+def grouped_persistent_matmul_instrumented(
     group_a_ptrs,
     group_b_ptrs,
-    c_base,
-    c_offsets,
+    group_c_ptrs,
     group_gemm_sizes,
     gemm_offsets,
     g_lds,
+    timing_buf,  # int64 pointer, shape [NUM_SMS, 7]
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -24,24 +55,28 @@ def grouped_persistent_matmul(
     MATMUL_DTYPE: tl.constexpr,
     EVEN_K: tl.constexpr,
 ):
-    """Persistent grouped GEMM kernel for heterogeneous groups.
-
-    Flat iteration over all output tiles across all groups. Each tile
-    finds its group via a scan of gemm_offsets. GROUP_COUNT is constexpr
-    for compiler unrolling. Assumes row-major contiguous inputs.
-    """
+    """Persistent grouped GEMM kernel — instrumented with s_memrealtime probes."""
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
 
+    # ── t0: kernel entry ──────────────────────────────────────────────
+    t0 = _read_clock()
+
     total_tiles = tl.load(gemm_offsets + GROUP_COUNT)
 
+    # We only record timing for the *first* tile this SM processes
+    first_tile = True
+
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # Find group (GROUP_COUNT is constexpr → compiler can unroll)
+        # ── Group search ──────────────────────────────────────────────
         g = 0
         for g_idx in range(GROUP_COUNT):
             if tile_id >= tl.load(gemm_offsets + g_idx + 1):
                 g = g_idx + 1
+
+        # ── t1: after group search ────────────────────────────────────
+        t1 = _read_clock()
 
         g_start = tl.load(gemm_offsets + g)
         tile_in_group = tile_id - g_start
@@ -52,8 +87,7 @@ def grouped_persistent_matmul(
 
         A = tl.load(group_a_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
         B = tl.load(group_b_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
-        c_offset = tl.load(c_offsets + g)
-        C = (c_base + c_offset).to(tl.pointer_type(MATMUL_DTYPE))
+        C = tl.load(group_c_ptrs + g).to(tl.pointer_type(MATMUL_DTYPE))
 
         stride_am = tl.load(g_lds + g * 6)
         stride_bk = tl.load(g_lds + g * 6 + 2)
@@ -62,6 +96,9 @@ def grouped_persistent_matmul(
         tl.assume(stride_am > 0)
         tl.assume(stride_bk > 0)
         tl.assume(stride_cm > 0)
+
+        # ── t2: after metadata loads ──────────────────────────────────
+        t2 = _read_clock()
 
         num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
         num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -87,12 +124,12 @@ def grouped_persistent_matmul(
         A_BASE = A + rm[:, None] * stride_am + rk[None, :]
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :]
 
+        # ── t3: after tile index computation & pointer setup ──────────
+        t3 = _read_clock()
+
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
         # K-loop with vectorized loads
-        # max_contiguous + multiple_of on both A and B enable dwordx4 global loads:
-        # - A[M,K]: K is contiguous (stride=1) → (1, BLOCK_SIZE_K) contiguity hint
-        # - B[K,N]: N is contiguous (stride=1) → (1, BLOCK_SIZE_N) contiguity hint
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
             loop_k -= 1
@@ -104,8 +141,7 @@ def grouped_persistent_matmul(
             A_BASE += BLOCK_SIZE_K
             B_BASE += BLOCK_SIZE_K * stride_bk
 
-        # Remainder K-block (only when K not divisible by BLOCK_SIZE_K)
-        # Separated from main loop to preserve vectorization quality
+        # Remainder K-block
         if not EVEN_K:
             rk_last = loop_k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             A_LAST = A + rm[:, None] * stride_am + rk_last[None, :]
@@ -114,6 +150,9 @@ def grouped_persistent_matmul(
             a = tl.load(A_LAST, mask=k_mask[None, :], other=0.0)
             b = tl.load(B_LAST, mask=k_mask[:, None], other=0.0)
             acc += tl.dot(a, b)
+
+        # ── t4: after K-loop ─────────────────────────────────────────
+        t4 = _read_clock()
 
         c = acc.to(C.type.element_ty)
 
@@ -125,3 +164,20 @@ def grouped_persistent_matmul(
         rn_store = tl.max_contiguous(tl.multiple_of(rn_store % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
         C_ = C + rm_store[:, None] * stride_cm + rn_store[None, :]
         tl.store(C_, c, mask=c_mask)
+
+        # ── t5: after output store ────────────────────────────────────
+        t5 = _read_clock()
+
+        # ── Write timing deltas for the first tile processed by this SM ──
+        if first_tile:
+            # ── t6: capture loop overhead while still in the first-tile branch
+            t6 = _read_clock()
+            base = pid * 7
+            tl.store(timing_buf + base + 0, t1 - t0)   # group search
+            tl.store(timing_buf + base + 1, t2 - t1)   # metadata load
+            tl.store(timing_buf + base + 2, t3 - t2)   # tile setup
+            tl.store(timing_buf + base + 3, t4 - t3)   # K-loop compute
+            tl.store(timing_buf + base + 4, t5 - t4)   # store epilogue
+            tl.store(timing_buf + base + 5, t5 - t0)   # total (entry → store done)
+            tl.store(timing_buf + base + 6, t6 - t0)   # total including loop overhead
+            first_tile = False

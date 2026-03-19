@@ -116,8 +116,8 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
         NUM_SMS=MAX_SMS, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
         EVEN_K=even_k,
-        num_stages=2, num_warps=4,
-        waves_per_eu=2, matrix_instr_nonkdim=16, kpack=1,
+        num_stages=2, num_warps=8,
+        waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
     )
 
 

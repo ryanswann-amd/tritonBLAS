@@ -115,11 +115,18 @@ def grouped_persistent_matmul(
 
         c = acc.to(C.type.element_ty)
 
-        # Store with boundary masking
+        # Store: skip boundary mask for interior tiles (all elements valid)
         rm_store = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rn_store = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        c_mask = (rm_store[:, None] < M) & (rn_store[None, :] < N)
-        rm_store = tl.max_contiguous(tl.multiple_of(rm_store % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn_store = tl.max_contiguous(tl.multiple_of(rn_store % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        C_ = C + rm_store[:, None] * stride_cm + rn_store[None, :]
-        tl.store(C_, c, mask=c_mask)
+        is_interior = ((pid_m + 1) * BLOCK_SIZE_M <= M) & ((pid_n + 1) * BLOCK_SIZE_N <= N)
+        if is_interior:
+            rm_idx = tl.max_contiguous(tl.multiple_of(rm_store, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn_idx = tl.max_contiguous(tl.multiple_of(rn_store, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            C_ = C + rm_idx[:, None] * stride_cm + rn_idx[None, :]
+            tl.store(C_, c)
+        else:
+            c_mask = (rm_store[:, None] < M) & (rn_store[None, :] < N)
+            rm_idx = tl.max_contiguous(tl.multiple_of(rm_store % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn_idx = tl.max_contiguous(tl.multiple_of(rn_store % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            C_ = C + rm_idx[:, None] * stride_cm + rn_idx[None, :]
+            tl.store(C_, c, mask=c_mask)

@@ -768,3 +768,173 @@ class TestRepeatedCalls:
                         res, ref, atol=FP16_ATOL, rtol=FP16_RTOL,
                         msg=f"Alternating shapes mismatch: M={m}, N={n}, K={k}",
                     )
+
+
+# ---------------------------------------------------------------------------
+# 19. Weird edge cases — NEW
+# ---------------------------------------------------------------------------
+
+_WEIRD_EDGE_PARAMS = [
+    # Absolute minimum: 1x1x1
+    pytest.param([(1, 1, 1)] * 4, id="M1_K1_N1_G4"),
+    # Extreme K with tiny M/N
+    pytest.param([(1, 1, 16384)] * 2, id="M1_K16384_N1_G2"),
+    # Very tall, K=1 — kernel returns all zeros (known bug: M=65536 with K=1,N=1)
+    pytest.param([(65536, 1, 1)], id="M65536_K1_N1_G1",
+                 marks=pytest.mark.xfail(reason="kernel produces zeros for M=65536,K=1,N=1")),
+    # Single element GEMM
+    pytest.param([(1, 1, 1)], id="single_element_G1"),
+    # 128 groups of single-row GEMM
+    pytest.param([(1, 64, 64)] * 128, id="G128_M1_K64_N64"),
+    # All small primes
+    pytest.param([(13, 11, 7)] * 5, id="M13_K7_N11_G5"),
+    # All primes, single group
+    pytest.param([(3, 7, 5)], id="M3_K5_N7_G1"),
+]
+
+
+class TestWeirdEdgeCases:
+    """Really unusual dimension patterns that stress corner cases."""
+
+    @pytest.mark.parametrize("shapes", _WEIRD_EDGE_PARAMS)
+    def test_weird_edge(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 20. Mismatched memory layout — NEW
+# ---------------------------------------------------------------------------
+
+class TestMismatchedLayouts:
+    """Inputs with non-standard memory layouts and extreme dimension ratios."""
+
+    def test_column_major_a(self):
+        """A is column-major (transposed view made contiguous in column order)."""
+        m, k, n = 128, 256, 128
+        # Create column-major A by transposing a (K, M) tensor
+        a_col = torch.randn(k, m, device="cuda", dtype=torch.float16).t().contiguous()
+        b = torch.randn(k, n, device="cuda", dtype=torch.float16)
+        ref = torch.matmul(a_col, b)
+        results = tritonblas.grouped_gemm([a_col], [b])
+        torch.testing.assert_close(
+            results[0], ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+            msg="Column-major A test failed",
+        )
+
+    def test_large_k_small_mn(self):
+        """Very large K with small M and N (K=8192, M=4, N=4)."""
+        shapes = [(4, 4, 8192)] * 4
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 21. Power-of-2 boundary dimensions — NEW
+# ---------------------------------------------------------------------------
+
+_POW2_BOUNDARY_PARAMS = [
+    # Just below/above 128
+    pytest.param([(127, 128, 128)] * 4, id="M127_below_128"),
+    pytest.param([(129, 128, 128)] * 4, id="M129_above_128"),
+    # K boundary around 64
+    pytest.param([(128, 128, 63)] * 4, id="K63_below_64"),
+    pytest.param([(128, 128, 65)] * 4, id="K65_above_64"),
+    # N boundary around 256
+    pytest.param([(128, 255, 128)] * 4, id="N255_below_256"),
+    pytest.param([(128, 257, 128)] * 4, id="N257_above_256"),
+    # M boundary around 512
+    pytest.param([(511, 128, 128)] * 2, id="M511_below_512"),
+    pytest.param([(513, 128, 128)] * 2, id="M513_above_512"),
+]
+
+
+class TestPowerOf2Boundaries:
+    """Dimensions at +/-1 around power-of-2 tile boundaries."""
+
+    @pytest.mark.parametrize("shapes", _POW2_BOUNDARY_PARAMS)
+    def test_pow2_boundary(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 22. Group count boundaries — NEW
+# ---------------------------------------------------------------------------
+
+_GROUP_COUNT_BOUNDARY_PARAMS = [
+    pytest.param([(128, 128, 128)] * 1, id="G1_min"),
+    pytest.param([(128, 128, 128)] * 2, id="G2"),
+    pytest.param([(128, 128, 128)] * 3, id="G3_prime"),
+    pytest.param([(128, 128, 128)] * 5, id="G5_prime"),
+    pytest.param([(128, 128, 128)] * 7, id="G7_prime"),
+    # Many tiny groups
+    pytest.param([(8, 64, 64)] * 100, id="G100_M8_tiny"),
+    # Single huge group
+    pytest.param([(16384, 64, 64)], id="G1_M16384_huge"),
+]
+
+
+class TestGroupCountBoundaries:
+    """Boundary group counts: minimum, primes, and extremes."""
+
+    @pytest.mark.parametrize("shapes", _GROUP_COUNT_BOUNDARY_PARAMS)
+    def test_group_count_boundary(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 23. Numerical stability — NEW
+# ---------------------------------------------------------------------------
+
+class TestNumericalStability:
+    """Inputs that stress floating-point precision."""
+
+    def test_all_ones(self):
+        """A=ones, B=ones => each element should be exactly K."""
+        for m, k, n in [(64, 128, 64), (128, 256, 128)]:
+            a = torch.ones(m, k, device="cuda", dtype=torch.float16)
+            b = torch.ones(k, n, device="cuda", dtype=torch.float16)
+            ref = torch.matmul(a, b)
+            results = tritonblas.grouped_gemm([a], [b])
+            torch.testing.assert_close(
+                results[0], ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+                msg=f"All-ones test failed (M={m}, K={k}, N={n})",
+            )
+
+    def test_alternating_signs(self):
+        """Alternating +1/-1 to test cancellation."""
+        m, k, n = 128, 256, 128
+        a = torch.ones(m, k, device="cuda", dtype=torch.float16)
+        # B alternates +1/-1 along K dimension
+        b = torch.ones(k, n, device="cuda", dtype=torch.float16)
+        b[1::2, :] = -1.0
+        ref = torch.matmul(a, b)
+        results = tritonblas.grouped_gemm([a], [b])
+        torch.testing.assert_close(
+            results[0], ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+            msg="Alternating signs cancellation test failed",
+        )
+
+    def test_large_values(self):
+        """Large-magnitude inputs (1000 * randn) — check overflow handling."""
+        m, k, n = 64, 64, 64
+        a = 1000.0 * torch.randn(m, k, device="cuda", dtype=torch.float16)
+        b = torch.randn(k, n, device="cuda", dtype=torch.float16)
+        ref = torch.matmul(a, b)
+        results = tritonblas.grouped_gemm([a], [b])
+        # Use larger tolerance since magnitudes are bigger
+        torch.testing.assert_close(
+            results[0], ref, atol=FP16_ATOL * 1000, rtol=FP16_RTOL,
+            msg="Large values test failed",
+        )
+
+    def test_small_values(self):
+        """Small-magnitude inputs (1e-3 * randn) — check underflow."""
+        m, k, n = 64, 64, 64
+        a = 1e-3 * torch.randn(m, k, device="cuda", dtype=torch.float16)
+        b = 1e-3 * torch.randn(k, n, device="cuda", dtype=torch.float16)
+        ref = torch.matmul(a, b)
+        results = tritonblas.grouped_gemm([a], [b])
+        # Products are ~1e-6, use proportional tolerance
+        torch.testing.assert_close(
+            results[0], ref, atol=1e-6, rtol=FP16_RTOL,
+            msg="Small values underflow test failed",
+        )

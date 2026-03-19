@@ -107,15 +107,16 @@ def _heterogeneous_dispatch(group_a, group_b, group_c, group_shapes, group_size,
     d_g_lds = d_i32[ofs_lds:ofs_gemm]
     d_gemm_offsets = d_i32[ofs_gemm:]
 
+    grid_size = min(cumulative, MAX_SMS)
     chunk_size = max(1, min(_GROUP_SIZE_M * _GROUP_SIZE_M, cumulative // _NUM_XCDS))
 
-    grouped_persistent_matmul[(MAX_SMS,)](
+    grouped_persistent_matmul[(grid_size,)](
         d_a_ptrs, d_b_ptrs, d_c_ptrs,
         d_g_sizes, d_gemm_offsets, d_g_lds,
         BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=_GROUP_SIZE_M,
         GROUP_COUNT=group_size,
-        NUM_SMS=MAX_SMS, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
+        NUM_SMS=grid_size, NUM_XCDS=_NUM_XCDS, CHUNK_SIZE=chunk_size,
         MATMUL_DTYPE=triton_dtype,
         EVEN_K=even_k,
         EVEN_M=even_m,

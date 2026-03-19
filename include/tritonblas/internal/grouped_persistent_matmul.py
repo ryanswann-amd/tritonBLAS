@@ -116,10 +116,11 @@ def grouped_persistent_matmul(
         c = acc.to(C.type.element_ty)
 
         # Store with boundary masking
+        # No % M / % N needed: c_mask handles boundary tiles, and out-of-bounds
+        # lanes are masked off. Removing the modulo eliminates 15 VALU Barrett
+        # reduction instructions per element from the store epilogue.
         rm_store = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rn_store = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_mask = (rm_store[:, None] < M) & (rn_store[None, :] < N)
-        rm_store = tl.max_contiguous(tl.multiple_of(rm_store % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn_store = tl.max_contiguous(tl.multiple_of(rn_store % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
         C_ = C + rm_store[:, None] * stride_cm + rn_store[None, :]
         tl.store(C_, c, mask=c_mask)

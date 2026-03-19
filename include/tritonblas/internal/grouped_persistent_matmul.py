@@ -122,5 +122,4 @@ def grouped_persistent_matmul(
         rm_store = tl.max_contiguous(tl.multiple_of(rm_store % M, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn_store = tl.max_contiguous(tl.multiple_of(rn_store % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
         C_ = C + rm_store[:, None] * stride_cm + rn_store[None, :]
-        C_ = tl.max_contiguous(tl.multiple_of(C_, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
         tl.store(C_, c, mask=c_mask)

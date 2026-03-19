@@ -972,6 +972,36 @@ _VARIABLE_KN_PARAMS = [
         [(1024, 1, 1024), (1024, 1024, 1)],
         id="2groups_extreme_KN_ratio",
     ),
+    # Additional variable K/N cases
+    pytest.param(
+        [(512, 64, 2048), (256, 2048, 64), (1024, 128, 512)],
+        id="3groups_K_varies_32x",
+    ),
+    pytest.param(
+        [(128, 256, 1024), (128, 1024, 256), (128, 512, 512), (128, 128, 2048)],
+        id="4groups_same_M_varied_KN",
+    ),
+    pytest.param(
+        [(1, 4096, 1), (4096, 1, 4096)],
+        id="2groups_extreme_asymmetric",
+    ),
+    pytest.param(
+        [(97, 211, 163), (163, 97, 211), (211, 163, 97)],
+        id="3groups_rotated_primes",
+    ),
+    pytest.param(
+        [(2048, 64, 4096), (64, 4096, 2048), (4096, 2048, 64), (512, 512, 512)],
+        id="4groups_large_varied_all",
+    ),
+    pytest.param(
+        [(m, k, n) for m, k, n in [(32, 64, 128), (64, 128, 32), (128, 32, 64),
+         (256, 512, 64), (512, 64, 256), (64, 256, 512)]],
+        id="6groups_permuted_dims",
+    ),
+    pytest.param(
+        [(1, 1, 1)] * 8 + [(1024, 1024, 1024)],
+        id="9groups_8tiny_1large_varied",
+    ),
 ]
 
 

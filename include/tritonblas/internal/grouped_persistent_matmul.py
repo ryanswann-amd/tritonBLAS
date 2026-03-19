@@ -78,6 +78,7 @@ def grouped_persistent_matmul(
 
         # Conditional modulo wrapping: EVEN_M/EVEN_N constexpr eliminates
         # Barrett reduction (15 VALU) when M/N are multiples of BLOCK_SIZE.
+        # Runtime branches don't work (Triton compiles both paths identically).
         if EVEN_M:
             rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         else:

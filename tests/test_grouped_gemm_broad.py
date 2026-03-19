@@ -505,3 +505,266 @@ class TestStressMKN:
     @pytest.mark.parametrize("shapes", _STRESS_MKN)
     def test_stress(self, shapes):
         _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 12. Large group counts (stress dispatch) — NEW
+# ---------------------------------------------------------------------------
+
+_LARGE_GROUP_COUNTS2_PARAMS = [
+    # G=32, 64 with M=64 each (stress the group dispatch)
+    pytest.param([(64, 128, 128)] * 32, id="G32_M64"),
+    pytest.param([(64, 128, 128)] * 64, id="G64_M64"),
+    # G=16 with M=1 each (extreme tiny per-group)
+    pytest.param([(1, 128, 128)] * 16, id="G16_M1_extreme_tiny"),
+    # G=24 with mixed M (non-power-of-2 group count)
+    pytest.param(
+        [(32 + i * 16, 128, 128) for i in range(24)],
+        id="G24_mixed_M_nonpow2",
+    ),
+]
+
+
+class TestLargeGroupCounts2:
+    """Stress test with many groups: G=32, 64, non-power-of-2 group counts."""
+
+    @pytest.mark.parametrize("shapes", _LARGE_GROUP_COUNTS2_PARAMS)
+    def test_large_group_counts(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 13. Large problem sizes — NEW
+# ---------------------------------------------------------------------------
+
+_LARGE_PROBLEM_PARAMS = [
+    # G=2, M=4096, K=4096, N=4096
+    pytest.param([(4096, 4096, 4096)] * 2, id="G2_4096x4096x4096"),
+    # G=4, M=2048, K=8192, N=2048
+    pytest.param([(2048, 2048, 8192)] * 4, id="G4_2048x8192x2048"),
+    # G=1, M=8192, K=8192, N=8192 (single huge GEMM through grouped path)
+    pytest.param([(8192, 8192, 8192)], id="G1_8192x8192x8192"),
+]
+
+
+class TestLargeProblemSizes:
+    """Big GEMMs to stress memory and compute."""
+
+    @pytest.mark.parametrize("shapes", _LARGE_PROBLEM_PARAMS)
+    def test_large_problem(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 14. Prime number dimensions — NEW
+# ---------------------------------------------------------------------------
+
+_PRIME_PARAMS = [
+    # M=127, K=127, N=127 (all prime)
+    pytest.param([(127, 127, 127)] * 2, id="G2_127x127x127"),
+    # M=257, K=509, N=131 (all prime)
+    pytest.param([(257, 131, 509)] * 2, id="G2_257x509x131"),
+    # G=3 with M=97, K=211, N=163
+    pytest.param([(97, 163, 211)] * 3, id="G3_97x211x163"),
+]
+
+
+class TestPrimeNumbers:
+    """Non-aligned dimensions using prime numbers."""
+
+    @pytest.mark.parametrize("shapes", _PRIME_PARAMS)
+    def test_prime(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 15. BF16 dtype coverage — NEW
+# ---------------------------------------------------------------------------
+
+_BF16_PARAMS = [
+    # Same shapes as fp16 tests but with bf16
+    pytest.param([(128, 128, 64)] * 4, id="G4_128x64x128"),
+    pytest.param([(256, 256, 128)] * 2, id="G2_256x128x256"),
+    pytest.param([(64, 256, 128), (128, 128, 64), (256, 64, 128)], id="hetero_3group"),
+    # G=4, M=512, K=1024, N=512
+    pytest.param([(512, 512, 1024)] * 4, id="G4_512x1024x512"),
+    # G=8, M=256, K=256, N=256
+    pytest.param([(256, 256, 256)] * 8, id="G8_256x256x256"),
+    # Heterogeneous G=4 with [1024, 512, 256, 128]
+    pytest.param(
+        [(1024, 256, 256), (512, 256, 256), (256, 256, 256), (128, 256, 256)],
+        id="G4_hetero_1024_512_256_128",
+    ),
+]
+
+
+class TestBF16:
+    """BF16 dtype coverage with various shapes."""
+
+    @pytest.mark.parametrize("shapes", _BF16_PARAMS)
+    def test_bf16(self, shapes):
+        _run_and_check(shapes, dtype=torch.bfloat16)
+
+
+# ---------------------------------------------------------------------------
+# 16. Extreme skew — NEW
+# ---------------------------------------------------------------------------
+
+_EXTREME_SKEW_PARAMS = [
+    # [8192, 1, 1, 1] — one huge, rest tiny
+    pytest.param(
+        [(8192, 256, 256), (1, 256, 256), (1, 256, 256), (1, 256, 256)],
+        id="skew_8192_1_1_1",
+    ),
+    # [4096, 2, 2, 2, 2, 2, 2, 2] — one large, 7 tiny
+    pytest.param(
+        [(4096, 256, 256)] + [(2, 256, 256)] * 7,
+        id="skew_4096_seven_2s",
+    ),
+    # [1]*32 — 32 groups of M=1
+    pytest.param(
+        [(1, 128, 128)] * 32,
+        id="skew_32_groups_M1",
+    ),
+]
+
+
+class TestExtremeSkew:
+    """Wildly unbalanced group sizes."""
+
+    @pytest.mark.parametrize("shapes", _EXTREME_SKEW_PARAMS)
+    def test_extreme_skew(self, shapes):
+        _run_and_check(shapes)
+
+
+# ---------------------------------------------------------------------------
+# 17. Output correctness with known patterns — NEW
+# ---------------------------------------------------------------------------
+
+def _run_and_check_with_blk(shapes, dtype=torch.float16, BLK_M=None, BLK_N=None, BLK_K=None):
+    """Like _run_and_check but passes explicit block size overrides."""
+    atol, rtol = _tols(dtype)
+
+    group_a, group_b, refs = [], [], []
+    for m, n, k in shapes:
+        a = torch.randn(m, k, device="cuda", dtype=dtype)
+        b = torch.randn(k, n, device="cuda", dtype=dtype)
+        group_a.append(a)
+        group_b.append(b)
+        refs.append(torch.matmul(a, b))
+
+    results = tritonblas.grouped_gemm(group_a, group_b, BLK_M=BLK_M, BLK_N=BLK_N, BLK_K=BLK_K)
+
+    for i, (res, ref) in enumerate(zip(results, refs)):
+        m, n, k = shapes[i]
+        torch.testing.assert_close(
+            res, ref, atol=atol, rtol=rtol,
+            msg=f"Group {i} mismatch (M={m}, N={n}, K={k}, dtype={dtype})",
+        )
+
+
+class TestOutputCorrectness:
+    """Verify output values with known input patterns and explicit block sizes."""
+
+    def test_identity_matrix(self):
+        """Multiply by identity matrix — output should equal input."""
+        for n in [64, 128, 256]:
+            a = torch.randn(n, n, device="cuda", dtype=torch.float16)
+            eye = torch.eye(n, device="cuda", dtype=torch.float16)
+            results = tritonblas.grouped_gemm([a], [eye])
+            torch.testing.assert_close(
+                results[0], a, atol=FP16_ATOL, rtol=FP16_RTOL,
+                msg=f"Identity test failed for N={n}",
+            )
+
+    def test_ones_matrix(self):
+        """A * ones should produce row sums."""
+        m, k, n = 128, 64, 32
+        a = torch.randn(m, k, device="cuda", dtype=torch.float16)
+        b = torch.ones(k, n, device="cuda", dtype=torch.float16)
+        ref = torch.matmul(a, b)
+        results = tritonblas.grouped_gemm([a], [b])
+        torch.testing.assert_close(
+            results[0], ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+            msg="Ones matrix test failed",
+        )
+
+    def test_multi_group_identity(self):
+        """Multiple groups, each multiplied by identity."""
+        shapes = [(64, 64), (128, 128), (256, 256)]
+        group_a, group_b, refs = [], [], []
+        for m, n in shapes:
+            a = torch.randn(m, n, device="cuda", dtype=torch.float16)
+            eye = torch.eye(n, device="cuda", dtype=torch.float16)
+            group_a.append(a)
+            group_b.append(eye)
+            refs.append(a)
+        results = tritonblas.grouped_gemm(group_a, group_b)
+        for i, (res, ref) in enumerate(zip(results, refs)):
+            torch.testing.assert_close(
+                res, ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+                msg=f"Multi-group identity test failed for group {i}",
+            )
+
+    @pytest.mark.parametrize("blk_m, blk_n, blk_k", [
+        (64, 64, 64),
+        (256, 256, 64),
+    ], ids=["blk_64x64x64", "blk_256x256x64"])
+    def test_explicit_block_sizes(self, blk_m, blk_n, blk_k):
+        """Test with explicit BLK_M/BLK_N/BLK_K overrides."""
+        shapes = [(256, 256, 256)] * 4
+        _run_and_check_with_blk(shapes, BLK_M=blk_m, BLK_N=blk_n, BLK_K=blk_k)
+
+
+# ---------------------------------------------------------------------------
+# 18. Repeated calls (stability) — NEW
+# ---------------------------------------------------------------------------
+
+class TestRepeatedCalls:
+    """Verify stability over many calls and JIT cache correctness."""
+
+    def test_repeated_same_inputs(self):
+        """Call grouped_gemm 100 times with same inputs, verify consistent output."""
+        torch.manual_seed(42)
+        shapes = [(128, 128, 128)] * 4
+        group_a = [torch.randn(m, k, device="cuda", dtype=torch.float16) for m, _, k in shapes]
+        group_b = [torch.randn(k, n, device="cuda", dtype=torch.float16) for _, n, k in shapes]
+
+        # Get reference output from first call
+        ref_results = tritonblas.grouped_gemm(group_a, group_b)
+
+        # Run 99 more times
+        for iteration in range(99):
+            results = tritonblas.grouped_gemm(group_a, group_b)
+            for i, (res, ref) in enumerate(zip(results, ref_results)):
+                assert torch.equal(res, ref), (
+                    f"Iteration {iteration + 1}, group {i}: output differs from first call"
+                )
+
+    def test_alternating_shapes(self):
+        """Alternate between different shapes to test JIT cache correctness."""
+        torch.manual_seed(123)
+        shape_sets = [
+            [(64, 64, 64)] * 2,
+            [(128, 256, 128)] * 4,
+            [(256, 128, 256)] * 3,
+        ]
+
+        # Pre-build inputs for each shape set
+        inputs = []
+        for shapes in shape_sets:
+            ga = [torch.randn(m, k, device="cuda", dtype=torch.float16) for m, _, k in shapes]
+            gb = [torch.randn(k, n, device="cuda", dtype=torch.float16) for _, n, k in shapes]
+            refs = [torch.matmul(a, b) for a, b in zip(ga, gb)]
+            inputs.append((ga, gb, refs, shapes))
+
+        # Alternate between shape sets 10 times each
+        for _ in range(10):
+            for ga, gb, refs, shapes in inputs:
+                results = tritonblas.grouped_gemm(ga, gb)
+                for i, (res, ref) in enumerate(zip(results, refs)):
+                    m, n, k = shapes[i]
+                    torch.testing.assert_close(
+                        res, ref, atol=FP16_ATOL, rtol=FP16_RTOL,
+                        msg=f"Alternating shapes mismatch: M={m}, N={n}, K={k}",
+                    )

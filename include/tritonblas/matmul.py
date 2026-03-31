@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -11,6 +12,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
+from .gcnsim import GcnSimSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -51,7 +53,21 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
+    backend = os.environ.get('TBLAS_SELECTOR', 'origami')
+    if backend == 'gcnsim':
+        try:
+            from .gcn_selector import GcnSimSelector
+            return GcnSimSelector(
+                M, N, K, a_dtype, b_dtype, c_dtype, device,
+                mx_block_size=mx_block_size,
+                streamk=streamk,
+                num_stages=num_stages,
+            )
+        except (ImportError, Exception) as e:
+            if os.environ.get('TBLAS_GCN_DEBUG', ''):
+                import sys
+                print(f"[GcnSimSelector] Falling back to Origami: {e}", file=sys.stderr)
+    # Default: Origami analytical model
     return OrigamiMatmulSelector(
         M,
         N,

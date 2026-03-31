@@ -5,3 +5,7 @@ from .matmul import addmm
 from .config import MatmulConfig, matmul_preamble
 from .bench import do_bench
 from .origami import OrigamiMatmulSelector
+try:
+    from .gcn_selector import GcnSimSelector
+except ImportError:
+    pass

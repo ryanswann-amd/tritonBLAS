@@ -12,7 +12,6 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .gcnsim import GcnSimSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 

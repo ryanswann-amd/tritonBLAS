@@ -52,33 +52,19 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    backend = os.environ.get('TBLAS_SELECTOR', 'origami')
-    if backend == 'gcnsim':
-        try:
-            from .gcn_selector import GcnSimSelector
-            return GcnSimSelector(
-                M, N, K, a_dtype, b_dtype, c_dtype, device,
-                mx_block_size=mx_block_size,
-                streamk=streamk,
-                num_stages=num_stages,
-            )
-        except (ImportError, Exception) as e:
-            if os.environ.get('TBLAS_GCN_DEBUG', ''):
-                import sys
-                print(f"[GcnSimSelector] Falling back to Origami: {e}", file=sys.stderr)
+    # TBLAS_SELECTOR env var dispatches to an alternative tile selector.
+    # Supported values:
+    #   "origami"  (default) — Origami C++ analytical model
+    #   "gcnsim"             — amdgcn_analyzer roofline model (no origami dep)
+    selector_backend = os.environ.get("TBLAS_SELECTOR", "origami").lower()
+
+    kwargs = dict(mx_block_size=mx_block_size, streamk=streamk, num_stages=num_stages)
+
+    if selector_backend == "gcnsim":
+        return GcnSimSelector(M, N, K, a_dtype, b_dtype, c_dtype, device, **kwargs)
+
     # Default: Origami analytical model
-    return OrigamiMatmulSelector(
-        M,
-        N,
-        K,
-        a_dtype,
-        b_dtype,
-        c_dtype,
-        device,
-        mx_block_size=mx_block_size,
-        streamk=streamk,
-        num_stages=num_stages,
-    )
+    return OrigamiMatmulSelector(M, N, K, a_dtype, b_dtype, c_dtype, device, **kwargs)
 
 
 def persistent_matmul_lt(

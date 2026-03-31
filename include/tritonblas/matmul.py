@@ -61,6 +61,7 @@ def _make_matmul_selector(
     kwargs = dict(mx_block_size=mx_block_size, streamk=streamk, num_stages=num_stages)
 
     if selector_backend == "gcnsim":
+        from .gcn_selector import GcnSimSelector  # noqa: PLC0415
         return GcnSimSelector(M, N, K, a_dtype, b_dtype, c_dtype, device, **kwargs)
 
     # Default: Origami analytical model

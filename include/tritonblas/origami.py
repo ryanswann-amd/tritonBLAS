@@ -234,7 +234,10 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # Guard: skip override when M or N is too small for a 256-wide tile
+        # (causes severe wave under-utilization for skinny shapes).
+        if (m >= 128 and n >= 128 and
+            check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256

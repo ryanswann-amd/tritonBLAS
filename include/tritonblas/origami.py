@@ -175,9 +175,6 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # 256x256x64 near-square heuristic is now handled inside origami C++ select_config
-        # when config.target == triton, so no Python-side fixup needed.
-
         if streamk:
             self._grid = self._compute_sk_grid()
         else:

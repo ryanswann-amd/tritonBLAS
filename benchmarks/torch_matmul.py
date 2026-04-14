@@ -86,8 +86,8 @@ def bench_matmul(input_yaml: str):
         for _ in range(20):
             _ = torch.matmul(A, B)
 
-        # Benchmark the torch.matmul over 10 repetitions using CUDA events for timing.
-        iterations = 10
+        # Benchmark the torch.matmul over 100 repetitions using CUDA events for timing.
+        iterations = 100
         times = []
         for _ in range(iterations):
             start_event = torch.cuda.Event(enable_timing=True)

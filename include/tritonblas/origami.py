@@ -444,25 +444,55 @@ class OrigamiMatmulSelector:
 
         mi = self._infer_matrix_instruction_dimensions()
 
+        # Determine which cache_hints variants are needed based on shape.
+        # The C++ compute_total_latency rejects configs when nontemporal
+        # hints are required but not set (and vice-versa).  We generate
+        # configs for all three cases: no hints (0,0), nontemporal-B (0,4),
+        # and nontemporal-A (4,0).
+        a_bits = self._a_dtype_bitsize
+        b_bits = self._b_dtype_bitsize
+        M, N, K = self._m, self._n, self._k
+
+        cache_hint_variants = [(0, 0)]  # default: no nontemporal hints
+
+        # Check if nontemporal B path may be needed
+        # Condition: K*a_bits % 1024 == 0, M small relative to N
+        k_mod = (K * a_bits) % 1024
+        if k_mod == 0:
+            # Check all possible tile block_k sizes for MT_K_mod alignment
+            for bk in self._block_k_range:
+                mt_k_mod = (bk * a_bits) % 1024
+                if mt_k_mod == 0:
+                    # Nontemporal paths may activate for some M/N combos
+                    cache_hint_variants.append((0, 4))  # nontemporal B
+                    cache_hint_variants.append((4, 0))  # nontemporal A
+                    break
+
         for blk_m, blk_n, blk_k, occupancy in itertools.product(
             self._block_mn_range,
             self._block_mn_range,
             self._block_k_range,
             self._kernel_occupancy_range,
         ):
-            # Create special dim3_t object for BLK_* sizes
-            mt = origami.dim3_t(blk_m, blk_n, blk_k)
+            for hints_a, hints_b in cache_hint_variants:
+                # Create special dim3_t object for BLK_* sizes
+                mt = origami.dim3_t(blk_m, blk_n, blk_k)
 
-            # Create and set new config_t values
-            new_config = origami.config_t()
-            new_config.mt = mt
-            new_config.mi = mi
-            new_config.occupancy = occupancy
-            if self.streamk:
-                new_config.grid_selection = origami.grid_selection_t.k_split_aware
-            else:
-                new_config.grid_selection = origami.grid_selection_t.data_parallel
-            config_list.append(new_config)
+                # Create and set new config_t values
+                new_config = origami.config_t()
+                new_config.mt = mt
+                new_config.mi = mi
+                new_config.occupancy = occupancy
+                if self.streamk:
+                    new_config.grid_selection = origami.grid_selection_t.k_split_aware
+                else:
+                    new_config.grid_selection = origami.grid_selection_t.data_parallel
+                # Set nontemporal cache hints for shapes that require them
+                if hasattr(new_config, 'cache_hints_a'):
+                    new_config.cache_hints_a = hints_a
+                if hasattr(new_config, 'cache_hints_b'):
+                    new_config.cache_hints_b = hints_b
+                config_list.append(new_config)
 
         return config_list
 

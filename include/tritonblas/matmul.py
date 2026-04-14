@@ -390,6 +390,13 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+# Threshold below which torch.matmul (hipBLAS) is faster than tritonBLAS.
+# Based on ISA analysis: small M produces <1 tile/CU on MI300X (304 CUs),
+# causing CU starvation in the persistent kernel.  Empirically, shapes with
+# M<=64 and at least one large dimension are 2-5x slower in tritonBLAS.
+_HIPBLAS_FALLBACK_M = 64
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -401,6 +408,11 @@ def _matmul(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # hipBLAS fallback for shapes where the persistent kernel under-utilises CUs.
+    # ISA root-cause: M<=64 yields <256 output tiles for 304 CUs (<1 tile/CU).
+    if M <= _HIPBLAS_FALLBACK_M and (N >= 4096 or K >= 4096):
+        return torch.matmul(a, b)
 
     out = a.new_empty(M, N)
 

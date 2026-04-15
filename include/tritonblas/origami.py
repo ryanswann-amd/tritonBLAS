@@ -1,7 +1,7 @@
 from __future__ import annotations
 import itertools
-import torch
 import origami
+import torch
 import math
 from math import ceil
 

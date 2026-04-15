@@ -114,6 +114,17 @@ class OrigamiMatmulSelector:
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
 
+        # When PyTorch initializes HIP before origami, the bandwidth
+        # auto-calibration can return incorrect coefficients (all zeros
+        # or different values).  Detect this and apply known-good values
+        # per architecture so the analytical model stays valid regardless
+        # of import order.
+        _bw = self._hardware.mem_bw_per_wg_coefficients
+        _GFX950_BW_COEFFS = (-1.3e-05, 0.00707, 0.027355)
+        if self._hardware.N_CU == 256 and self._hardware.NUM_XCD == 8:
+            if _bw[0] == 0.0 and _bw[2] == 0.0:
+                self._hardware.mem_bw_per_wg_coefficients = _GFX950_BW_COEFFS
+
         # Detect architecture name for MI instruction selection.
         # Prefer origami's hardware_t.arch if available; fall back to
         # torch's gcnArchName property (strip suffix like ":sramecc+:xnack-").

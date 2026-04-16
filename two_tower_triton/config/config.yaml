@@ -1,5 +1,12 @@
 # Two Tower model configuration for tritonBLAS kernel selection
 # Adapted from GemmKernelSelection for Triton kernel config space
+# Experiment 5: Enable ResNet residual backbone + proven sync config improvements
+#   - residual: true (ResNet skip connections for better gradient flow)
+#   - kernel_minimization_thr 0.99 -> 0.95 (more near-optimal training examples)
+#   - tolerance 0.02 -> 0.005 (finer binning in 0.98-1.0 range)
+#   - aux_weight 0.3 -> 0.5 (stronger interaction features)
+#   - Wider towers (192 emb_dim) + dropout 0.1
+#   - lr 0.001 -> 0.0005 (ResNet is more stable, can use higher lr than MLP)
 
 workflow:
   train: true
@@ -19,9 +26,9 @@ data:
   dtype: "BBS"           # bf16 in, bf16 out, bf16 compute
   mo: "TN"               # Transpose-Normal layout
   custom_split: false
-  split: [0.70, 0.15, 0.15]
+  split: [0.80, 0.10, 0.10]
   seed: 42
-  kernel_minimization_thr: 0.99
+  kernel_minimization_thr: 0.95
   drop_low_eff: false
   drop_low_eff_thr: 0.0
   gemm_downsampling: 0
@@ -32,29 +39,29 @@ data:
     matrix_instr_nonkdim: 2
 
 model:
-  emb_dim: 128
-  layer_sizes_query: [256, 384, 256]   # Query tower (GEMM shape encoder)
-  layer_sizes_doc: [256, 256, 128]     # Document tower (kernel config encoder)
-  dropout_rate: 0.0
-  norm: true              # LayerNorm after each MLP layer
-  residual: false         # Residual connections in MLP
+  emb_dim: 192
+  layer_sizes_query: [384, 512, 384]   # Wider query tower for richer shape encoding
+  layer_sizes_doc: [384, 384, 192]     # Wider doc tower for kernel config encoding
+  dropout_rate: 0.1
+  norm: true              # BatchNorm after each MLP layer
+  residual: true          # ResNet residual connections for better gradient flow
 
 training:
-  n_epochs: 100
-  device: "cuda"
-  batch_size: 256
-  num_workers: 4
+  n_epochs: 150
+  device: "cpu"
+  batch_size: 512
+  num_workers: 0
   early_stop:
-    patience: 15
+    patience: 40
     min_delta: 0.0001
 
 optimizer:
   type: "Adam"
   params:
-    lr: 0.001
+    lr: 0.0005
     weight_decay: 0.0001
 
 loss:
-  tolerance: 0.02         # Tolerance for ToleranceHuberLoss binning
+  tolerance: 0.005        # Fine binning in 0.98-1.0 range for top-1 discrimination
   huber_delta: 0.1         # Huber loss delta parameter
-  aux_weight: 0.3          # Weight for auxiliary MLP loss
+  aux_weight: 0.5          # Stronger interaction features for near-optimal separation

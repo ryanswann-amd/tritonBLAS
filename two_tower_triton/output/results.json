@@ -1,0 +1,6 @@
+{
+  "test_mean_eff": 0.9764185750484466,
+  "test_gmean_eff": 0.9737648042478226,
+  "top1_accuracy": 0.82,
+  "test_avg_loss": 2.5520997738838194
+}

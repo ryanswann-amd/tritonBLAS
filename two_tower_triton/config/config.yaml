@@ -1,0 +1,66 @@
+# Two Tower model configuration for tritonBLAS kernel selection
+# Adapted from GemmKernelSelection for Triton kernel config space
+# Experiment 3: Larger model + higher emb_dim for finer discrimination
+#   - emb_dim 128 -> 192 (richer embedding space for kernel similarity)
+#   - Wider query tower [384, 512, 384] (more capacity for shape features)
+#   - Wider doc tower [384, 384, 192] (more capacity for kernel features)
+#   - tolerance 0.015 (slightly finer than baseline 0.02)
+#   - All other params at baseline values (seed=42, split 80/10/10)
+
+workflow:
+  train: true
+  test: true
+  test_model_path: ""
+  save_test_solutions: true
+  write_library: true
+  save_embeddings: false
+
+io:
+  data_path: ""
+  output_path: ""
+  best_model_suffix: "model"
+
+data:
+  gpu_arch: "mi300x"
+  dtype: "BBS"           # bf16 in, bf16 out, bf16 compute
+  mo: "TN"               # Transpose-Normal layout
+  custom_split: false
+  split: [0.80, 0.10, 0.10]
+  seed: 42
+  kernel_minimization_thr: 0.99
+  drop_low_eff: false
+  drop_low_eff_thr: 0.0
+  gemm_downsampling: 0
+  # Categorical columns for Triton kernel configs
+  cat_cols: []
+  # Embedding columns (categorical with many values -> learned embeddings)
+  emb_cols:
+    matrix_instr_nonkdim: 2
+
+model:
+  emb_dim: 192
+  layer_sizes_query: [384, 512, 384]   # Wider query tower for richer shape encoding
+  layer_sizes_doc: [384, 384, 192]     # Wider doc tower for kernel config encoding
+  dropout_rate: 0.1
+  norm: true              # BatchNorm after each MLP layer
+  residual: false         # Residual connections in MLP
+
+training:
+  n_epochs: 150
+  device: "cpu"
+  batch_size: 512
+  num_workers: 0
+  early_stop:
+    patience: 40
+    min_delta: 0.0001
+
+optimizer:
+  type: "Adam"
+  params:
+    lr: 0.0003
+    weight_decay: 0.0001
+
+loss:
+  tolerance: 0.015        # Slightly finer binning (was 0.02)
+  huber_delta: 0.1         # Huber loss delta parameter
+  aux_weight: 0.3          # Baseline interaction weight

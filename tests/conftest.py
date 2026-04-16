@@ -8,26 +8,39 @@ test shapes in one place.
 
 import pytest
 import torch
-import origami
+
+try:
+    import origami
+    _HAS_ORIGAMI = True
+except ImportError:
+    _HAS_ORIGAMI = False
+
+_HAS_CUDA = torch.cuda.is_available()
 
 
-# Torch compile / dynamo settings required for compile-enabled tests.
-# Applied here so they take effect before any test file is imported.
-# If we don't increase this, torch will complain about too many recompilations.
-torch._dynamo.config.cache_size_limit = 100000
-# Also disable caches so every compile is fresh and new issues are caught.
-# Note this causes a single UserWarning that notes caches are disabled.
-torch._inductor.config.force_disable_caches = True
-# FIXME: Inductor seems to be initializing multiple CUDA runtimes somehow in
-# relation to some of triton's new features which is causing errors unrelated to
-# tritonBLAS.  The error tells you to change the multiprocessing strategy to
-# 'spawn' but that actually doesn't fix the issue - you have to force
-# single-threaded compilation.  This needs to be fixed upstream in torch/triton.
-torch._inductor.config.compile_threads = 1
+if _HAS_CUDA:
+    # Torch compile / dynamo settings required for compile-enabled tests.
+    # Applied here so they take effect before any test file is imported.
+    # If we don't increase this, torch will complain about too many recompilations.
+    torch._dynamo.config.cache_size_limit = 100000
+    # Also disable caches so every compile is fresh and new issues are caught.
+    # Note this causes a single UserWarning that notes caches are disabled.
+    torch._inductor.config.force_disable_caches = True
+    # FIXME: Inductor seems to be initializing multiple CUDA runtimes somehow in
+    # relation to some of triton's new features which is causing errors unrelated to
+    # tritonBLAS.  The error tells you to change the multiprocessing strategy to
+    # 'spawn' but that actually doesn't fix the issue - you have to force
+    # single-threaded compilation.  This needs to be fixed upstream in torch/triton.
+    torch._inductor.config.compile_threads = 1
 
-# Hardware capability detection
-_hw = origami.get_hardware_for_device(torch.cuda.current_device())
-GPU_ARCH = _hw.arch.name
+
+if _HAS_ORIGAMI and _HAS_CUDA:
+    # Hardware capability detection
+    _hw = origami.get_hardware_for_device(torch.cuda.current_device())
+    GPU_ARCH = _hw.arch.name
+else:
+    GPU_ARCH = "unknown"
+
 # Architectures that support FP4/FP6 datatypes
 _FP4_ARCHS = {"gfx950"}
 
@@ -86,4 +99,5 @@ def reset_dynamo():
     """Reset torch.compile state between tests to prevent
     accumulated recompilation limits across parametrized cases."""
     yield
-    torch._dynamo.reset()
+    if _HAS_CUDA:
+        torch._dynamo.reset()

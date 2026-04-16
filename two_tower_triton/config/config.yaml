@@ -1,0 +1,60 @@
+# Two Tower model configuration for tritonBLAS kernel selection
+# Adapted from GemmKernelSelection for Triton kernel config space
+
+workflow:
+  train: true
+  test: true
+  test_model_path: ""
+  save_test_solutions: true
+  write_library: true
+  save_embeddings: false
+
+io:
+  data_path: ""
+  output_path: ""
+  best_model_suffix: "model"
+
+data:
+  gpu_arch: "mi300x"
+  dtype: "BBS"           # bf16 in, bf16 out, bf16 compute
+  mo: "TN"               # Transpose-Normal layout
+  custom_split: false
+  split: [0.70, 0.15, 0.15]
+  seed: 42
+  kernel_minimization_thr: 0.99
+  drop_low_eff: false
+  drop_low_eff_thr: 0.0
+  gemm_downsampling: 0
+  # Categorical columns for Triton kernel configs
+  cat_cols: []
+  # Embedding columns (categorical with many values -> learned embeddings)
+  emb_cols:
+    matrix_instr_nonkdim: 2
+
+model:
+  emb_dim: 128
+  layer_sizes_query: [256, 384, 256]   # Query tower (GEMM shape encoder)
+  layer_sizes_doc: [256, 256, 128]     # Document tower (kernel config encoder)
+  dropout_rate: 0.0
+  norm: true              # LayerNorm after each MLP layer
+  residual: false         # Residual connections in MLP
+
+training:
+  n_epochs: 100
+  device: "cuda"
+  batch_size: 256
+  num_workers: 4
+  early_stop:
+    patience: 15
+    min_delta: 0.0001
+
+optimizer:
+  type: "Adam"
+  params:
+    lr: 0.001
+    weight_decay: 0.0001
+
+loss:
+  tolerance: 0.02         # Tolerance for ToleranceHuberLoss binning
+  huber_delta: 0.1         # Huber loss delta parameter
+  aux_weight: 0.3          # Weight for auxiliary MLP loss

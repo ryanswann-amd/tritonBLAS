@@ -89,9 +89,9 @@ def run_config(m, n, k, comm_size, total_cus, output_csv, output_json, nproc=8):
 
     cmd = [
         "torchrun", f"--nproc_per_node={nproc}",
-        "benchmarks/overlap.py", "standard",
+        "--", "benchmarks/overlap.py", "standard",
         "--backend", BACKEND,
-        "--m", str(m), "--n", str(n), "--k", str(k),
+        "--gemm-m", str(m), "--gemm-n", str(n), "--gemm-k", str(k),
         "--dtype", DTYPE,
         "--comm-size", *[str(s) for s in comm_size],
         "--collective", COLLECTIVE,
@@ -122,7 +122,7 @@ def run_config(m, n, k, comm_size, total_cus, output_csv, output_json, nproc=8):
         print(f"FAIL (rc={result.returncode}, {elapsed:.1f}s)")
         stderr_tail = result.stderr.decode("utf-8", errors="replace")[-500:]
         print(f"    stderr: {stderr_tail}")
-        return True  # continue sweep even on failure
+        return False
 
 
 def main():

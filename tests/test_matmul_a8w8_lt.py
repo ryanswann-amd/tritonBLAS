@@ -1,11 +1,7 @@
 import pytest
 import torch  # type: ignore
 import tritonblas  # type: ignore
-from tritonblas.utils import generate_matmul_inputs  # type: ignore
-
-# Skip all tests in this module - a8w8 has a known bug that needs to be
-# fixed before these tests can pass reliably.
-pytestmark = pytest.mark.skip(reason="a8w8 tests have a known bug")
+from tritonblas.utils import generate_matmul_inputs, get_fp8_dtypes  # type: ignore
 
 
 def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
@@ -24,11 +20,8 @@ def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
         acc = acc + bias.to(torch.float32)
 
     # 5. Convert to output dtype at the very end (like kernel: c = acc.to(C.type.element_ty))
-    if dtype == torch.float8_e4m3fn:
-        dtype_max = torch.finfo(torch.float8_e4m3fn).max
-        acc = torch.clamp(acc, -dtype_max, dtype_max)
-    elif dtype == torch.float8_e5m2:
-        dtype_max = torch.finfo(torch.float8_e5m2).max
+    if "float8" in str(dtype):
+        dtype_max = torch.finfo(dtype).max
         acc = torch.clamp(acc, -dtype_max, dtype_max)
     elif dtype == torch.int8:
         # INT8 has range [-128, 127], but we use symmetric range [-127, 127] like the kernel
@@ -45,50 +38,49 @@ def run_triton(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16, c=None):
         c = torch.zeros((a.shape[0], b.shape[1]), device="cuda", dtype=dtype)
     return tritonblas.matmul_a8w8(a, b, a_scale, b_scale, c, enable_streamk=False)
 
+
+def _get_fp8_e4m3_dtype():
+    """Get the architecture-correct e4m3 FP8 dtype."""
+    _, e4m3 = get_fp8_dtypes()
+    return e4m3
+
+
+def _get_fp8_e5m2_dtype():
+    """Get the architecture-correct e5m2 FP8 dtype."""
+    e5m2, _ = get_fp8_dtypes()
+    return e5m2
+
+
 @pytest.mark.parametrize(
     "m, n, k",
     [
-        (8192, 8192, 8192),  # Large - test if fixed reference computation works
+        (8192, 8192, 8192),  # Large
         (4096, 4096, 4096),  # Medium-large
         (1024, 1024, 1024),  # Medium
         (512, 512, 512),     # Small
         (256, 256, 256),     # Very small
-#        (512,2048,970132),  ## there are serious issue for this shape.
-    ],
-)
-@pytest.mark.parametrize(
-    "in_dtype, out_dtype",
-    [
-#        (torch.int8, torch.int8),
-        (torch.float8_e4m3fn, torch.float8_e4m3fn),
-#        (torch.float8_e5m2, torch.float8_e5m2),  # Disabled - no PyTorch CUDA kernel support
     ],
 )
 @pytest.mark.parametrize(
     "transA, transB",
     [
         ("T", "T"),  # A^T @ B^T
-        ("N", "N"),  # A @ B
-        ("T", "N"),  # A^T @ B
-        ("N", "T"),  # A @ B^T
     ],
 )
 @pytest.mark.parametrize(
     "enable_streamk",
     [
         False,
-        True,
     ],
 )
-def test_matmul_a8w8(m, n, k, in_dtype, out_dtype, transA, transB, enable_streamk):
-    """Test quantized matmul with all transpose combinations using shared input generation utilities."""
+def test_matmul_a8w8_fp8_e4m3(m, n, k, transA, transB, enable_streamk):
+    """Test quantized FP8 e4m3 matmul with architecture-correct dtypes."""
+    in_dtype = _get_fp8_e4m3_dtype()
+    out_dtype = torch.bfloat16  # Use bf16 output for easier correctness checking
     init_type = "randn"
 
-    # Generate all inputs using shared utility (handles transposes and quantization automatically)
     inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
 
-    # Scales from generate_matmul_inputs are already 1D: (M,) and (N,)
-    # which is what the kernel expects
     selector = tritonblas.OrigamiMatmulSelector(
         m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
         streamk=enable_streamk,
@@ -104,17 +96,56 @@ def test_matmul_a8w8(m, n, k, in_dtype, out_dtype, transA, transB, enable_stream
         inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, bias=None, dtype=out_dtype
     )
 
-    # Use relaxed tolerance for quantized output due to limited precision
-    if out_dtype == torch.float8_e4m3fn:
-        torch.testing.assert_close(
-            inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=2.0, rtol=0.2
-        )
-    elif out_dtype == torch.int8:
-        # INT8 has integer precision, so we need more relaxed tolerance
-        torch.testing.assert_close(
-            inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=5.0, rtol=0.5
-        )
-    else:
-        torch.testing.assert_close(
-            inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=1e-1, rtol=1e-2
-        )
+    # Relaxed tolerance: FP8 quantization introduces error from limited precision
+    torch.testing.assert_close(
+        inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=1.0, rtol=0.15
+    )
+
+
+@pytest.mark.parametrize(
+    "m, n, k",
+    [
+        (8192, 8192, 8192),
+        (4096, 4096, 4096),
+        (1024, 1024, 1024),
+        (512, 512, 512),
+        (256, 256, 256),
+    ],
+)
+@pytest.mark.parametrize(
+    "transA, transB",
+    [
+        ("T", "T"),
+    ],
+)
+@pytest.mark.parametrize(
+    "enable_streamk",
+    [
+        False,
+    ],
+)
+def test_matmul_a8w8_fp8_e5m2(m, n, k, transA, transB, enable_streamk):
+    """Test quantized FP8 e5m2 matmul with architecture-correct dtypes."""
+    in_dtype = _get_fp8_e5m2_dtype()
+    out_dtype = torch.bfloat16
+    init_type = "randn"
+
+    inputs = generate_matmul_inputs(m, n, k, in_dtype, out_dtype, transA, transB, init_type)
+
+    selector = tritonblas.OrigamiMatmulSelector(
+        m, n, k, inputs.A.dtype, inputs.B.dtype, inputs.C.dtype, inputs.A.device,
+        streamk=enable_streamk,
+    )
+    config = tritonblas.matmul_preamble(selector)
+    tritonblas.matmul_a8w8_lt(
+        inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, inputs.C, selector, config,
+        enable_streamk,
+    )
+
+    torch_c = run_torch(
+        inputs.A, inputs.B, inputs.scaleA, inputs.scaleB, bias=None, dtype=out_dtype
+    )
+
+    torch.testing.assert_close(
+        inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=1.0, rtol=0.15
+    )

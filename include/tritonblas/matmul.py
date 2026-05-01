@@ -279,8 +279,14 @@ def _matmul(
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Query Origami for solution — fall back to torch.mm for unsupported archs
+    try:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    except RuntimeError as e:
+        if "unsupported architecture" in str(e):
+            torch.mm(a, b, out=out)
+            return out
+        raise
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)
     else:
@@ -339,8 +345,14 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Query Origami for solution — fall back to torch.mm for unsupported archs
+    try:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    except RuntimeError as e:
+        if "unsupported architecture" in str(e):
+            torch.mm(a, b, out=out)
+            return None
+        raise
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, sk_grid=sk_grid)

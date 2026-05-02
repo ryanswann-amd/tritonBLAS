@@ -402,7 +402,15 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
-    out = a.new_empty(M, N)
+    # FP8 and INT8 inputs cannot produce output in the same dtype — the
+    # accumulator is wider (float32 / int32) and quantized output would
+    # lose all precision.  Default to bfloat16 for FP8 and int32 for INT8.
+    out_dtype = a.dtype
+    if "float8" in str(a.dtype):
+        out_dtype = torch.float16
+    elif a.dtype == torch.int8:
+        out_dtype = torch.int32
+    out = torch.empty(M, N, dtype=out_dtype, device=a.device)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

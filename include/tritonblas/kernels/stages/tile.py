@@ -47,7 +47,6 @@ class Tile:
     block_m: tl.constexpr  # Block size M
     block_n: tl.constexpr  # Block size N
     
-    @triton.constexpr_function
     def __init__(self, pid_m, pid_n, block_m, block_n):
         """
         Create a tile with runtime coordinates and compile-time sizes.

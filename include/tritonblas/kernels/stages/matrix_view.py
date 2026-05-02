@@ -61,15 +61,13 @@ class InputView:
     stride_row: tl.tensor
     stride_col: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, rows, cols, stride_row, stride_col):
-
         self.ptr = ptr
         self.rows = rows
         self.cols = cols
         self.stride_row = stride_row
         self.stride_col = stride_col
-    
+
     @triton.jit
     def tile_ptrs(self, tile: Tile):
         """
@@ -134,9 +132,7 @@ class ScaleView:
     stride_a: tl.tensor
     stride_b: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, a_scale_ptr, b_scale_ptr, M, N, stride_a, stride_b):
-
         self.a_scale_ptr = a_scale_ptr
         self.b_scale_ptr = b_scale_ptr
         self.M = M
@@ -184,7 +180,6 @@ class BiasView:
     N: tl.tensor
     stride: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, N, stride):
         self.ptr = ptr
         self.N = N
@@ -240,14 +235,13 @@ class OutputView:
     stride_row: tl.tensor
     stride_col: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, rows, cols, stride_row, stride_col):
         self.ptr = ptr
         self.rows = rows
         self.cols = cols
         self.stride_row = stride_row
         self.stride_col = stride_col
-    
+
     @triton.jit
     def tile_ptrs(self, tile: Tile):
         """

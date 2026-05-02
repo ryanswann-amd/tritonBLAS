@@ -86,7 +86,6 @@ class GemmContext:
     even_k: tl.constexpr
     quantized: tl.constexpr
     
-    @triton.constexpr_function
     def __init__(
         self,
         block_m,

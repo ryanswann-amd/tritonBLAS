@@ -67,7 +67,6 @@ class ScheduleContext:
     # Stream-K specific
     streamk_tiles: tl.constexpr
     
-    @triton.constexpr_function
     def __init__(
         self,
         M,

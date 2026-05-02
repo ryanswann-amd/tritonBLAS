@@ -66,7 +66,6 @@ class Grid:
     num_xcds: tl.constexpr
     chunk_size: tl.constexpr
     
-    @triton.constexpr_function
     def __init__(
         self,
         M,

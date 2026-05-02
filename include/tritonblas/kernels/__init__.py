@@ -8,6 +8,11 @@ This package contains specific GEMM kernel implementations:
 - streamk_gemm: Stream-K GEMM kernel for load balancing
 - stages: Composable kernel building blocks
 
+Accumulator dtype policy (all kernels):
+- float8 (FP8) inputs → float32 accumulation (prevents precision loss)
+- int8 inputs → int32 accumulation (exact integer arithmetic)
+- All other inputs → float32 accumulation (default)
+
 Environment Variables:
 - TBLAS_USE_MONOLITHIC: Set to '1' or 'true' to use the monolithic persistent kernel instead of the composable stages version
 """

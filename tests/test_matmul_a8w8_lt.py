@@ -1,7 +1,7 @@
 import pytest
 import torch  # type: ignore
 import tritonblas  # type: ignore
-from tritonblas.utils import generate_matmul_inputs  # type: ignore
+from tritonblas.utils import generate_matmul_inputs, get_fp8_dtypes  # type: ignore
 
 
 def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
@@ -20,11 +20,8 @@ def run_torch(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16):
         acc = acc + bias.to(torch.float32)
 
     # 5. Convert to output dtype at the very end (like kernel: c = acc.to(C.type.element_ty))
-    if dtype == torch.float8_e4m3fn:
-        dtype_max = torch.finfo(torch.float8_e4m3fn).max
-        acc = torch.clamp(acc, -dtype_max, dtype_max)
-    elif dtype == torch.float8_e5m2:
-        dtype_max = torch.finfo(torch.float8_e5m2).max
+    if "float8" in str(dtype):
+        dtype_max = torch.finfo(dtype).max
         acc = torch.clamp(acc, -dtype_max, dtype_max)
     elif dtype == torch.int8:
         # INT8 has range [-128, 127], but we use symmetric range [-127, 127] like the kernel
@@ -56,8 +53,10 @@ def run_triton(a, b, a_scale, b_scale, bias=None, dtype=torch.bfloat16, c=None):
     "in_dtype, out_dtype",
     [
 #        (torch.int8, torch.int8),
-        (torch.float8_e4m3fn, torch.float8_e4m3fn),
-#        (torch.float8_e5m2, torch.float8_e5m2),  # Disabled - no PyTorch CUDA kernel support
+        # Use architecture-correct FP8 types: fnuz (bias=8) for gfx942, std (bias=7) for gfx950.
+        # Using the wrong variant causes silent 4x compute errors on gfx942.
+        (get_fp8_dtypes()[1], get_fp8_dtypes()[1]),  # e4m3 variant
+#        (get_fp8_dtypes()[0], get_fp8_dtypes()[0]),  # e5m2 variant - disabled
     ],
 )
 @pytest.mark.parametrize(
@@ -98,7 +97,7 @@ def test_matmul_a8w8(m, n, k, in_dtype, out_dtype, transA, transB, enable_stream
     )
 
     # Use relaxed tolerance for quantized output due to limited precision
-    if out_dtype == torch.float8_e4m3fn:
+    if "float8" in str(out_dtype):
         torch.testing.assert_close(
             inputs.C.to(torch.float32), torch_c.to(torch.float32), atol=2.0, rtol=0.2
         )

@@ -149,6 +149,8 @@ name_to_tl_types = {
     'fp32': tl.float32,
     'bf16': tl.bfloat16,
     'fp8': tl.float8e4b8,
+    'fp8_e4m3': tl.float8e4b8,  # Explicit e4m3 variant
+    'fp8_e5m2': tl.float8e5b16,  # Explicit e5m2 variant
     'bf8': tl.float8e5b16,
 }
 

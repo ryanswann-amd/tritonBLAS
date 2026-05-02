@@ -255,10 +255,16 @@ class OrigamiMatmulSelector:
         else:
             self._grid = self._hardware.N_CU
 
-        # select_workgroup_mapping returns tuple(wgmxcc, wgm)
-        self._xcc_workgroup_mapping, wgm = origami.select_workgroup_mapping(
+        # select_workgroup_mapping returns a workgroup_mapping_t object
+        wgm_result = origami.select_workgroup_mapping(
             self._problem, self._hardware, self._result.config, self._grid
         )
+        # Handle both old tuple API and new object API
+        if isinstance(wgm_result, tuple):
+            self._xcc_workgroup_mapping, wgm = wgm_result
+        else:
+            self._xcc_workgroup_mapping = wgm_result.wgmxcc
+            wgm = wgm_result.wgm
         self._workgroup_mapping = abs(wgm)  # wgm can be negative for M-major
 
     @property

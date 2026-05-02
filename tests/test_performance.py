@@ -5,7 +5,7 @@ import time
 import sys
 import json
 from datetime import datetime
-from tritonblas.utils import matmul_input_gen
+from tritonblas.utils import matmul_input_gen, get_fp8_dtypes
 
 
 def get_gpu_name():
@@ -99,7 +99,7 @@ def benchmark_matmul(m, n, k, dtype, enable_streamk=False, warmup=5, iterations=
     [
         torch.float16,
         torch.bfloat16,
-        torch.float8_e4m3fn,
+        get_fp8_dtypes()[1],  # Architecture-correct e4m3 FP8 type (fnuz for gfx942, std for gfx950)
     ],
 )
 @pytest.mark.parametrize(
@@ -136,7 +136,8 @@ def test_mi350_performance_report(capsys):
         (8192, 8192, 8192),
         (16384, 16384, 16384),
     ]
-    dtypes = [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+    _, e4m3_dtype = get_fp8_dtypes()
+    dtypes = [torch.float16, torch.bfloat16, e4m3_dtype]
     
     # Collect results
     results = []
@@ -149,7 +150,7 @@ def test_mi350_performance_report(capsys):
                     dtype_str = "fp16"
                 elif dtype == torch.bfloat16:
                     dtype_str = "bf16"
-                elif dtype == torch.float8_e4m3fn:
+                elif "float8" in str(dtype):
                     dtype_str = "fp8"
                 else:
                     dtype_str = str(dtype)

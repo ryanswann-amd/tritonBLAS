@@ -276,8 +276,16 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    # Determine output dtype: FP8 inputs produce float16, INT8 produces int32,
+    # all others keep the input dtype.
+    out_dtype = a.dtype
+    if "float8" in str(a.dtype):
+        out_dtype = torch.float16
+    elif a.dtype == torch.int8:
+        out_dtype = torch.int32
+
     # Allocate an output tensor
-    out = a.new_empty(M, N)
+    out = torch.empty(M, N, dtype=out_dtype, device=a.device)
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)

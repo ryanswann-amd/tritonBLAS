@@ -71,8 +71,9 @@ def persistent_matmul(
     - stride_cn: C's stride in N dimension
     """
 
-    # Determine accumulator dtype based on output type
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+    # Determine accumulator dtype based on input type (not output type).
+    # INT8 inputs use int32 accumulation; all others (including FP8) use float32.
+    acc_dtype = tl.int32 if A.type.element_ty == tl.int8 else tl.float32
     
     # ════════════════════════════════════════════════════════════════════════
     # CREATE MATRIX VIEWS

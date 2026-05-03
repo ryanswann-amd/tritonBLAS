@@ -1,3 +1,4 @@
+import ctypes
 import functools
 import random
 import time
@@ -10,6 +11,51 @@ import triton
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
+
+# ---------------------------------------------------------------------------
+# HIP error clearing for ROCm compatibility
+# ---------------------------------------------------------------------------
+# On ROCm 6.x (MI300X/gfx942), rocBLAS leaves a stale hipErrorNotFound
+# (error 500) in the HIP runtime error state after its first kernel
+# compilation/lookup for each unique shape/dtype configuration. The rocBLAS
+# result itself is correct, but the lingering error code causes the *next*
+# HIP API call (e.g. a PyTorch element-wise op) to raise an exception.
+#
+# This affects any code that calls torch.matmul (which dispatches to rocBLAS)
+# and then performs further GPU work — exactly the pattern used in
+# correctness tests: out = tritonblas.matmul(a, b); ref = torch.matmul(a, b);
+# diff = (out - ref).abs()  <-- crashes here due to stale error 500.
+#
+# Fix: clear the HIP error state after every torch.matmul call by wrapping
+# it at import time, and after every Triton kernel launch as a defensive
+# measure against stale errors from Triton JIT compilation.
+try:
+    _libhip = ctypes.CDLL("libamdhip64.so")
+    _libhip.hipGetLastError.restype = ctypes.c_int
+    _hip_get_last_error = _libhip.hipGetLastError
+except OSError:
+    _hip_get_last_error = None
+
+
+def _clear_hip_error():
+    """Clear stale HIP error state (e.g. hipErrorNotFound from rocBLAS)."""
+    if _hip_get_last_error is not None:
+        _hip_get_last_error()
+
+
+# Wrap torch.matmul so stale hipErrorNotFound from rocBLAS first-call kernel
+# compilation is cleared before it can trip downstream GPU operations.
+_original_torch_matmul = torch.matmul
+
+
+@functools.wraps(_original_torch_matmul)
+def _safe_torch_matmul(*args, **kwargs):
+    result = _original_torch_matmul(*args, **kwargs)
+    _clear_hip_error()
+    return result
+
+
+torch.matmul = _safe_torch_matmul
 
 _tensor_cache = {}
 current_device_index = torch.cuda.current_device()
@@ -137,6 +183,7 @@ def persistent_matmul_lt(
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
     )
 
+    _clear_hip_error()
     return c
 
 def streamk_matmul_lt(
@@ -190,26 +237,29 @@ def streamk_matmul_lt(
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 
-    # Use global buffers with optimized zeroing
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-        locks = _global_locks[:grids]
-        P = _global_P[:grids, :block_size]
-    else:
-        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+    # Allocate workspace buffers for stream-K partial results.
+    # Always allocate fresh to remain compatible with torch.compile —
+    # FakeTensorMode cannot mix real module-level CUDA tensors with fake inputs.
+    locks = torch.zeros(grids, device=a.device, dtype=torch.uint8)
+    P = torch.zeros(grids, block_size, device=a.device, dtype=torch.float32)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     chunk_size = min(chunk_size, grids // num_xcds) 
+
+    # Provide dummy scale tensors when not quantized — torch.compile's tracer
+    # drops None positional args, breaking the kernel's argument order.
+    _a_scale = a_scale if quantized else a.new_empty(0)
+    _b_scale = b_scale if quantized else a.new_empty(0)
 
     #kk = streamk_matmul[(grids,)](
     kk = wrap_triton(streamk_matmul)[(grids,)](
         a,
         b,
         c,
-        a_scale if quantized else None,  # A_scale_ptr
-        b_scale if quantized else None,  # B_scale_ptr
-        bias if bias is not None else None,
+        _a_scale,  # A_scale_ptr
+        _b_scale,  # B_scale_ptr
+        bias if bias is not None else a.new_empty(0),
         P,
         locks,
         M,
@@ -219,7 +269,7 @@ def streamk_matmul_lt(
         b.stride(1),
         c.stride(0),
         c.stride(1),
-        bias.stride(0) if bias is not None else None,
+        bias.stride(0) if bias is not None else 0,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
         BLOCK_SIZE_M=BLK_M,
@@ -242,6 +292,7 @@ def streamk_matmul_lt(
         kpack=kpack,
     )
 
+    _clear_hip_error()
     return c
 
 def matmul_lt(

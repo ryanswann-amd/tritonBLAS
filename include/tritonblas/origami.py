@@ -241,6 +241,20 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # Cap num_stages so the selected tile fits in LDS.
+        # The pre-filter above removes tiles that don't fit at the requested
+        # num_stages, but the 256x256x64 heuristic or future changes could
+        # produce a tile/stages combination that exceeds LDS capacity.
+        # Reduce num_stages until the config fits.
+        sel_m = self._result.config.mt.m
+        sel_n = self._result.config.mt.n
+        sel_k = self._result.config.mt.k
+        while (self._num_stages > 1 and
+               not check_triton_lds_capacity(
+                   sel_m, sel_n, sel_k, bytes_a, bytes_b,
+                   lds_cap, self._num_stages)):
+            self._num_stages -= 1
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:

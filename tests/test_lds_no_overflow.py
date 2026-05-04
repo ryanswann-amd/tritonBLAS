@@ -139,3 +139,60 @@ class TestLdsCheckRejectsOverflow:
         256x256x128 bf16 stages=3 needs 262144 bytes > 163840 (MI355X 160KB).
         """
         assert not check_triton_lds_capacity(256, 256, 128, 2, 2, 163840, 3)
+
+    def test_problematic_config_fits_at_stages_2(self):
+        """256x256x128 bf16 stages=2 should fit in 160KB LDS.
+
+        (2-1) * (256*128*2 + 128*256*2) = 131072 <= 163840.
+        """
+        assert check_triton_lds_capacity(256, 256, 128, 2, 2, 163840, 2)
+
+    def test_max_stages_formula_for_crash_config(self):
+        """max_stages = floor(lds_cap / per_stage) + 1 = floor(163840/131072) + 1 = 2."""
+        per_stage = 256 * 128 * 2 + 128 * 256 * 2  # 131072
+        max_stages = int(163840 // per_stage) + 1
+        assert max_stages == 2, f"Expected max_stages=2, got {max_stages}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+class TestClampingWith160KBLDS:
+    """Simulate MI355X 160KB LDS on any GPU to exercise the clamping path.
+
+    The original crash: Origami selects 256x256x128 with stages=3 on MI355X,
+    needing 262KB — far exceeding the 160KB LDS limit. The fix clamps
+    num_stages after tile selection. This test patches hardware.lds_capacity
+    to 160KB to exercise that code path on any available GPU.
+    """
+
+    @pytest.fixture(autouse=True)
+    def patch_lds_capacity(self):
+        """Patch hardware LDS to 160KB for the test, restore afterwards."""
+        import origami
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        hw = origami.get_hardware_for_device(device.index)
+        real_lds = hw.lds_capacity
+        hw.lds_capacity = 163840  # 160KB, same as MI355X
+        yield hw
+        hw.lds_capacity = real_lds
+
+    @pytest.mark.parametrize("num_stages", [2, 3, 4], ids=[f"s{s}" for s in [2, 3, 4]])
+    def test_8192_clamp_at_160kb(self, num_stages, patch_lds_capacity):
+        """8192^3 bf16 at 160KB LDS must never overflow, regardless of stages."""
+        dtype = torch.bfloat16
+        bpe = _bytes_per_elem(dtype)
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+        sel = OrigamiMatmulSelector(
+            8192, 8192, 8192, dtype, dtype, dtype, device, num_stages=num_stages
+        )
+        usage = estimate_triton_lds_bytes(
+            sel.block_m, sel.block_n, sel.block_k, bpe, bpe, sel.num_stages
+        )
+        assert usage <= 163840, (
+            f"OVERFLOW at 160KB: {sel.block_m}x{sel.block_n}x{sel.block_k} "
+            f"s={sel.num_stages} (requested {num_stages}) uses {usage} > 163840"
+        )
+        # num_stages must be at most the requested value
+        assert sel.num_stages <= num_stages, (
+            f"num_stages increased: requested {num_stages}, got {sel.num_stages}"
+        )

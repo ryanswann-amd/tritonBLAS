@@ -25,9 +25,14 @@ torch._inductor.config.force_disable_caches = True
 # single-threaded compilation.  This needs to be fixed upstream in torch/triton.
 torch._inductor.config.compile_threads = 1
 
-# Hardware capability detection
+# Hardware capability detection — use defensive access pattern because
+# origami.hardware_t.arch may not exist in all origami versions.
 _hw = origami.get_hardware_for_device(torch.cuda.current_device())
-GPU_ARCH = _hw.arch.name
+if hasattr(_hw, 'arch') and hasattr(_hw.arch, 'name'):
+    GPU_ARCH = _hw.arch.name
+else:
+    _gcn = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "gcnArchName", "")
+    GPU_ARCH = _gcn.split(":")[0] if _gcn else "unknown"
 # Architectures that support FP4/FP6 datatypes
 _FP4_ARCHS = {"gfx950"}
 

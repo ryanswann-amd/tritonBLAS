@@ -404,9 +404,10 @@ def _matmul(
 
     # FP8 and INT8 inputs cannot produce output in the same dtype — the
     # accumulator is wider (float32 / int32) and quantized output would
-    # lose all precision.  Default to bfloat16 for FP8 and int32 for INT8.
+    # lose all precision.  Default to float16 for FP8 and int32 for INT8.
     out_dtype = a.dtype
-    if "float8" in str(a.dtype):
+    is_fp8 = "float8" in str(a.dtype)
+    if is_fp8:
         out_dtype = torch.float16
     elif a.dtype == torch.int8:
         out_dtype = torch.int32
@@ -414,6 +415,23 @@ def _matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+
+    # FP8 inputs require the quantized kernel path (input_precision="ieee"
+    # for correct MFMA instruction selection).  When the caller did not
+    # provide explicit scales we use unit scales so the kernel's scale
+    # epilogue is a no-op multiply-by-one.
+    if is_fp8:
+        a_scale = torch.ones(M, dtype=torch.float32, device=a.device)
+        b_scale = torch.ones(N, dtype=torch.float32, device=a.device)
+        if enable_streamk:
+            return streamk_matmul_lt(a, b, out, selector, config,
+                                     a_scale=a_scale, b_scale=b_scale,
+                                     quantized=True, work_stealing=work_stealing)
+        else:
+            return persistent_matmul_lt(a, b, out, selector, config,
+                                        a_scale=a_scale, b_scale=b_scale,
+                                        quantized=True, work_stealing=work_stealing)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:

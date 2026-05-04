@@ -1,4 +1,6 @@
+import ctypes
 import functools
+import logging
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -9,13 +11,98 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels.persistent_gemm_monolithic import persistent_matmul as _monolithic_persistent_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
-
+_log = logging.getLogger(__name__)
 
 _tensor_cache = {}
+
+# ---------------------------------------------------------------------------
+# HIP error clearing
+# ---------------------------------------------------------------------------
+# When hipBLASLt or other HIP libraries encounter unsupported operations they
+# may leave a sticky error (e.g. ``hipErrorNotFound``) on the HIP runtime's
+# per-thread error state.  Subsequent Triton kernel launches read this stale
+# error and abort even though the kernel itself is fine.  Calling
+# ``hipGetLastError`` clears the sticky flag.
+#
+# This function is NOT called on the normal dispatch hot-path.  It is invoked
+# only during error-recovery (when the composable-stages kernel fails and we
+# fall back to the monolithic kernel) to drain errors left by the failed
+# attempt.
+
+def _get_hip_lib():
+    """Return the cached HIP runtime ctypes handle, or *None*."""
+    global _hip_lib
+    if _hip_lib is _HIP_SENTINEL:
+        try:
+            lib = ctypes.CDLL("libamdhip64.so")
+            lib.hipGetLastError.restype = ctypes.c_int
+            lib.hipDeviceSynchronize.restype = ctypes.c_int
+            _hip_lib = lib
+        except OSError:
+            _log.debug("libamdhip64.so not available — HIP error clearing disabled.")
+            _hip_lib = None
+    return _hip_lib
+
+# Sentinel so we can lazily initialise *once* (including when the lib is absent).
+_HIP_SENTINEL = object()
+_hip_lib = _HIP_SENTINEL
+
+
+def _drain_hip_error() -> None:
+    """Cheaply drain the host-side sticky HIP error (``hipGetLastError``).
+
+    This is safe to call on the hot-path — ``hipGetLastError`` is a
+    single thread-local read-and-clear with negligible overhead (no device
+    synchronisation).  It prevents stale errors left by *other* libraries
+    (e.g. hipBLASLt trying unsupported algorithms) from poisoning a
+    subsequent Triton kernel launch.
+    """
+    hip = _get_hip_lib()
+    if hip is None:
+        return
+    try:
+        err = hip.hipGetLastError()
+        if err != 0:
+            _log.debug("Drained stale HIP error %d before kernel dispatch.", err)
+    except Exception:
+        pass
+
+
+def _clear_hip_error() -> None:
+    """Aggressively clear any stale HIP error (host *and* device side).
+
+    Drains both the thread-local sticky error (``hipGetLastError``) and
+    any asynchronous device-side error (``hipDeviceSynchronize`` +
+    second ``hipGetLastError``).
+
+    Only called on the error-recovery path, never on the normal dispatch
+    hot-path, so the ``hipDeviceSynchronize`` cost is acceptable.
+    """
+    hip = _get_hip_lib()
+    if hip is None:
+        return
+    try:
+        # First clear: host-side sticky error
+        hip.hipGetLastError()
+        # Synchronize to surface any async device errors, then clear again
+        hip.hipDeviceSynchronize()
+        hip.hipGetLastError()
+    except Exception:
+        _log.warning("Failed to clear stale HIP error — kernel launch may fail.", exc_info=True)
+
+# ---------------------------------------------------------------------------
+# Monolithic-kernel fallback flag
+# ---------------------------------------------------------------------------
+# If the composable-stages kernel fails to JIT-compile (e.g. because the
+# installed Triton lacks aggregate / struct support) we set this flag so that
+# all subsequent dispatches go straight to the monolithic kernel without
+# paying the compilation-failure overhead each time.
+_use_monolithic_fallback = False
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
@@ -66,19 +153,16 @@ def _make_matmul_selector(
     )
 
 
-def persistent_matmul_lt(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    selector,
-    config: Optional[MatmulConfig] = None,
-    bias: Optional[torch.Tensor] = None,
-    a_scale: Optional[torch.Tensor] = None,
-    b_scale: Optional[torch.Tensor] = None,
-    quantized: bool = False,
-    work_stealing: bool = False,
+def _dispatch_persistent_kernel(
+    kernel_fn, a, b, c, selector, config, bias, a_scale, b_scale,
+    quantized, work_stealing,
 ):
-    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    """Low-level dispatch shared by persistent_matmul_lt and its fallback path."""
+    # Drain any stale HIP error left by other libraries (e.g. hipBLASLt)
+    # before launching the Triton kernel.  hipGetLastError is a cheap
+    # thread-local read — no device synchronisation overhead.
+    _drain_hip_error()
+
     M, K = a.shape
     _, N = b.shape
 
@@ -112,7 +196,7 @@ def persistent_matmul_lt(
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
 
-        kk = _maybe_wrap(ws_persistent_matmul, probe_tensor=a)[(grids,)](
+        _maybe_wrap(ws_persistent_matmul, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -160,7 +244,7 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
+        _maybe_wrap(kernel_fn, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -197,13 +281,58 @@ def persistent_matmul_lt(
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
         )
 
+
+def persistent_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    config: Optional[MatmulConfig] = None,
+    bias: Optional[torch.Tensor] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+    work_stealing: bool = False,
+):
+    global _use_monolithic_fallback
+
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+
+    kernel_fn = _monolithic_persistent_matmul if _use_monolithic_fallback else persistent_matmul
+
+    try:
+        _dispatch_persistent_kernel(
+            kernel_fn, a, b, c, selector, config, bias,
+            a_scale, b_scale, quantized, work_stealing,
+        )
+    except Exception as exc:
+        # If the composable-stages kernel failed (e.g. Triton compilation
+        # error due to missing aggregate support) fall back to the
+        # monolithic kernel for this call and all future calls.
+        if _use_monolithic_fallback or kernel_fn is _monolithic_persistent_matmul:
+            raise  # Already on the fallback path — propagate the real error.
+
+        _log.warning(
+            "Composable-stages kernel failed (%s); retrying with monolithic kernel.",
+            exc,
+        )
+        _use_monolithic_fallback = True
+
+        # Clear any HIP error the failed attempt may have left behind.
+        _clear_hip_error()
+
+        _dispatch_persistent_kernel(
+            _monolithic_persistent_matmul, a, b, c, selector, config, bias,
+            a_scale, b_scale, quantized, work_stealing,
+        )
+
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
@@ -480,6 +609,10 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Drain stale HIP errors (e.g. from hipBLASLt) before any CUDA call so
+    # that tensor allocation and kernel launch don't see leftover errors.
+    _drain_hip_error()
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
@@ -505,6 +638,7 @@ def matmul_a8w8(
     work_stealing=False,
     sk_grid=None,
 ):
+    _drain_hip_error()
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -733,6 +867,9 @@ def addmm(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Drain stale HIP errors (e.g. from hipBLASLt) before any CUDA call.
+    _drain_hip_error()
+
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
         return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing)

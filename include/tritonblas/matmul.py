@@ -22,8 +22,46 @@ current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
 MAX_BLOCK_SIZE = 65536
 
-_global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
-_global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+# Global pre-allocated buffers for StreamK work-stealing scheduler.
+# These are lazily initialized to avoid issues with torch.compile FakeTensor
+# tracing, which cannot handle module-level CUDA tensors being sliced inside
+# compiled regions.
+_global_locks: Optional[torch.Tensor] = None
+_global_P: Optional[torch.Tensor] = None
+
+
+def _get_global_buffers(grids: int, block_size: int, device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return work-stealing lock and partial-result buffers for StreamK.
+
+    When running under torch.compile (FakeTensor tracing), we always allocate
+    fresh tensors so the compiler never captures a reference to mutable global
+    CUDA state.  Outside of compile, we reuse pre-allocated global buffers when
+    the requested size fits, falling back to fresh allocation otherwise.
+    """
+    global _global_locks, _global_P
+
+    # Inside torch.compile tracing, always allocate fresh tensors to avoid
+    # capturing global CUDA tensor state that causes SIGABRT on gfx950.
+    if torch.compiler.is_compiling():
+        locks = torch.empty(grids, device=device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=device, dtype=torch.float32)
+        return locks, P
+
+    # Lazy init of global buffers (deferred from module load time so that
+    # the default CUDA device is properly set).
+    if _global_locks is None:
+        _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
+    if _global_P is None:
+        _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device=device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=device, dtype=torch.float32)
+
+    return locks, P
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -262,12 +300,9 @@ def streamk_matmul_lt(
             locks = torch.empty(grids, device=config.device, dtype=torch.uint8)
             P = torch.empty(grids, block_size, device=config.device, dtype=torch.float32)
     else:
-        if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-            locks = _global_locks[:grids]
-            P = _global_P[:grids, :block_size]
-        else:
-            locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
-            P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+        # Obtain work-stealing buffers (compile-safe: avoids global CUDA tensor
+        # references that cause SIGABRT during torch.compile FakeTensor tracing).
+        locks, P = _get_global_buffers(grids, block_size, a.device)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

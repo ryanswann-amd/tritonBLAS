@@ -12,7 +12,6 @@ This test catches the bug where Origami selects 256x256x128 stages=3 on MI355X
 (needs 262KB, limit is 160KB) and similar overflow cases.
 """
 
-import itertools
 import pytest
 import torch
 
@@ -76,37 +75,44 @@ class TestOrigamiNeverOverflowsLDS:
     def test_selected_tile_fits_in_lds(self, M, N, K, dtype, num_stages, hardware_lds):
         """The tile Origami selects must fit in the actual hardware LDS."""
         bpe = _bytes_per_elem(dtype)
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
 
         try:
-            selector = OrigamiMatmulSelector(M, N, K, dtype, dtype, num_stages=num_stages)
+            selector = OrigamiMatmulSelector(
+                M, N, K, dtype, dtype, dtype, device, num_stages=num_stages
+            )
         except Exception:
             pytest.skip("Origami selector failed to initialize")
 
         bm = selector._result.config.mt.m
         bn = selector._result.config.mt.n
         bk = selector._result.config.mt.k
+        # Use the clamped num_stages, not the requested value — the selector
+        # may have reduced it to fit within the hardware LDS budget.
+        clamped_stages = selector.num_stages
 
-        actual_lds = estimate_triton_lds_bytes(bm, bn, bk, bpe, bpe, num_stages)
+        actual_lds = estimate_triton_lds_bytes(bm, bn, bk, bpe, bpe, clamped_stages)
 
         assert actual_lds <= hardware_lds, (
-            f"Origami selected {bm}x{bn}x{bk} stages={num_stages} for {M}x{N}x{K} {dtype} "
+            f"Origami selected {bm}x{bn}x{bk} stages={clamped_stages} "
+            f"(requested {num_stages}) for {M}x{N}x{K} {dtype} "
             f"which needs {actual_lds} bytes LDS, but hardware limit is {hardware_lds} bytes "
             f"({hardware_lds // 1024} KB). "
             f"Origami must cap num_stages or reject this tile."
         )
 
+
+class TestLdsCheckRejectsOverflow:
+    """Pure formula tests — no GPU needed."""
+
     @pytest.mark.parametrize("lds_limit_name,lds_limit", LDS_LIMITS.items())
-    @pytest.mark.parametrize(
-        "M,N,K",
-        SHAPES,
-        ids=[f"{m}x{n}x{k}" for m, n, k in SHAPES],
-    )
     @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
     @pytest.mark.parametrize("num_stages", NUM_STAGES_VALUES, ids=[f"s{s}" for s in NUM_STAGES_VALUES])
-    def test_lds_check_rejects_overflow(self, lds_limit_name, lds_limit, M, N, K, dtype, num_stages):
-        """check_triton_lds_capacity must reject configs that exceed the limit.
+    def test_lds_check_consistent_with_estimate(self, lds_limit_name, lds_limit, dtype, num_stages):
+        """check_triton_lds_capacity must agree with estimate_triton_lds_bytes.
 
-        This is a pure formula test — no GPU needed.
+        For every (tile, stages, lds_limit) combination, check_triton_lds_capacity
+        must return True iff estimate_triton_lds_bytes <= lds_limit.
         """
         bpe = _bytes_per_elem(dtype)
 
@@ -126,3 +132,10 @@ class TestOrigamiNeverOverflowsLDS:
                             f"check_triton_lds_capacity WRONGLY REJECTED {bm}x{bn}x{bk} "
                             f"stages={num_stages} on {lds_limit_name}: needs {lds_needed} <= {lds_limit}"
                         )
+
+    def test_problematic_config_rejected(self):
+        """The specific config that caused the MI355X crash must be rejected.
+
+        256x256x128 bf16 stages=3 needs 262144 bytes > 163840 (MI355X 160KB).
+        """
+        assert not check_triton_lds_capacity(256, 256, 128, 2, 2, 163840, 3)

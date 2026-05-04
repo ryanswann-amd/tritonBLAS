@@ -98,7 +98,7 @@ def streamk_matmul(
 
             # Conditional dot product precision based on quantization mode
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, out_dtype=tl.float32)
             else:
                 acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak
@@ -122,7 +122,7 @@ def streamk_matmul(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, out_dtype=tl.float32)
             else:
                 acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
@@ -228,7 +228,7 @@ def streamk_matmul(
 
             # Conditional dot product precision for Stream-K loop
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, out_dtype=tl.float32)
             else:
                 acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
             A_BASE += BLOCK_SIZE_K * stride_ak

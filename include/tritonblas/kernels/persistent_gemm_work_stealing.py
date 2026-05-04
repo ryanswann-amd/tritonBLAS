@@ -149,7 +149,7 @@ def ws_persistent_matmul(
                 else:
                     b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
                 if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
+                    acc += tl.dot(a, b, out_dtype=tl.float32)
                 else:
                     acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
                 A_BASE += BLOCK_SIZE_K * stride_ak
@@ -171,7 +171,7 @@ def ws_persistent_matmul(
                 a = tl.load(A_REM, mask=mask_m[:, None] & (rk_rem[None, :] < K), other=0.0, cache_modifier=CACHE_MODIFIER_A)
                 b = tl.load(B_REM, mask=mask_n[None, :] & (rk_rem[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
                 if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
+                    acc += tl.dot(a, b, out_dtype=tl.float32)
                 else:
                     acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
@@ -240,7 +240,7 @@ def ws_persistent_matmul(
                     else:
                         b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
                     if QUANTIZED:
-                        acc += tl.dot(a, b, input_precision="ieee")
+                        acc += tl.dot(a, b, out_dtype=tl.float32)
                     else:
                         acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
                     A_BASE += BLOCK_SIZE_K * stride_ak
@@ -262,7 +262,7 @@ def ws_persistent_matmul(
                     a = tl.load(A_REM, mask=mask_m[:, None] & (rk_rem[None, :] < K), other=0.0, cache_modifier=CACHE_MODIFIER_A)
                     b = tl.load(B_REM, mask=mask_n[None, :] & (rk_rem[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
                     if QUANTIZED:
-                        acc += tl.dot(a, b, input_precision="ieee")
+                        acc += tl.dot(a, b, out_dtype=tl.float32)
                     else:
                         acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 
@@ -357,7 +357,7 @@ def ws_persistent_matmul(
                     b = tl.load(tl.multiple_of(B_BASE, (1, 16)), mask=mask_n[None, :], other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
                 if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
+                    acc += tl.dot(a, b, out_dtype=tl.float32)
                 else:
                     acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
                 A_BASE += BLOCK_SIZE_K * stride_ak
@@ -380,7 +380,7 @@ def ws_persistent_matmul(
                 b = tl.load(B_REM, mask=mask_n[None, :] & (rk_rem[:, None] < K), other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
                 if QUANTIZED:
-                    acc += tl.dot(a, b, input_precision="ieee")
+                    acc += tl.dot(a, b, out_dtype=tl.float32)
                 else:
                     acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
 

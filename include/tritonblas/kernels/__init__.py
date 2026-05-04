@@ -13,15 +13,16 @@ Environment Variables:
 
 import os
 
-# Check environment variable to determine which persistent kernel to use
-_use_monolithic = os.environ.get('TBLAS_USE_MONOLITHIC', '').lower() in ('1', 'true', 'yes')
+# Check environment variable to determine which persistent kernel to use.
+# Default to monolithic (compatible with all Triton versions).
+# Set TBLAS_USE_STAGES=1 to use the composable stages version (requires
+# Triton with aggregate @triton.jit support in __init__ methods).
+_use_stages = os.environ.get('TBLAS_USE_STAGES', '').lower() in ('1', 'true', 'yes')
 
-if _use_monolithic:
-    # Use monolithic version (legacy implementation)
-    from .persistent_gemm_monolithic import persistent_matmul
-else:
-    # Use composable stages version (default)
+if _use_stages:
     from .persistent_gemm import persistent_matmul
+else:
+    from .persistent_gemm_monolithic import persistent_matmul
 
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul

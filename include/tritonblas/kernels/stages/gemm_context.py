@@ -119,7 +119,7 @@ class GemmContext:
             acc_dtype: Accumulator dtype (default: tl.float32)
             allow_tf32: Allow TF32 for matmul (default: True)
             even_k: Whether K is evenly divisible by BLOCK_K (default: True)
-            quantized: Use int32 accumulation for quantized inputs (default: False)
+            quantized: Enable quantized input path (int8 uses int32, fp8 uses float32) (default: False)
         """
         self.block_m = tl.constexpr(block_m)
         self.block_n = tl.constexpr(block_n)
@@ -218,9 +218,9 @@ class GemmContext:
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=tl.int32)
+            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
         else:
-            acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
+            acc += tl.dot(a, b, allow_tf32=self.allow_tf32, out_dtype=self.acc_dtype)
         
         return acc
     

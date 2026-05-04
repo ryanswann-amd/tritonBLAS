@@ -34,7 +34,7 @@ def persistent_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -50,7 +50,9 @@ def persistent_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    # Gate acc_dtype on input type (A), not output type (C).
+    # FP8 MFMA instructions always produce FP32; INT8 uses int32.
+    acc_dtype = tl.int32 if A.type.element_ty == tl.int8 else tl.float32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -65,14 +67,11 @@ def persistent_matmul(
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
         rk = tl.arange(0, BLOCK_SIZE_K)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
         B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
-        if BIAS:
-            bias_ = bias_ptr + rm * stride_bias
-            bias = tl.load(bias_, mask=rm < M, other=0.0)
+        if False:
+            pass  # bias applied after accumulation
 
         loop_k = tl.cdiv(K, BLOCK_SIZE_K)
         if not EVEN_K:
@@ -93,9 +92,9 @@ def persistent_matmul(
 
             # Conditional dot product precision based on quantization mode
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, input_precision="ieee", out_dtype=acc_dtype)
             else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=acc_dtype)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -117,9 +116,9 @@ def persistent_matmul(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, input_precision="ieee", out_dtype=acc_dtype)
             else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=acc_dtype)
 
         # Conditional scaling for quantized mode
         if QUANTIZED:
@@ -130,24 +129,24 @@ def persistent_matmul(
             B_scale = tl.load(B_scale_ptr + rn_B_scale)
             acc *= A_scale[:, None] * B_scale[None, :]
 
-        # Unified bias handling
-        if BIAS:
-            if QUANTIZED:
-                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
-                bias_float = bias.to(tl.float32)
-                c = acc + bias_float[:, None]
-                c = c.to(C.type.element_ty)
-            else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[:, None]
-        else:
-            c = acc.to(C.type.element_ty)
+        c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+        # Add bias along N dimension: each column j gets bias[j].
+        if BIAS:
+            # Load from C's column indices (rn), NOT using stride_bias
+            # to rule out stride parameter issues.
+            offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            bias_1d = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
+            # Manually construct 2D bias tile: repeat bias across M rows
+            offs_m = tl.arange(0, BLOCK_SIZE_M)
+            bias_2d_ptrs = bias_ptr + offs_n[None, :] + offs_m[:, None] * 0
+            bias_2d = tl.load(bias_2d_ptrs, mask=offs_n[None, :] < N, other=0.0)
+            c = c.to(tl.float32) + bias_2d.to(tl.float32)
+            c = c.to(C.type.element_ty)
+
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)

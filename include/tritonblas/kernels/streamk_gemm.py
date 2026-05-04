@@ -37,7 +37,7 @@ def streamk_matmul(
     CACHE_MODIFIER_A: tl.constexpr,
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
-    ALLOW_TF32: tl.constexpr = torch.backends.cuda.matmul.allow_tf32,
+    ALLOW_TF32: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -54,7 +54,9 @@ def streamk_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    # Gate acc_dtype on input type (A), not output type (C).
+    # FP8 MFMA instructions always produce FP32; INT8 uses int32.
+    acc_dtype = tl.int32 if A.type.element_ty == tl.int8 else tl.float32
 
     # Full tiles loop
     for tile_id in range(pid, total_full_tiles, NUM_SMS):
@@ -98,9 +100,9 @@ def streamk_matmul(
 
             # Conditional dot product precision based on quantization mode
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, input_precision="ieee", out_dtype=acc_dtype)
             else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=acc_dtype)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -122,9 +124,9 @@ def streamk_matmul(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0, cache_modifier=CACHE_MODIFIER_B)
 
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, input_precision="ieee", out_dtype=acc_dtype)
             else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=acc_dtype)
 
         # Conditional scaling for quantized mode
         if QUANTIZED:
@@ -135,19 +137,10 @@ def streamk_matmul(
             B_scale = tl.load(B_scale_ptr + rn_B_scale)
             acc *= A_scale[:, None] * B_scale[None, :]
 
-        # Unified bias handling for full tiles
+        # Add bias in float32 (before down-conversion) to preserve precision.
         if BIAS:
-            if QUANTIZED:
-                # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
-                bias_float = bias.to(tl.float32)
-                c = acc + bias_float[None, :]
-                c = c.to(C.type.element_ty)
-            else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[None, :]
-        else:
-            c = acc.to(C.type.element_ty)
+            acc += bias.to(tl.float32)[None, :]
+        c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -228,9 +221,9 @@ def streamk_matmul(
 
             # Conditional dot product precision for Stream-K loop
             if QUANTIZED:
-                acc += tl.dot(a, b, input_precision="ieee")
+                acc += tl.dot(a, b, input_precision="ieee", out_dtype=acc_dtype)
             else:
-                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
+                acc += tl.dot(a, b, allow_tf32=ALLOW_TF32, out_dtype=acc_dtype)
             A_BASE += BLOCK_SIZE_K * stride_ak
             B_BASE += BLOCK_SIZE_K * stride_bk
 
@@ -338,20 +331,13 @@ def streamk_matmul(
                 bias_left_reshaped = tl.reshape(bias_left, (1, BLOCK_SIZE_N // 2))
                 bias_right_reshaped = tl.reshape(bias_right, (1, BLOCK_SIZE_N // 2))
 
-                if QUANTIZED:
-                    # For quantized mode: convert bias to float32 before adding
-                    bias_left_float = bias_left_reshaped.to(tl.float32)
-                    bias_right_float = bias_right_reshaped.to(tl.float32)
-                    acc00 += bias_left_float
-                    acc01 += bias_right_float
-                    acc10 += bias_left_float
-                    acc11 += bias_right_float
-                else:
-                    # For non-quantized mode: add bias directly
-                    acc00 += bias_left_reshaped
-                    acc01 += bias_right_reshaped
-                    acc10 += bias_left_reshaped
-                    acc11 += bias_right_reshaped
+                # Always add bias in float32 to preserve precision.
+                bias_left_float = bias_left_reshaped.to(tl.float32)
+                bias_right_float = bias_right_reshaped.to(tl.float32)
+                acc00 += bias_left_float
+                acc01 += bias_right_float
+                acc10 += bias_left_float
+                acc11 += bias_right_float
 
             # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)

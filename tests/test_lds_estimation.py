@@ -32,10 +32,10 @@ def _get_hardware():
         return None
     try:
         import origami
-        device_id = torch.cuda.current_device()
-        return origami.get_hardware_for_device(device_id)
-    except Exception:
+    except ImportError:
         return None
+    device_id = torch.cuda.current_device()
+    return origami.get_hardware_for_device(device_id)
 
 
 class TestEstimateTritonLdsBytes:

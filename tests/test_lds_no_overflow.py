@@ -2,7 +2,7 @@
 
 For every combination of:
 - GEMM shape (M, N, K) covering small, medium, large, and the problematic 8192^3
-- dtype (fp16, bf16, fp8)
+- dtype (fp16, bf16, and fp8 when available)
 - num_stages (2, 3, 4)
 - architecture (MI300X 64KB, MI350X 160KB)
 
@@ -38,6 +38,11 @@ SHAPES = [
 ]
 
 DTYPES = [torch.float16, torch.bfloat16]
+# Add FP8 coverage when available (requires ROCm with FP8 support)
+if hasattr(torch, "float8_e4m3fnuz"):
+    DTYPES.append(torch.float8_e4m3fnuz)
+elif hasattr(torch, "float8_e4m3fn"):
+    DTYPES.append(torch.float8_e4m3fn)
 
 NUM_STAGES_VALUES = [2, 3, 4]
 
@@ -45,6 +50,16 @@ LDS_LIMITS = {
     "MI300X_64KB": 65536,
     "MI350X_160KB": 163840,
 }
+
+
+_DTYPE_NAMES = {
+    torch.float16: "fp16",
+    torch.bfloat16: "bf16",
+}
+if hasattr(torch, "float8_e4m3fnuz"):
+    _DTYPE_NAMES[torch.float8_e4m3fnuz] = "fp8"
+if hasattr(torch, "float8_e4m3fn"):
+    _DTYPE_NAMES[torch.float8_e4m3fn] = "fp8"
 
 
 def _bytes_per_elem(dtype):
@@ -60,29 +75,26 @@ class TestOrigamiNeverOverflowsLDS:
         """Get the actual LDS capacity from the hardware."""
         try:
             import origami
-            hw = origami.get_hardware_for_device(torch.cuda.current_device())
-            return hw.lds_capacity
-        except Exception:
-            pytest.skip("origami hardware detection unavailable")
+        except ImportError:
+            pytest.skip("origami not installed")
+        hw = origami.get_hardware_for_device(torch.cuda.current_device())
+        return hw.lds_capacity
 
     @pytest.mark.parametrize(
         "M,N,K",
         SHAPES,
         ids=[f"{m}x{n}x{k}" for m, n, k in SHAPES],
     )
-    @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
+    @pytest.mark.parametrize("dtype", DTYPES, ids=[_DTYPE_NAMES[d] for d in DTYPES])
     @pytest.mark.parametrize("num_stages", NUM_STAGES_VALUES, ids=[f"s{s}" for s in NUM_STAGES_VALUES])
     def test_selected_tile_fits_in_lds(self, M, N, K, dtype, num_stages, hardware_lds):
         """The tile Origami selects must fit in the actual hardware LDS."""
         bpe = _bytes_per_elem(dtype)
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
 
-        try:
-            selector = OrigamiMatmulSelector(
-                M, N, K, dtype, dtype, dtype, device, num_stages=num_stages
-            )
-        except Exception:
-            pytest.skip("Origami selector failed to initialize")
+        selector = OrigamiMatmulSelector(
+            M, N, K, dtype, dtype, dtype, device, num_stages=num_stages
+        )
 
         bm = selector._result.config.mt.m
         bn = selector._result.config.mt.n
@@ -106,7 +118,7 @@ class TestLdsCheckRejectsOverflow:
     """Pure formula tests — no GPU needed."""
 
     @pytest.mark.parametrize("lds_limit_name,lds_limit", LDS_LIMITS.items())
-    @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
+    @pytest.mark.parametrize("dtype", DTYPES, ids=[_DTYPE_NAMES[d] for d in DTYPES])
     @pytest.mark.parametrize("num_stages", NUM_STAGES_VALUES, ids=[f"s{s}" for s in NUM_STAGES_VALUES])
     def test_lds_check_consistent_with_estimate(self, lds_limit_name, lds_limit, dtype, num_stages):
         """check_triton_lds_capacity must agree with estimate_triton_lds_bytes.

@@ -236,8 +236,12 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # Heuristic to favor 256x256x64 tile when close.
+        # Check LDS capacity at min_stages (not the requested num_stages)
+        # because the post-selection clamping below will adjust num_stages
+        # to fit.  Using the requested value would incorrectly block this
+        # heuristic when num_stages is high but the tile fits after clamping.
+        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, min_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256

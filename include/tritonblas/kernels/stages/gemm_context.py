@@ -218,7 +218,7 @@ class GemmContext:
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=tl.int32)
+            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
         

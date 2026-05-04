@@ -470,6 +470,8 @@ class OrigamiMatmulSelector:
                     self._block_k_range = self._block_k_range + [256]
                 else:
                     self._block_k_range = self._block_k_range + [128]
+                # gfx950 FP8 MFMA requires K >= 128; filter out smaller values
+                self._block_k_range = [k for k in self._block_k_range if k >= 128]
                 self._block_mn_range = [32, 64, 128, 256]
                 mi_dim = origami.dim3_t(16, 16, 128)
         # gfx942 (304 CUs full, 80 CUs partitioned, 64 CUs)

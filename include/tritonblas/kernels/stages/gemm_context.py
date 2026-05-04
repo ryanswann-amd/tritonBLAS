@@ -86,7 +86,6 @@ class GemmContext:
     even_k: tl.constexpr
     quantized: tl.constexpr
     
-    @triton.constexpr_function
     def __init__(
         self,
         block_m,
@@ -218,7 +217,12 @@ class GemmContext:
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
+            if self.acc_dtype == tl.int32:
+                # INT8 inputs: use int32 accumulation
+                acc += tl.dot(a, b, out_dtype=tl.int32)
+            else:
+                # FP8 inputs: use IEEE precision for correct MFMA selection
+                acc += tl.dot(a, b, input_precision="ieee")
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
         

@@ -61,7 +61,6 @@ class InputView:
     stride_row: tl.tensor
     stride_col: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, rows, cols, stride_row, stride_col):
 
         self.ptr = ptr
@@ -69,18 +68,18 @@ class InputView:
         self.cols = cols
         self.stride_row = stride_row
         self.stride_col = stride_col
-    
+
     @triton.jit
     def tile_ptrs(self, tile: Tile):
         """
         Compute pointer array and bounds mask for a tile.
-        
+
         Uses the general formula: ptr[i,j] = base + i*stride_row + j*stride_col
         This works for any memory layout (row-major, col-major, or other).
-        
+
         Args:
             tile: Tile object with (pid_row, pid_col, block_row, block_col)
-            
+
         Returns:
             ptrs: 2D pointer array [BLOCK_ROW, BLOCK_COL]
             mask: 2D boolean mask for boundary handling
@@ -90,17 +89,17 @@ class InputView:
         r_row, r_col, mask = tile.layout(self.rows, self.cols)
         ptrs = self.ptr + r_row[:, None] * self.stride_row + r_col[None, :] * self.stride_col
         return ptrs, mask
-    
+
     @triton.jit
     def load(self, tile: Tile, boundary: tl.constexpr = False, cache_modifier: tl.constexpr = ".cg"):
         """
         Load a tile from this matrix.
-        
+
         Args:
             tile: Tile with coordinates and shape
             boundary: If True, apply boundary masking for partial tiles
             cache_modifier: Cache modifier for load instruction
-        
+
         Returns:
             Loaded tile data [BLOCK_ROW, BLOCK_COL]
         """
@@ -134,7 +133,6 @@ class ScaleView:
     stride_a: tl.tensor
     stride_b: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, a_scale_ptr, b_scale_ptr, M, N, stride_a, stride_b):
 
         self.a_scale_ptr = a_scale_ptr
@@ -184,7 +182,6 @@ class BiasView:
     N: tl.tensor
     stride: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, N, stride):
         self.ptr = ptr
         self.N = N
@@ -240,7 +237,6 @@ class OutputView:
     stride_row: tl.tensor
     stride_col: tl.tensor
     
-    @triton.constexpr_function
     def __init__(self, ptr, rows, cols, stride_row, stride_col):
         self.ptr = ptr
         self.rows = rows

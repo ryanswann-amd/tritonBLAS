@@ -1,3 +1,4 @@
+import ctypes
 import functools
 import random
 import time
@@ -13,6 +14,38 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+# ---------------------------------------------------------------------------
+# HIP error clearing for ROCm compatibility
+# ---------------------------------------------------------------------------
+# On ROCm 6.x, rocBLAS leaves a stale hipErrorNotFound (error 500) in the
+# HIP runtime error state after first kernel compilation.  The result is
+# correct, but the lingering error code causes the next HIP API call to
+# raise.  Fix: clear the error state after every torch.matmul call.
+try:
+    _libhip = ctypes.CDLL("libamdhip64.so")
+    _libhip.hipGetLastError.restype = ctypes.c_int
+    _hip_get_last_error = _libhip.hipGetLastError
+except OSError:
+    _hip_get_last_error = None
+
+
+def _clear_hip_error():
+    """Clear stale HIP error state (e.g. hipErrorNotFound from rocBLAS)."""
+    if _hip_get_last_error is not None:
+        _hip_get_last_error()
+
+
+_original_torch_matmul = torch.matmul
+
+
+@functools.wraps(_original_torch_matmul)
+def _safe_torch_matmul(*args, **kwargs):
+    result = _original_torch_matmul(*args, **kwargs)
+    _clear_hip_error()
+    return result
+
+
+torch.matmul = _safe_torch_matmul
 
 
 _tensor_cache = {}
@@ -38,7 +71,7 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -95,12 +128,13 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    num_warps = getattr(selector, "num_warps", 8)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -241,12 +275,13 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    num_warps = getattr(selector, "num_warps", 8)
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

@@ -233,10 +233,34 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
-            ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
+        # Tile refinement for medium shapes: when Origami selects large tiles
+        # that leave CUs underutilized, try 128-wide tiles instead.
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ceil(m / bm) * ceil(n / bn)
+        n_cu = self._N_CU
+        if total_tiles < n_cu and min(m, n) >= 128 and max(m, n) < 4096:
+            for (cm, cn, ck) in [(128, 128, 64), (128, 128, 128)]:
+                cand_tiles = ceil(m / cm) * ceil(n / cn)
+                if (cand_tiles > total_tiles
+                        and check_triton_lds_capacity(
+                            cm, cn, ck, bytes_a, bytes_b, lds_cap,
+                            self._num_stages)):
+                    self._result.config.mt.m = cm
+                    self._result.config.mt.n = cn
+                    self._result.config.mt.k = ck
+                    break
+
+        # For large shapes (M >= 4096 AND N >= 4096), prefer 256x256x64 when
+        # Origami picks an asymmetric tile with one dim at 256.
+        if (m >= 4096 and n >= 4096
+                and check_triton_lds_capacity(
+                    256, 256, 64, bytes_a, bytes_b, lds_cap,
+                    self._num_stages)
+                and ((self._result.config.mt.m == 256
+                      and self._result.config.mt.n != 256)
+                     or (self._result.config.mt.m != 256
+                         and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64

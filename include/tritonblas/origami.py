@@ -251,16 +251,17 @@ class OrigamiMatmulSelector:
                     self._result.config.mt.k = ck
                     break
 
-        # For large shapes (M >= 4096 AND N >= 4096), prefer 256x256x64 when
-        # Origami picks an asymmetric tile with one dim at 256.
+        # For large shapes (M >= 4096 AND N >= 4096), prefer 256x256x64.
+        # The 256x256 tile has much higher compute density per workgroup
+        # than smaller tiles (64x64 etc.), which more than compensates for
+        # lower CU utilization.  Only skip when the shape already has a
+        # 256x256 tile or 256x256 wouldn't fit in LDS.
         if (m >= 4096 and n >= 4096
                 and check_triton_lds_capacity(
                     256, 256, 64, bytes_a, bytes_b, lds_cap,
                     self._num_stages)
-                and ((self._result.config.mt.m == 256
-                      and self._result.config.mt.n != 256)
-                     or (self._result.config.mt.m != 256
-                         and self._result.config.mt.n == 256))):
+                and (self._result.config.mt.m != 256
+                     or self._result.config.mt.n != 256)):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64

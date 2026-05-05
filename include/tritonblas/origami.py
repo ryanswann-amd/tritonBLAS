@@ -342,22 +342,13 @@ class OrigamiMatmulSelector:
 
     @property
     def num_warps(self):
-        """Select num_warps based on tile area.
+        """Number of warps per workgroup.
 
-        Medium tiles (64x64 through 128x128) benefit from 4 warps which
-        reduces register pressure and scheduling overhead.  Very small
-        tiles (< 64x64) keep 8 warps to hide memory latency since each
-        tile has very few MFMA instructions.  Large tiles (>= 256x128)
-        saturate 8 warps with dense MFMA work.
-
-        Empirically validated on MI300X (gfx942) across 30 shapes:
-          256x256+ tiles: 8 warps (saturate MFMA pipeline)
-          64x64 to 128x128: 4 warps (reduce register pressure)
-          <64x64 tiles: 8 warps (latency hiding dominates)
+        Fixed at 8 warps for all tile sizes on MI300X (gfx942).
+        Empirically validated: 8 warps consistently outperforms 4 warps
+        across all tile sizes (small through large) due to better
+        latency hiding and MFMA pipeline utilization on CDNA 3.
         """
-        tile_area = self.block_m * self.block_n
-        if 64 * 64 <= tile_area <= 128 * 128:
-            return 4
         return 8
 
     @property

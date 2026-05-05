@@ -233,13 +233,18 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
+        # Heuristic to favor 256x256x64 tile when origami chose an
+        # asymmetric 256xN or Mx256 tile.  Only apply when the resulting
+        # grid still fills at least 60% of available CUs; otherwise the
+        # larger tile wastes compute units on medium-sized problems.
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
-            self._result.config.mt.m = 256
-            self._result.config.mt.n = 256
-            self._result.config.mt.k = 64
+            tiles_256 = ceil(self._m / 256) * ceil(self._n / 256)
+            if tiles_256 >= self._hardware.N_CU * 0.6:
+                self._result.config.mt.m = 256
+                self._result.config.mt.n = 256
+                self._result.config.mt.k = 64
 
         if streamk:
             self._grid = self._compute_sk_grid()

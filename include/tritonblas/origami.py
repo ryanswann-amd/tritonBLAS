@@ -233,10 +233,34 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
-            ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
+        # Tile refinement for medium shapes: when Origami selects large tiles
+        # that leave CUs underutilized, try 128-wide tiles instead.
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        total_tiles = ceil(m / bm) * ceil(n / bn)
+        n_cu = self._N_CU
+        if total_tiles < n_cu and min(m, n) >= 128 and m < 4096 and n < 4096:
+            for (cm, cn, ck) in [(128, 128, 64), (128, 128, 128)]:
+                cand_tiles = ceil(m / cm) * ceil(n / cn)
+                if (cand_tiles > total_tiles
+                        and check_triton_lds_capacity(
+                            cm, cn, ck, bytes_a, bytes_b, lds_cap,
+                            self._num_stages)):
+                    self._result.config.mt.m = cm
+                    self._result.config.mt.n = cn
+                    self._result.config.mt.k = ck
+                    break
+
+        # For large shapes (M >= 4096 AND N >= 4096), prefer 256x256x64 when
+        # Origami picks an asymmetric tile with one dim at 256.
+        if (m >= 4096 and n >= 4096
+                and check_triton_lds_capacity(
+                    256, 256, 64, bytes_a, bytes_b, lds_cap,
+                    self._num_stages)
+                and ((self._result.config.mt.m == 256
+                      and self._result.config.mt.n != 256)
+                     or (self._result.config.mt.m != 256
+                         and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
@@ -268,11 +292,14 @@ class OrigamiMatmulSelector:
 
         Empirically tuned on MI300X (8 XCDs, 304 CUs) via autotune sweeps
         across GEMM sizes 1K-16K.
+
+        Note: does NOT override _workgroup_mapping — that is set by
+        origami.select_workgroup_mapping() which accounts for L2 cache
+        locality and XCD topology.  Only WS-specific params are set here.
         """
         bm = self._result.config.mt.m
         bn = self._result.config.mt.n
         total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
-        tiles_m = (self._m + bm - 1) // bm
 
         if total_tiles <= 512:
             self.COUNTERS_PER_XCD = 8
@@ -282,8 +309,6 @@ class OrigamiMatmulSelector:
             self.COUNTERS_PER_XCD = 2
         else:
             self.COUNTERS_PER_XCD = 1
-
-        self._workgroup_mapping = min(8, tiles_m)
 
     def hierarchical_split(self, num_xcds: int) -> tuple:
         """Compute optimal local/global tile split for hierarchical WS.
@@ -332,7 +357,50 @@ class OrigamiMatmulSelector:
 
     @property
     def num_stages(self):
-        return self._num_stages
+        """Auto-select pipeline stages based on LDS capacity.
+
+        When the caller hasn't overridden num_stages (default=2), try to
+        upgrade to 3 stages for tiles that fit within the hardware LDS.
+        More pipeline stages hide global memory latency, improving
+        throughput on memory-bound shapes.
+
+        Only upgrade when:
+        - K is large enough to benefit from deeper pipelining (>= 2 * BLOCK_K)
+        - The 3-stage LDS footprint fits within hardware capacity
+        """
+        if self._num_stages != 2:
+            return self._num_stages
+
+        bytes_a = self._a_dtype_bitsize / 8
+        bytes_b = self._b_dtype_bitsize / 8
+        lds_cap = self._hardware.lds_capacity
+
+        if (self._k >= 2 * self.block_k and
+            check_triton_lds_capacity(
+                self.block_m, self.block_n, self.block_k,
+                bytes_a, bytes_b, lds_cap, num_stages=3)):
+            return 3
+        return 2
+
+    @property
+    def num_warps(self):
+        """Select num_warps based on tile area.
+
+        Medium tiles (64x64 through 128x128) benefit from 4 warps which
+        reduces register pressure and scheduling overhead.  Very small
+        tiles (< 64x64) keep 8 warps to hide memory latency since each
+        tile has very few MFMA instructions.  Large tiles (>= 256x128)
+        saturate 8 warps with dense MFMA work.
+
+        Empirically validated on MI300X (gfx942) across 30 shapes:
+          256x256+ tiles: 8 warps (saturate MFMA pipeline)
+          64x64 to 128x128: 4 warps (reduce register pressure)
+          <64x64 tiles: 8 warps (latency hiding dominates)
+        """
+        tile_area = self.block_m * self.block_n
+        if 64 * 64 <= tile_area <= 128 * 128:
+            return 4
+        return 8
 
     @property
     def waves_per_eu(self):

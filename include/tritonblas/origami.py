@@ -233,13 +233,32 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
+        # Heuristic to favor 256x256x64 tile when origami picks an asymmetric
+        # 256xN or Mx256 — but only if the resulting tile still achieves >= 60%
+        # CU utilization.  Without this guard, small/medium shapes get forced
+        # into 256x256 tiles that waste most of the 304 CUs.
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
-            self._result.config.mt.m = 256
-            self._result.config.mt.n = 256
-            self._result.config.mt.k = 64
+            tiles_256 = ceil(self._m / 256) * ceil(self._n / 256)
+            cu_util = tiles_256 / max(self._N_CU, 1)
+            if cu_util >= 0.6:
+                self._result.config.mt.m = 256
+                self._result.config.mt.n = 256
+                self._result.config.mt.k = 64
+
+        # Auto-promote num_stages to 3 when the selected tile fits in LDS
+        # at 3 stages AND the K dimension is large enough to benefit from
+        # deeper pipelining (K/BLK_K >= 8 iterations).  More pipeline stages
+        # overlap global memory loads with MFMA compute.
+        if self._num_stages == 2:
+            sel_m = self._result.config.mt.m
+            sel_n = self._result.config.mt.n
+            sel_k = self._result.config.mt.k
+            k_iters = ceil(self._k / sel_k)
+            if (k_iters >= 8 and
+                check_triton_lds_capacity(sel_m, sel_n, sel_k, bytes_a, bytes_b, lds_cap, 3)):
+                self._num_stages = 3
 
         if streamk:
             self._grid = self._compute_sk_grid()

@@ -38,7 +38,7 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -95,7 +95,14 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # Shape-adaptive num_warps: use 4 warps for smaller tiles (< 256x128 area),
+    # 8 warps for large tiles. 8 warps on small tiles waste occupancy and
+    # increase register pressure without enough compute to hide latency.
+    tile_area = BLK_M * BLK_N
+    if tile_area >= 256 * 128:
+        num_warps = 8
+    else:
+        num_warps = 4
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +248,12 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # Shape-adaptive num_warps: match persistent_matmul_lt logic
+    tile_area = BLK_M * BLK_N
+    if tile_area >= 256 * 128:
+        num_warps = 8
+    else:
+        num_warps = 4
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

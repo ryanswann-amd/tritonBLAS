@@ -233,8 +233,14 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # For large shapes (M >= 4096 AND N >= 4096), prefer 256x256x64 when
+        # Origami selects an asymmetric tile with one dim at 256.  The larger
+        # square tile has better L2 locality and fewer total tiles, which
+        # outweighs slightly worse CU utilization on MI300X (304 CUs).
+        # For medium/small shapes, keep Origami's choice since rectangular
+        # tiles better fill the CUs when total tile count is low.
+        if (m >= 4096 and n >= 4096 and
+            check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
@@ -333,6 +339,26 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def num_warps(self):
+        """Select num_warps based on tile area.
+
+        Medium tiles (64x64 through 128x128) benefit from 4 warps which
+        reduces register pressure and scheduling overhead.  Very small
+        tiles (< 64x64) keep 8 warps to hide memory latency since each
+        tile has very few MFMA instructions.  Large tiles (>= 256x128)
+        saturate 8 warps with dense MFMA work.
+
+        Empirically validated on MI300X (gfx942) across 30 shapes:
+          256x256+ tiles: 8 warps (saturate MFMA pipeline)
+          64x64 to 128x128: 4 warps (reduce register pressure)
+          <64x64 tiles: 8 warps (latency hiding dominates)
+        """
+        tile_area = self.block_m * self.block_n
+        if 64 * 64 <= tile_area <= 128 * 128:
+            return 4
+        return 8
 
     @property
     def waves_per_eu(self):

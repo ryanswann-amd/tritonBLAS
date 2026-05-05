@@ -274,11 +274,14 @@ class OrigamiMatmulSelector:
 
         Empirically tuned on MI300X (8 XCDs, 304 CUs) via autotune sweeps
         across GEMM sizes 1K-16K.
+
+        Note: does NOT override _workgroup_mapping — that is set by
+        origami.select_workgroup_mapping() which accounts for L2 cache
+        locality and XCD topology.  Only WS-specific params are set here.
         """
         bm = self._result.config.mt.m
         bn = self._result.config.mt.n
         total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
-        tiles_m = (self._m + bm - 1) // bm
 
         if total_tiles <= 512:
             self.COUNTERS_PER_XCD = 8
@@ -288,8 +291,6 @@ class OrigamiMatmulSelector:
             self.COUNTERS_PER_XCD = 2
         else:
             self.COUNTERS_PER_XCD = 1
-
-        self._workgroup_mapping = min(8, tiles_m)
 
     def hierarchical_split(self, num_xcds: int) -> tuple:
         """Compute optimal local/global tile split for hierarchical WS.
@@ -339,6 +340,11 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def num_warps(self):
+        """Number of warps per workgroup. Fixed at 8 for MI300X."""
+        return 8
 
     @property
     def waves_per_eu(self):

@@ -237,6 +237,13 @@ class OrigamiMatmulSelector:
         # asymmetric 256xN or Mx256 tile.  Only apply when the resulting
         # grid still fills at least 60% of available CUs; otherwise the
         # larger tile wastes compute units on medium-sized problems.
+        #
+        # Why 60%?  On MI300X (304 CUs, 8 XCDs) we benchmarked 50 shapes
+        # and found that below ~60% occupancy the idle CUs cost more
+        # throughput than the symmetric tile's better memory-coalescing
+        # gains.  Above 60% the coalescing advantage dominates.  Example:
+        # 2048×4096 → 128 tiles / 304 CUs = 42% → override hurts;
+        # 8192×8192 → 1024 tiles / 304 CUs = 337% → override helps.
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):

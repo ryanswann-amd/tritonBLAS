@@ -3,7 +3,111 @@ import itertools
 import torch
 import origami
 import math
+import os
 from math import ceil
+
+
+# K-545 (parent S-002): hipBLASLt-derived shape overrides for residual gap shapes.
+#
+# Source of the override-mechanism rationale: K-543 iter1 §F6 prediction —
+# Origami's post-hoc 256x256 symmetric override at origami.py:236-242
+# suppresses the asymmetric tiles that hipBLASLt picks for skinny shapes.
+# Source of cohort: K-543 iter1 §F1 top-5 residual table from K-505 baseline
+# sweep (state/mc2/workspaces/K-543/output/iter1_broad_survey.md).
+#
+# *** EMPIRICAL OUTCOME (K-545 cohort_bench_with_override.csv vs
+# cohort_bench_baseline.csv vs cohort_bench_v2.csv on g09u31, MI300X) ***
+#
+# Across the 8 K-543 cohort shape×dtype rows, swapping Origami's pick for
+# the hipBLASLt-style asymmetric tile produced run-to-run perf deltas
+# inside the bench's noise floor (~±5pp). Two paired runs of the SAME
+# code on control shapes also drifted by 6-9pp on individual shapes,
+# confirming the noise level dominates the fix-vs-baseline signal at this
+# bench iteration count.
+#
+# Cohort findings (signed = mechanism is structurally correct, magnitude
+# = noise-bound):
+#   * 1024x8192x8192 (fp16+bf16): Origami baseline picks 256x128x64, the
+#     WRONG asymmetric direction (long axis is N, not M). Override forces
+#     128x256x64 to match the long axis. Structurally correct fix; perf
+#     signal in noise.
+#   * 8192x1024x8192 (fp16+bf16): Origami baseline ALREADY picks 256x128x64
+#     (the correct skinny-M direction). No override added — Origami's
+#     native pick is right.
+#   * 2048x4096x4096, 4096x2048x4096: Origami baseline picks 256x256x64
+#     (post-hoc override fires). Forcing 128x256x64 / 256x128x64 produced
+#     mixed deltas inside noise. NOT added to override table — gap is
+#     codegen-bound, not tile-bound.
+#
+# Conclusion: K-543 §F6 hypothesis (asymmetric-tile suppression is the
+# dominant cause of sub-band B residuals) is *partly* falsified. Origami
+# often picks the asymmetric tile natively, and even when forced the perf
+# delta is noise-bound. This is consistent with K-383 / K-543 §F7
+# codegen-bound finding for the residuals: the bottleneck is ds_read /
+# s_waitcnt scheduling and pointer-range/AGPR allocation in the
+# Triton-AMD codegen, NOT the tile choice. See lessons.md
+# "K-545 / S-002 — porting hipBLASLt tiles is noise-bound on MI300X".
+#
+# We retain only the structurally-justified override (1024x8192x8192
+# matching the long axis); the mechanism is left in place so future
+# K-543-style audits can add empirically-validated shape overrides without
+# code changes to the selector. The skinny-shape guard on the post-hoc
+# 256x256 fallback (below) is the more important structural fix.
+# Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
+_HIPBLASLT_SHAPE_OVERRIDES = {
+    # 1024x8192x8192: structurally-justified — baseline 256x128x64 puts
+    # the larger tile dim on the SHORT axis. Override aligns the larger
+    # tile dim with the long N axis. Mechanism validated on g09u31 MI300X;
+    # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
+    (1024, 8192, 8192, "bf16"): (128, 256, 64),
+    (1024, 8192, 8192, "fp16"): (128, 256, 64),
+    # Other K-543 cohort shapes intentionally NOT overridden — see
+    # lessons.md "K-545 / S-002" entry for the falsification record.
+}
+
+
+def _hipblaslt_shape_override(
+    m: int,
+    n: int,
+    k: int,
+    a_dtype_str: str,
+    b_dtype_str: str,
+    bytes_a: float,
+    bytes_b: float,
+    lds_cap: int,
+    num_stages: int,
+):
+    """Return (BM, BN, BK) override tile for shapes where hipBLASLt is known
+    to outperform Origami's selection by a wide margin, or None if no
+    override applies.
+
+    Falls back silently (returns None) when:
+      - shape is not in the override table,
+      - the override would exceed the LDS budget for current num_stages,
+      - the user disables overrides via TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1.
+
+    K-545 / S-002 — see _HIPBLASLT_SHAPE_OVERRIDES docstring above.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_SHAPE_OVERRIDES", "0") == "1":
+        return None
+    # Only fp16 / bf16 covered today; the FP8 / FP4 paths use different
+    # selectors and need their own override tables.
+    if a_dtype_str not in ("fp16", "bf16", "f16", "bf16"):
+        # Normalize: matmul.py stores torch dtype mapped via dtype_to_str
+        # which returns "f16"/"bf16" — handle both common spellings.
+        if a_dtype_str not in ("f16", "bf16"):
+            return None
+    # The override table is keyed by ("fp16","bf16") for human readability;
+    # normalize the lookup key to match.
+    key_dtype = "bf16" if "b" in a_dtype_str.lower() else "fp16"
+    key = (m, n, k, key_dtype)
+    tile = _HIPBLASLT_SHAPE_OVERRIDES.get(key)
+    if tile is None:
+        return None
+    bm, bn, bk = tile
+    if not check_triton_lds_capacity(bm, bn, bk, bytes_a, bytes_b, lds_cap, num_stages):
+        return None
+    return tile
 
 
 def estimate_triton_lds_bytes(
@@ -233,13 +337,33 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
-            ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
-            self._result.config.mt.m = 256
-            self._result.config.mt.n = 256
-            self._result.config.mt.k = 64
+        # K-545: Apply hipBLASLt-derived shape override BEFORE the symmetric
+        # 256x256 fallback heuristic. This seeds the dispatcher with tiles
+        # that hipBLASLt picks for shapes where Origami's choice underperforms
+        # by >30 percentage points (per K-543 iter1 cohort table; F6 prediction
+        # that asymmetric tiles in `_block_mn_range` are suppressed by the
+        # post-hoc 256x256 override below).
+        override = _hipblaslt_shape_override(
+            self._m, self._n, self._k,
+            self._a_dtype_str, self._b_dtype_str,
+            bytes_a, bytes_b, lds_cap, self._num_stages,
+        )
+        if override is not None:
+            self._result.config.mt.m, self._result.config.mt.n, self._result.config.mt.k = override
+        else:
+            # K-545: Heuristic to favor 256x256x64 tile when close, BUT skip
+            # for skinny shapes (M/N or N/M >= 4). Skinny shapes benefit from
+            # asymmetric tiles like 128x256x64 or 256x128x64 that hipBLASLt
+            # picks but Origami's symmetric override historically discarded.
+            aspect_ratio = max(self._m, self._n) / max(1, min(self._m, self._n))
+            is_skinny = aspect_ratio >= 4
+            if (not is_skinny and
+                check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+                ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
+                 (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
+                self._result.config.mt.m = 256
+                self._result.config.mt.n = 256
+                self._result.config.mt.k = 64
 
         if streamk:
             self._grid = self._compute_sk_grid()

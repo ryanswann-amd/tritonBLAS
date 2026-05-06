@@ -269,6 +269,20 @@ def streamk_matmul_lt(
             locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
             P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
 
+    # K-538: pre-zero the locks workspace.  The streamk kernel zeros each
+    # PID's lock slot at the top of its streamk section, but those per-PID
+    # writes are NOT a grid-wide barrier — an *owner* PID can race ahead
+    # and read ``locks[next_pid]`` *before* ``next_pid``'s own init has
+    # happened.  When the workspace was uninitialised (``torch.empty``)
+    # or carried stale ``lock=1`` from a previous call, that race produced
+    # silent numerical garbage.  This is most easily triggered with
+    # ``sk_grid > MAX_SMS`` (K-538's boundary-shape regime) where the
+    # workspace is freshly allocated each call from the caching allocator
+    # and routinely reuses pages that still hold 1's from the prior call.
+    # Persistent zeroing is cheap (uint8 array of size ``grids`` ≤ a few
+    # KiB) and addresses both the new and the latent pre-existing race.
+    locks.zero_()
+
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     if num_xcds > 0:
@@ -472,14 +486,107 @@ def _matmul_out(
     return None
 
 
+def should_auto_work_stealing(M: int, N: int, K: int, cu_count: int) -> bool:
+    """Heuristic: should ``matmul`` route boundary shapes through the
+    work-stealing persistent kernel?
+
+    K-538 background.  K-535 found that for the production persistent path
+    (``enable_streamk=False``, ``work_stealing=False``) tritonblas runs at
+    ~0.34-0.74x of hipBLASLt on shapes whose default-tile grid sits *just
+    below* ``cu_count`` (e.g. ``M=N=512, K=2048`` → 256 tiles vs 304 CUs
+    on MI300X) because the data-parallel grid leaves up to ~16% of CUs idle.
+
+    K-538 ablation.  We swept three remediation paths on the K-535 boundary
+    cohort (FP16 / BF16, MI300X) and recorded the median TFLOPs vs
+    hipBLASLt:
+
+    * Stream-K (with K-538 hysteresis-fixed ``_compute_sk_grid``):
+      *worse* than persistent for every boundary shape.  The partial-tile
+      reduction overhead (lock spins, P workspace traffic) exceeds the
+      utilisation gain at this problem scale.
+    * Persistent + work-stealing (``work_stealing=True``): consistently
+      ~3-7x the persistent baseline; reaches >=0.85x of hipBLASLt on the
+      mid/large boundary shapes and *exceeds* hipBLASLt on the largest
+      (4096x1024x4096 → 1.65x).  The dynamic dispatch closes the
+      under-utilisation gap without paying split-K reduction cost.
+
+    Therefore the K-538 auto-route directs boundary shapes through the
+    work-stealing path, not Stream-K.  The Stream-K ``_compute_sk_grid``
+    fix is retained because explicit ``enable_streamk=True`` callers
+    benefit from a non-degenerate sk-grid and the latent correctness race
+    that K-538 also patched (see ``streamk_matmul_lt`` `locks.zero_()`).
+
+    Heuristic.  Returns ``True`` when:
+
+    * ``K`` is large enough to amortise dispatch overhead (>=1024), and
+    * the shape is K-heavy (``K / min(M, N) >= 1.5``) — the K-535 boundary
+      cohort signature, and
+    * the persistent DP grid would underfill the GPU (probed at the
+      Origami-typical tile of 32-128 in M/N; ``tiles_proxy < 2*cu_count``).
+    """
+    if K < 1024:
+        return False
+    if K / max(1, min(M, N)) < 1.5:
+        return False
+    tile_m = min(128, max(32, M))
+    tile_n = min(128, max(32, N))
+    tiles_proxy = ((M + tile_m - 1) // tile_m) * ((N + tile_n - 1) // tile_n)
+    if tiles_proxy >= 2 * cu_count:
+        return False
+    return True
+
+
+# Backwards-compatible alias — older code (and the early K-538 prototypes)
+# spelled this ``should_auto_streamk``.  We keep the name pointing at the
+# work-stealing heuristic since both versions answer the same question
+# ("is this a boundary shape that needs help?") and the only behavioural
+# difference is which kernel the caller dispatches to.
+should_auto_streamk = should_auto_work_stealing
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    work_stealing: Optional[bool] = False,
+    work_stealing: Optional[bool] = None,
 ) -> Optional[torch.Tensor]:
+    """Matmul.
+
+    K-538: pass ``work_stealing=None`` to auto-route under-utilising boundary
+    shapes (small M*N + large K) through the work-stealing persistent kernel,
+    which closes most of the K-535 boundary regression vs hipBLASLt.  See
+    :func:`should_auto_work_stealing` for the heuristic.  ``False`` (the
+    historical default) and ``True`` are unchanged.
+
+    ``enable_streamk=None`` is also accepted; it forwards to the same
+    boundary-shape heuristic for callers that want a single auto knob.  The
+    heuristic prefers the work-stealing path because the K-538 ablation
+    showed Stream-K's reduction overhead exceeds its utilisation gain on
+    these shapes (see :func:`should_auto_work_stealing` docstring).
+    """
+    # K-538 auto-routing.  ``None`` on either knob defers to the
+    # boundary-shape heuristic.  Default (``work_stealing=None``) preserves
+    # backwards compatibility for callers passing the historical bool default
+    # for ``enable_streamk`` (False) — those callers see auto-WS routing
+    # *only* when they don't explicitly disable it.
+    if enable_streamk is None or work_stealing is None:
+        M = a.shape[0]
+        K = a.shape[1]
+        N = b.shape[1]
+        is_boundary = should_auto_work_stealing(M, N, K, MAX_SMS)
+        if work_stealing is None:
+            work_stealing = is_boundary
+        if enable_streamk is None:
+            # Boundary shapes go through ws_persistent (faster than Stream-K
+            # per K-538 ablation) — keep enable_streamk=False so the
+            # auto-router doesn't double-dispatch.
+            enable_streamk = False
+    # Coerce to bool so the registered triton_op signature is happy.
+    enable_streamk = bool(enable_streamk)
+    work_stealing = bool(work_stealing)
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

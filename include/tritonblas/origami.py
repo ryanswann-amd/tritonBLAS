@@ -347,6 +347,31 @@ class OrigamiMatmulSelector:
         return self._grid
 
     def _compute_sk_grid(self):
+        """Pick the Stream-K grid size.
+
+        Two regimes:
+
+        (1) ``tiles > cu_count`` — fractional split: pick a grid no larger than
+            ``cu_count`` that minimises the size of the last (partial) wave.
+
+        (2) ``tiles < cu_count`` — boundary regime: split along K so that the
+            grid is large enough to fully populate the GPU.  Historically this
+            branch used ``split_grid <= cu_count`` AND ``iters_per_cu >= 8``,
+            which combined with a buggy ``tiles % sk_grid != 0`` cleanup made
+            every ``factor > 1`` split dead code.  Boundary shapes (e.g.
+            ``M=N=512, K=2048`` or ``M=N=1024, K=4096`` on MI300X) therefore
+            reliably ran at ~0.34-0.74x of hipBLASLt's split-K
+            implementation.  See K-535 (root cause) and K-538 (this fix).
+
+            The new heuristic uses a hysteresis target band
+            ``[cu_count, 4 * cu_count]`` for ``split_grid`` and a relaxed
+            ``iters_per_cu`` floor that scales with ``iters_per_tile`` (so
+            shapes with very small K still fall back to ``factor=1`` rather
+            than burning reduction overhead on a 1-iter-per-WG split).  The
+            score function is wave-occupancy-based, which gives a smooth
+            (non-oscillating) preference toward higher factors so that small
+            shape changes don't flip the chosen split between 1 and N.
+        """
         # Grid model constants for StreamK
         split_factors = [8, 6, 4, 3, 2, 1]
         tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
@@ -386,19 +411,58 @@ class OrigamiMatmulSelector:
                     sk_grid = frac_grid
                     break
 
-        # Fewer tiles than CUs: split along k-dimension up to some factor
-        elif tiles < cu_count:
+        # Fewer tiles than CUs: split along k-dimension to populate the GPU.
+        # K-538 hysteresis fix — see docstring above for the historical bug.
+        elif tiles < cu_count and iters_per_tile >= 2:
+            # Relaxed floor on per-CU K-iterations.  The original hard "8"
+            # was unreachable for boundary shapes with small K (e.g.
+            # iters_per_tile == 4 → no factor satisfies it).  Scale with
+            # iters_per_tile so that K-rich shapes still amortise the
+            # partial-tile reduction, but K-light boundary shapes can split.
+            iters_floor = max(2, min(8, iters_per_tile // 2))
+
+            # Hysteresis target band — anywhere in [cu_count, 4 * cu_count]
+            # is acceptable.  Lower bound forces full GPU population; upper
+            # bound caps the partial-tile reduction overhead at ~4x cu_count
+            # WGs (matches hipBLASLt's typical GSU=2..8 envelope).
+            band_lo = cu_count
+            band_hi = 4 * cu_count
+
+            best_grid = sk_grid
+            best_score = -1.0
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
+                if iters_per_cu < iters_floor:
+                    continue
+                if split_grid < band_lo or split_grid > band_hi:
+                    continue
+                if self._partial_tile_size(split_grid) > max_workspace:
+                    continue
 
-                if split_grid <= cu_count and iters_per_cu >= 8:
-                    sk_grid = split_grid
-                    break
+                # Score = wave occupancy.  full_waves contributes 1 each,
+                # the (possibly partial) trailing wave contributes its
+                # CU-fraction.  This gives a smooth, monotone-in-factor
+                # ranking inside the band so the choice doesn't oscillate
+                # under small shape perturbations.
+                full_waves = split_grid // cu_count
+                last_wave = split_grid - full_waves * cu_count
+                score = full_waves + (last_wave / cu_count)
+                # Tiny tie-break favouring larger factor (more parallelism)
+                # in the rare case scores match exactly.
+                score += factor * 1e-6
+                if score > best_score:
+                    best_score = score
+                    best_grid = split_grid
+            sk_grid = best_grid
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # Final fractional cleanup — only meaningful in regime (1), where
+        # ``sk_grid <= tiles`` and an uneven split needs workspace.  In
+        # regime (2) we *intentionally* set ``sk_grid > tiles`` to split
+        # along K, so the modulo check is a category error there and the
+        # original code's unconditional revert killed every ``factor>1``
+        # split.  Gate accordingly.
+        if sk_grid <= tiles and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

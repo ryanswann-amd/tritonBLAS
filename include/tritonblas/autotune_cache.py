@@ -5,58 +5,19 @@ Eliminates cross-process / cross-run cold starts by serializing the best
 selector parameters per (M, N, K, dtype, arch, mode) shape to a JSON file
 and re-loading them in subsequent processes.
 
-Cache layout (one JSON file per architecture):
+Disable with ``TRITONBLAS_AUTOTUNE_CACHE=0``; override directory with
+``TRITONBLAS_AUTOTUNE_CACHE_DIR``.
 
-    {
-        "schema_version": <int>,
-        "tritonblas_version": <str>,    # invalidation key
-        "arch": "gfx942",
-        "n_cu": 304,
-        "entries": {
-            "<key>": {
-                "block_m": 256,
-                "block_n": 256,
-                "block_k": 64,
-                "workgroup_mapping": 8,
-                "xcc_workgroup_mapping": 8,
-                "counters_per_xcd": 4,
-                "grid": 304
-            }, ...
-        }
-    }
-
-The cache is invalidated (treated as empty) when the schema version or the
-``tritonblas_version`` (commit hash if available, else package version)
-changes.
-
-Disable persistence by setting ``TRITONBLAS_AUTOTUNE_CACHE=0``.
-Override directory with ``TRITONBLAS_AUTOTUNE_CACHE_DIR``.
-
-Boundary-tolerance lookup (K-591 / K-588 follow-up):
-----------------------------------------------------
-The cache key encodes the exact ``(M, N, K)`` shape, which means a single
-+/- 1 jitter on any dimension is a full miss even when the cached entry is
-an obvious near-neighbor (e.g. dynamic-batch padding around 4096).  K-588
-root-caused this and showed (F9, F10) that within a relative tolerance of
-~5-10% the analytical Origami selector picks the same tile/group/grid for
-~80%+ of jittered shapes; LDS-capacity safety is inherited because it
-depends only on the tile + dtype + num_stages, not on the shape.
-
-After an exact-key miss we therefore perform a *nearest-neighbor* fall-back:
-candidate cached entries that match the non-shape suffix of the key exactly
-(dtype-a, dtype-b, dtype-c, mx_block_size, streamk, num_stages, n_cu) and
-whose (M', N', K') is within a configurable per-axis relative tolerance of
-(M, N, K) are scored by log-L1 distance, and the closest is returned.  The
-default tolerance is 0.05 (5%) per axis; override with
-``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (set to ``0`` to disable).
-
-Nearest-match entries are **not** persisted under the requesting key.  Only
-the original Origami-tuned configs (the ``store()`` calls in the cold path)
-ever populate the on-disk cache, which keeps the cache from drifting:
-without this guard a chain of near-neighbors A -> A' -> A'' could each be
-within tolerance of their predecessor while A'' lies arbitrarily far from
-the actually-tuned canonical entry.  See the K-591 reviewer feedback
-(devil's-advocate concern about self-reinforcing cache drift).
+Boundary-tolerance fall-back (K-591):
+   After an exact-key miss we scan cached entries that share the same
+   non-shape suffix (dtypes, mx_block_size, streamk, num_stages, n_cu) and
+   whose (M', N', K') is within ``BOUNDARY_TOLERANCE`` (5%) on every axis,
+   and return the closest by log-L1 distance.  K-588 root-caused that
+   Origami picks the same tile within this band and that the cached tile
+   is LDS-safe whenever the suffix matches.  Nearest-match results are NOT
+   persisted under the requesting key — only true Origami-tuned entries
+   populate the on-disk file, which prevents drift through chained
+   interpolations.
 """
 
 from __future__ import annotations
@@ -67,14 +28,17 @@ import os
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Schema version — bump if the cached entry layout changes.
 SCHEMA_VERSION = 1
 
-# Default location.  ``state/tritonblas_autotune`` (relative to cwd) is the
-# canonical location requested by the task spec; we fall back to the user
-# cache dir if that location is unwritable or unset.
+# Per-axis relative tolerance for the boundary-tolerance lookup.  5% covers
+# the typical M+/-{1..7} dynamic-batch jitter and the K-588 / K-510 held-out
+# workload while staying inside the band where Origami's tile selection is
+# stable (K-588 F10).  Module constant — no env-var knob (K-591 Minimalist).
+BOUNDARY_TOLERANCE = 0.05
+
 _DEFAULT_REL_DIR = "state/tritonblas_autotune"
 _USER_FALLBACK_DIR = os.path.expanduser("~/.cache/tritonblas/autotune")
 
@@ -88,54 +52,16 @@ _REQUIRED_FIELDS = (
     "grid",
 )
 
-# Default per-axis relative tolerance for the boundary-tolerance lookup.
-# 5% covers the typical M+/-{1..7} dynamic-batch jitter and the K-588/K-510
-# held-out workload while staying conservative enough that Origami's tile
-# selection rarely changes inside the band (K-588 F10).  Override via
-# ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (set to "0" / "off" to disable).
-_DEFAULT_TOLERANCE = 0.05
-
-# Hard ceiling on the configured tolerance.  Values >50% would let the cache
-# return shapes nowhere near the request and is almost certainly a typo.
-_MAX_TOLERANCE = 0.50
-
 
 def _is_cache_enabled() -> bool:
     val = os.environ.get("TRITONBLAS_AUTOTUNE_CACHE", "1").strip().lower()
     return val not in ("0", "false", "no", "off")
 
 
-def _configured_tolerance() -> float:
-    """Resolve the per-axis relative tolerance for boundary-tolerance lookups.
-
-    ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` overrides the default; values
-    that fail to parse, are negative, or look like an explicit "off" toggle
-    yield ``0.0`` which disables the fall-back and preserves K-536's
-    exact-match semantics.
-    """
-    raw = os.environ.get("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE")
-    if raw is None:
-        return _DEFAULT_TOLERANCE
-    s = raw.strip().lower()
-    if s in ("", "off", "false", "no", "none"):
-        return 0.0
-    try:
-        v = float(s)
-    except ValueError:
-        return _DEFAULT_TOLERANCE
-    if not math.isfinite(v) or v <= 0.0:
-        return 0.0
-    if v > _MAX_TOLERANCE:
-        return _MAX_TOLERANCE
-    return v
-
-
 def _cache_dir() -> Path:
-    """Resolve the cache directory, preferring an explicit override."""
     env = os.environ.get("TRITONBLAS_AUTOTUNE_CACHE_DIR")
     if env:
         return Path(env).expanduser()
-    # Prefer the canonical relative dir if it already exists in cwd
     rel = Path(_DEFAULT_REL_DIR)
     if rel.exists():
         return rel
@@ -148,10 +74,8 @@ def _cache_path(arch: str) -> Path:
 
 
 def _git_commit_hash() -> Optional[str]:
-    """Return the tritonblas package's git HEAD sha if available, else None."""
     try:
         pkg_dir = Path(__file__).resolve().parent
-        # Walk upward looking for a .git directory
         for parent in [pkg_dir, *pkg_dir.parents]:
             if (parent / ".git").exists():
                 out = subprocess.check_output(
@@ -176,47 +100,10 @@ def _package_version() -> str:
 
 
 def _version_key() -> str:
-    """Combined invalidation key: prefer git commit, fall back to package version."""
     commit = _git_commit_hash()
     if commit:
         return f"git:{commit}"
     return f"pkg:{_package_version()}"
-
-
-def make_cache_suffix(
-    a_dtype_str: str,
-    b_dtype_str: str,
-    out_dtype_str: str,
-    mx_block_size: int,
-    streamk: bool,
-    num_stages: int,
-    n_cu: int,
-) -> str:
-    """Return the non-shape ("suffix") portion of a cache key.
-
-    Two cache keys with identical suffixes share the same dtype / mode /
-    architecture context and only differ in their (M, N, K) shape.  The
-    boundary-tolerance lookup uses this to restrict the candidate set to
-    entries that are LDS-safe (K-588 F9) and grid-compatible without having
-    to re-run any heuristic.
-
-    A per-call sub-CU mask (``active_cu``) is intentionally NOT part of the
-    cache identity: on a given architecture ``n_cu`` already pins the
-    hardware, the cached tile's LDS-safety depends only on the dtype /
-    num_stages / tile shape, and including ``active_cu`` would silently
-    split the suffix bucket so a canonical entry stored with the default
-    full-CU value missed every near-neighbor query that supplied a smaller
-    value — re-introducing the exact "near-miss -> 0% hit" failure mode
-    K-588 root-caused.  The parameter has been removed from the cache API
-    entirely (K-591 Minimalist review) rather than deprecated in place; if
-    a future kernel is genuinely sensitive to a sub-CU mask the right fix
-    is to fold it into ``n_cu``, not to re-add a silently ignored knob.
-    """
-    return (
-        f"{a_dtype_str}|{b_dtype_str}|{out_dtype_str}"
-        f"|mx{mx_block_size}|sk{int(bool(streamk))}|ns{num_stages}"
-        f"|cu{n_cu}"
-    )
 
 
 def make_cache_key(
@@ -231,27 +118,28 @@ def make_cache_key(
     num_stages: int,
     n_cu: int,
 ) -> str:
-    """Stable string key for an autotune entry."""
-    suffix = make_cache_suffix(
-        a_dtype_str,
-        b_dtype_str,
-        out_dtype_str,
-        mx_block_size,
-        streamk,
-        num_stages,
-        n_cu,
-    )
-    return f"{M}x{N}x{K}|{suffix}"
+    """Stable string key for an autotune entry.
 
+    The non-shape suffix (dtypes / mx_block_size / streamk / num_stages /
+    n_cu) is what the boundary-tolerance lookup matches exactly, so the
+    cached tile remains LDS-safe for the substituted shape (K-588 F9).
 
-def parse_cache_key(key: str) -> Optional[Tuple[int, int, int, str]]:
-    """Inverse of ``make_cache_key``.
-
-    Returns ``(M, N, K, suffix)`` if ``key`` matches the canonical layout,
-    or ``None`` for any malformed / non-numeric prefix.  This is used by the
-    boundary-tolerance lookup to filter candidates without re-keying the
-    on-disk file.
+    A per-call sub-CU mask is intentionally NOT part of the key: on a given
+    arch ``n_cu`` already pins the hardware, and including a separate
+    ``active_cu`` field would silently split the suffix bucket so canonical
+    entries (stored with the default full-CU value) miss every near-neighbor
+    query supplying a smaller value — re-introducing the K-588 cold-miss.
     """
+    return (
+        f"{M}x{N}x{K}|"
+        f"{a_dtype_str}|{b_dtype_str}|{out_dtype_str}"
+        f"|mx{mx_block_size}|sk{int(bool(streamk))}|ns{num_stages}"
+        f"|cu{n_cu}"
+    )
+
+
+def _split_key(key: str) -> Optional[Tuple[int, int, int, str]]:
+    """Return ``(M, N, K, suffix)`` for a canonical key, else ``None``."""
     if not isinstance(key, str):
         return None
     head, sep, suffix = key.partition("|")
@@ -261,9 +149,7 @@ def parse_cache_key(key: str) -> Optional[Tuple[int, int, int, str]]:
     if len(parts) != 3:
         return None
     try:
-        m = int(parts[0])
-        n = int(parts[1])
-        k = int(parts[2])
+        m, n, k = int(parts[0]), int(parts[1]), int(parts[2])
     except ValueError:
         return None
     if m <= 0 or n <= 0 or k <= 0:
@@ -287,7 +173,6 @@ def _atomic_write(path: Path, data: Dict[str, Any]) -> None:
             json.dump(data, fh, indent=2, sort_keys=True)
         os.replace(tmp, path)
     except OSError:
-        # Best-effort: if we can't write the cache, silently drop the update.
         try:
             tmp.unlink()
         except OSError:
@@ -295,34 +180,18 @@ def _atomic_write(path: Path, data: Dict[str, Any]) -> None:
 
 
 class PersistentAutotuneCache:
-    """In-memory mirror of the on-disk autotune cache for one architecture.
-
-    Multiple instances may target the same architecture (e.g. across processes);
-    the on-disk file is read once at construction.  Writes are performed
-    eagerly (atomic ``os.replace``) on each ``store`` so that a fresh process
-    started immediately afterwards observes the new entry.
-    """
+    """In-memory mirror of the on-disk autotune cache for one architecture."""
 
     def __init__(self, arch: str, n_cu: int) -> None:
         self.arch = arch or "unknown"
         self.n_cu = int(n_cu)
         self._lock = threading.Lock()
         self._enabled = _is_cache_enabled()
-        self._tolerance = _configured_tolerance() if self._enabled else 0.0
         self._path = _cache_path(self.arch)
         self._version = _version_key()
         self._entries: Dict[str, Dict[str, Any]] = {}
-        # Index from non-shape suffix -> list of (M, N, K, key) tuples for
-        # constant-time narrowing during nearest-neighbor lookup.  Rebuilt
-        # whenever ``_entries`` is mutated.
-        self._suffix_index: Dict[str, list] = {}
         if self._enabled:
             self._load_from_disk()
-            self._rebuild_suffix_index_locked()
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:
@@ -336,11 +205,6 @@ class PersistentAutotuneCache:
     def version(self) -> str:
         return self._version
 
-    @property
-    def tolerance(self) -> float:
-        """Per-axis relative tolerance used by ``lookup_nearest``."""
-        return self._tolerance
-
     def __len__(self) -> int:
         return len(self._entries)
 
@@ -353,66 +217,44 @@ class PersistentAutotuneCache:
             return None
         with self._lock:
             entry = self._entries.get(key)
-            if entry is None:
-                return None
-            # Defensive copy (callers must not mutate)
-            return dict(entry)
+            return dict(entry) if entry is not None else None
 
     def lookup_nearest(
-        self,
-        key: str,
-        tolerance: Optional[float] = None,
+        self, key: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
-        """Find the nearest cached entry to ``key`` within ``tolerance``.
+        """Return the closest cached entry to ``key`` within
+        ``BOUNDARY_TOLERANCE`` per axis, or ``None``.
 
-        Two filters are applied in order:
-
-        1. The candidate's *suffix* (the non-shape part of the key —
-           dtypes, mx_block_size, streamk, num_stages, n_cu) must match
-           exactly.  This preserves K-588 F9's LDS-safety guarantee: the
-           cached tile was validated for the same dtype/num_stages and is
-           therefore valid for any (M', N', K') we substitute in.
-        2. Each shape axis must be within the relative tolerance:
-           ``|M - M'| / max(M, M') <= tolerance``, and likewise for N and K.
-
-        Among the surviving candidates, the one minimizing the log-L1
-        distance ``|log(M/M')| + |log(N/N')| + |log(K/K')|`` is returned.
-        The metric is scale-free, monotone in proportional jitter, and
-        matches Origami's tile-selection sensitivity (K-588 F8).  Ties are
-        broken deterministically by lexicographic key order.
-
-        Returns ``(params, matched_key)`` on hit, ``None`` on miss / when
-        tolerance is 0 / when the key is malformed.
+        Filtering: candidates must share the non-shape suffix exactly
+        (preserves LDS-safety, K-588 F9) and every axis must satisfy
+        ``|x - x'| / max(x, x') <= BOUNDARY_TOLERANCE``.  Ties are broken
+        by log-L1 distance (scale-free, matches Origami's tile sensitivity)
+        then lexicographic key order.
         """
         if not self._enabled:
             return None
-        tol = self._tolerance if tolerance is None else float(tolerance)
-        if tol <= 0.0:
-            return None
-        parsed = parse_cache_key(key)
+        parsed = _split_key(key)
         if parsed is None:
             return None
         m, n, k, suffix = parsed
+        tol = BOUNDARY_TOLERANCE
 
         best_key: Optional[str] = None
         best_score = math.inf
         with self._lock:
-            bucket = self._suffix_index.get(suffix)
-            if not bucket:
-                return None
-            for cm, cn, ck, cand_key in bucket:
+            for cand_key in self._entries:
                 if cand_key == key:
-                    # The exact key was already tried by lookup() — skip.
                     continue
-                # Symmetric relative-error filter; safe for any positive M.
+                cparsed = _split_key(cand_key)
+                if cparsed is None or cparsed[3] != suffix:
+                    continue
+                cm, cn, ck, _ = cparsed
                 if abs(cm - m) / max(cm, m) > tol:
                     continue
                 if abs(cn - n) / max(cn, n) > tol:
                     continue
                 if abs(ck - k) / max(ck, k) > tol:
                     continue
-                # Log-L1 distance (scale-free).  log(a/b) handles every
-                # positive ratio without divide-by-zero hazards.
                 score = (
                     abs(math.log(cm / m))
                     + abs(math.log(cn / n))
@@ -431,22 +273,17 @@ class PersistentAutotuneCache:
     def store(self, key: str, params: Dict[str, Any]) -> None:
         if not self._enabled:
             return
-        # Validate schema before persisting to keep the file usable.
         for field in _REQUIRED_FIELDS:
             if field not in params:
-                raise ValueError(f"PersistentAutotuneCache: missing field '{field}' in params")
+                raise ValueError(
+                    f"PersistentAutotuneCache: missing field '{field}' in params"
+                )
         clean = {k: _coerce_jsonable(params[k]) for k in _REQUIRED_FIELDS}
         with self._lock:
-            existing = self._entries.get(key)
-            if existing == clean:
-                return  # no-op
+            if self._entries.get(key) == clean:
+                return
             self._entries[key] = clean
-            self._add_to_suffix_index_locked(key)
             self._flush_locked()
-
-    # ------------------------------------------------------------------
-    # I/O helpers
-    # ------------------------------------------------------------------
 
     def _load_from_disk(self) -> None:
         raw = _load_raw(self._path)
@@ -456,7 +293,6 @@ class PersistentAutotuneCache:
             return
         if raw.get("tritonblas_version") != self._version:
             return
-        # Architecture mismatch is a hard miss.
         if raw.get("arch") and raw.get("arch") != self.arch:
             return
         entries = raw.get("entries", {})
@@ -481,35 +317,8 @@ class PersistentAutotuneCache:
         }
         _atomic_write(self._path, payload)
 
-    def _rebuild_suffix_index_locked(self) -> None:
-        """(Re)build the suffix -> [(M, N, K, key), ...] index from scratch."""
-        index: Dict[str, list] = {}
-        for k in self._entries.keys():
-            parsed = parse_cache_key(k)
-            if parsed is None:
-                continue
-            m, n, kk, suffix = parsed
-            index.setdefault(suffix, []).append((m, n, kk, k))
-        self._suffix_index = index
-
-    def _add_to_suffix_index_locked(self, key: str) -> None:
-        """Incrementally add (or refresh) a single entry's index slot."""
-        parsed = parse_cache_key(key)
-        if parsed is None:
-            return
-        m, n, kk, suffix = parsed
-        bucket = self._suffix_index.setdefault(suffix, [])
-        # Replace any pre-existing tuple for the same (M, N, K) shape so a
-        # rewrite of the same key doesn't double-index.
-        for i, entry in enumerate(bucket):
-            if entry[3] == key:
-                bucket[i] = (m, n, kk, key)
-                return
-        bucket.append((m, n, kk, key))
-
 
 def _coerce_jsonable(value: Any) -> Any:
-    """Convert numpy / torch scalars to plain Python ints / floats."""
     if hasattr(value, "item") and not isinstance(value, (str, bytes)):
         try:
             return value.item()
@@ -522,16 +331,11 @@ def _coerce_jsonable(value: Any) -> Any:
     return int(value)
 
 
-# ----------------------------------------------------------------------
-# Process-wide cache registry
-# ----------------------------------------------------------------------
-
 _REGISTRY_LOCK = threading.Lock()
 _REGISTRY: Dict[Tuple[str, int], PersistentAutotuneCache] = {}
 
 
 def get_cache(arch: str, n_cu: int) -> PersistentAutotuneCache:
-    """Return the per-architecture cache, constructing it on first call."""
     key = (arch or "unknown", int(n_cu))
     with _REGISTRY_LOCK:
         cache = _REGISTRY.get(key)

@@ -87,17 +87,10 @@ def _make_matmul_selector(
             pass
 
     # Boundary-tolerance fall-back (K-591 / K-588 follow-up): exact-match
-    # missed but a near-neighbor entry sharing the same (dtype, mode, arch)
-    # may still be reusable.  K-588 F9 confirmed the cached tile is
-    # LDS-safe for any (M', N', K') with the same dtype/num_stages, so we
-    # adopt it directly *for this call* without persisting it under the new
-    # key.  Persisting an interpolated entry would let later near-neighbor
-    # lookups treat it as a tuned source, which can compound into arbitrary
-    # drift from any actually-tuned canonical config (see K-591 reviewer
-    # feedback, devil's-advocate concern).  The on-disk cache therefore
-    # contains only true Origami-tuned entries; the in-memory nearest-lookup
-    # is recomputed on every cold-key call (a single suffix-bucket scan,
-    # microseconds).
+    # missed but a near-neighbor entry sharing the same dtype/mode may be
+    # reusable.  We adopt it for this call only — the substituted config is
+    # NOT persisted under the new key, otherwise chained interpolations
+    # could drift arbitrarily from any tuned canonical entry.
     nearest = cache.lookup_nearest(key)
     if nearest is not None:
         cached_params, _matched_key = nearest
@@ -145,7 +138,7 @@ def _resolve_arch_info(device):
     """Return (arch_name, n_cu) for the given torch device.
 
     A per-call sub-CU mask is intentionally not part of the cache identity
-    (see ``autotune_cache.make_cache_suffix`` for the rationale).
+    (see ``autotune_cache.make_cache_key`` for the rationale).
     """
     try:
         props = torch.cuda.get_device_properties(device)

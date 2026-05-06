@@ -373,6 +373,36 @@ def test_pure_function_determinism():
         assert compute_continuous_sk_grid(**args) == first
 
 
+def test_memoization_repeats_hit_cache():
+    """The helper is wrapped in ``functools.lru_cache`` (K-583 review fix)
+    so hot-path callers (autotune, inference) skip the integer search on
+    repeated shapes.  Verify cache is wired up and hits accumulate."""
+    # Reset cache so this test is order-independent.
+    compute_continuous_sk_grid.cache_clear()
+    args = dict(
+        m=4096, n=4096, k=4096,
+        block_m=256, block_n=256, block_k=64,
+        cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS,
+    )
+    # Cold call → 1 miss
+    first = compute_continuous_sk_grid(**args)
+    info1 = compute_continuous_sk_grid.cache_info()
+    assert info1.misses == 1
+    assert info1.hits == 0
+    # 50 repeats → 50 hits, no new misses
+    for _ in range(50):
+        assert compute_continuous_sk_grid(**args) == first
+    info2 = compute_continuous_sk_grid.cache_info()
+    assert info2.misses == 1, f"unexpected new misses: {info2}"
+    assert info2.hits == 50, f"expected 50 hits, got {info2.hits}"
+    # Different args → new miss, doesn't poison existing entry
+    args2 = dict(args, m=8192)
+    _ = compute_continuous_sk_grid(**args2)
+    info3 = compute_continuous_sk_grid.cache_info()
+    assert info3.misses == 2
+    assert info3.hits == 50
+
+
 # ---------------------------------------------------------------------------
 # §9  Boundary-shape regression set (K-548 / K-557 / K-583)
 # ---------------------------------------------------------------------------

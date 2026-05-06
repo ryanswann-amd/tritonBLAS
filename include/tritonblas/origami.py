@@ -1,4 +1,5 @@
 from __future__ import annotations
+import functools
 import itertools
 import torch
 import origami
@@ -6,6 +7,11 @@ import math
 from math import ceil
 
 
+# Memoize on (m, n, k, block_m, block_n, block_k, cu_count, out_dtype_bitsize,
+# min_iters_per_cu, max_workspace_bytes).  The function is pure-deterministic
+# in its inputs, so on hot autotune / inference paths repeated GEMM shapes
+# (the common LLM case) skip the integer divisor search entirely.
+@functools.lru_cache(maxsize=4096)
 def compute_continuous_sk_grid(
     m: int,
     n: int,

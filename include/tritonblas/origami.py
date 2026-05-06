@@ -347,63 +347,84 @@ class OrigamiMatmulSelector:
         return self._grid
 
     def _compute_sk_grid(self):
-        # Grid model constants for StreamK
-        split_factors = [8, 6, 4, 3, 2, 1]
-        tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
+        """
+        Continuous split-K grid heuristic (K-557).
+
+        Replaces the prior discrete table of split factors {8,6,4,3,2,1} and
+        tile fractions {0,1/2,1/8,1/5,1/4,1/3} with a continuous formulation
+        that varies smoothly with problem size. The discrete tables produced
+        boundary-residual cliffs whenever K (or tile count) crossed a cutoff
+        between adjacent factors, leaving 5-30% perf on the table at those
+        boundaries (see K-535/K-542 sweep data).
+
+        Two regimes:
+          * tiles < cu_count  (split-K case):
+                pick the largest integer factor f such that
+                  tiles * f <= cu_count                 (don't oversubscribe)
+                  iters_per_tile / f >= MIN_ITERS_PER_CU (amortize launch+epilogue)
+                Both bounds are continuous in K and (M,N), so f changes by 1
+                rather than jumping across a discrete table.
+
+          * tiles > cu_count  (fractional/wave-balance case):
+                let waves = ceil(tiles / cu_count); pick
+                  sk_grid = ceil(tiles / waves)
+                This is the natural continuous mapping that fills every wave
+                evenly while keeping grid <= cu_count, so the last-wave
+                occupancy degrades smoothly with problem size instead of
+                stepping at the 1/2, 1/3, 1/4, 1/5, 1/8 cutoffs.
+
+        Workspace and last-wave fallbacks are preserved (and the K-398 cleanup
+        bug at the original L401-402 — which zeroed out the split unconditionally
+        on remainder, ignoring its own comment about workspace — is fixed: the
+        reset to ``tiles`` only fires when the remainder also exceeds the
+        workspace budget).
+        """
+        MIN_ITERS_PER_CU = 8
         max_workspace = 128 * 1024 * 1024
 
         M, N, K = self._m, self._n, self._k
         BLK_M, BLK_N, BLK_K = self.block_m, self.block_n, self.block_k
         cu_count = self._hardware.N_CU
 
-        # Fallback if no better fractional split is found
         tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
-        sk_grid = tiles
         iters_per_tile = max(1, ceil(K / BLK_K))
+        sk_grid = tiles
 
-        # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
+            # Wave-balance: spread tiles across the fewest waves possible,
+            # and within that constraint give every wave the same width.
             virt_cu_count = cu_count
-            # if size_mapping.CUOccupancy > 1:
-            # virt_cu_count *= size_mapping.CUOccupancy
+            waves = max(1, (tiles + virt_cu_count - 1) // virt_cu_count)
+            cand_grid = max(1, (tiles + waves - 1) // waves)  # ceil(tiles/waves)
 
-            # Try these fractional denominators in order
-            min_even_tiles = tiles / virt_cu_count
+            # Workspace guard (matches the prior discrete behaviour):
+            # if the candidate leaves a remainder and the per-WG workspace
+            # would exceed the budget, fall back to no-split.
+            if (
+                tiles % cand_grid != 0
+                and self._partial_tile_size(cand_grid) > max_workspace
+            ):
+                sk_grid = tiles
+            else:
+                sk_grid = min(cand_grid, virt_cu_count)
 
-            for frac in tile_fractions:
-                # Compute candidate grid with rounding
-                frac_grid = int((tiles / (min_even_tiles + frac)) + 0.5)
-
-                # Skip if this split leaves a remainder AND workspace is too large
-                if (
-                    tiles % frac_grid != 0
-                    and self._partial_tile_size(frac_grid) > max_workspace
-                ):
-                    continue
-
-                # Accept the first grid no larger than the virtual CU count
-                if frac_grid <= virt_cu_count:
-                    sk_grid = frac_grid
-                    break
-
-        # Fewer tiles than CUs: split along k-dimension up to some factor
         elif tiles < cu_count:
-            for factor in split_factors:
-                split_grid = tiles * factor
-                iters_per_cu = iters_per_tile // factor
+            # Continuous split-K: largest f satisfying both bounds.
+            f_grid = cu_count // max(tiles, 1)
+            f_work = max(1, iters_per_tile // MIN_ITERS_PER_CU)
+            factor = max(1, min(f_grid, f_work))
+            sk_grid = tiles * factor
 
-                if split_grid <= cu_count and iters_per_cu >= 8:
-                    sk_grid = split_grid
-                    break
-
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # K-398 cleanup-bug fix: only fall back to ``tiles`` (no split) when the
+        # remainder genuinely violates the workspace budget. The original
+        # ``if tiles % sk_grid != 0: sk_grid = tiles`` discarded valid splits
+        # whenever there was any remainder, which is what produced many of the
+        # observed boundary residuals.
+        if tiles % sk_grid != 0 and self._partial_tile_size(sk_grid) > max_workspace:
             sk_grid = tiles
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count
-            last_wave_occupancy = last_wave_remainder / cu_count
 
             # Really bad last wave, which would have originally been compensated for
             # by changing tile size, but triton tile sizes are limited

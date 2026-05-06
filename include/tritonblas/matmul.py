@@ -14,6 +14,53 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+def _select_num_warps(block_m: int, block_n: int) -> int:
+    """Select num_warps to balance per-thread VGPR pressure vs WG occupancy.
+
+    Background (K-324, K-521 ISA audits on gfx942/MI300X):
+      The previous code hard-coded ``num_warps = 8`` (WG = 512 threads) for
+      every shape. K-324 captured ISA at 256x256x64 (FP16) and observed
+      ``vgpr=250`` -- right at the gfx942 hardware limit of 256 -- with zero
+      AGPR migration. The Triton AMDGPU back-end refuses to spill to scratch;
+      it drops occupancy instead, so a "no-spill but 8 wavefronts/CU" kernel
+      is the typical failure mode. hipBLASLt at the same shape uses
+      ``num_warps=4`` (WG = 256 threads) and gets 16 wavefronts/CU.
+
+      For SMALL/MEDIUM tiles (<= 128x128 area) the per-thread FP32
+      accumulator only needs ``(BM*BN)/(num_warps*64)`` VGPRs, which leaves
+      plenty of headroom at ``num_warps=4``. Halving the WG doubles the
+      candidate occupancy at zero spill risk -- the K-521 audit's #1
+      mechanical fix (F2 + F7 in ``knowledge/tritonblas/k_521_research.md``).
+
+      For LARGE tiles (>128x128 area, e.g. 256x256, 256x128, 128x256) we
+      keep ``num_warps=8``. Cutting num_warps there would *double* per-thread
+      VGPRs and push the kernel into actual spill territory (or further
+      occupancy collapse), which is the opposite of what we want.
+
+    Per-thread accumulator math (FP32 accum):
+        VGPR/thread = (BLOCK_M * BLOCK_N) / (num_warps * 64)
+
+      | tile      | num_warps=8 | num_warps=4 | choice |
+      |-----------|-------------|-------------|--------|
+      | 16x16     |       0.5   |       1     | 4      |
+      | 32x32     |       2     |       4     | 4      |
+      | 64x64     |       8     |      16     | 4      |
+      | 128x128   |      32     |      64     | 4      |
+      | 128x256   |      64     |     128     | 8      |
+      | 256x256   |     128     |     256     | 8      |
+
+    Args:
+        block_m: Tile rows (BLOCK_M).
+        block_n: Tile cols (BLOCK_N).
+
+    Returns:
+        4 for tiles with area <= 128*128, else 8.
+    """
+    if block_m * block_n <= 128 * 128:
+        return 4
+    return 8
+
+
 
 _tensor_cache = {}
 
@@ -95,7 +142,7 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = _select_num_warps(BLK_M, BLK_N)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +288,7 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = _select_num_warps(BLK_M, BLK_N)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

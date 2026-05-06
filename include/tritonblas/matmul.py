@@ -1,4 +1,6 @@
 import functools
+import math
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +14,42 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-548: opt-in auto-routing to streamk for the boundary cohort. Disabled by
+# default because empirical sweep on MI300X (K-548 split_k_sweep) shows that for
+# the 5 worst boundary shapes from K-535 (512x512x2048 fp16/bf16,
+# 512x1024x2048, 1024x512x2048), the persistent kernel is actually FASTER than
+# streamk (e.g. 20.6 vs 16.3 TFLOPS direct on rank1). The split-K factor sweep
+# itself (sk_grid in {tiles, 304, ...}) showed sk_grid = N_CU is the optimum
+# *within* the streamk path, but streamk itself is sub-optimal for these
+# shapes. The big production win is the selector LRU cache (above), which
+# eliminates 0.20 ms of per-call overhead and gives a 3x speedup on tiny
+# boundary shapes by amortising the Origami heuristic across calls.
+#
+# This routing helper remains exposed for shapes where streamk does win
+# (large rectangular cohort with tiles >> cu_count was unaffected; the
+# fractional-split branch in origami._compute_sk_grid handles those). Set
+# TRITONBLAS_AUTO_STREAMK=1 to opt in to the experimental routing.
+def _auto_streamk_enabled() -> bool:
+    return os.environ.get("TRITONBLAS_AUTO_STREAMK", "0") == "1"
+
+
+def _should_route_to_streamk(selector) -> bool:
+    """Return True iff the selector's tile choice + problem size suggests that
+    streamk_matmul_lt will outperform persistent_matmul_lt.
+
+    Heuristic (K-548): tiles < N_CU AND iters_per_tile >= 4 (the streamk-K
+    overhead dominates when each tile only has a handful of K iterations).
+    Disabled by default — see comment block above.
+    """
+    M, N = selector._m, selector._n
+    BLK_M, BLK_N, BLK_K = selector.block_m, selector.block_n, selector.block_k
+    K = selector._k
+    tiles = math.ceil(M / BLK_M) * math.ceil(N / BLK_N)
+    cu_count = selector._hardware.N_CU
+    iters_per_tile = max(1, math.ceil(K / BLK_K))
+    return tiles < cu_count and iters_per_tile >= 4
 
 
 
@@ -36,9 +74,15 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# K-548: Enable the LRU cache (was commented out). Selector creation runs the
+# Origami solver, which empirically takes ~0.20 ms on MI300X — for boundary
+# cohort shapes (512x512x2048 etc), this is 4-5x the actual kernel time
+# (~0.05 ms), so the selector dominates dispatch latency. The selector is
+# deterministic in its inputs (M, N, K, dtypes, device, mx_block_size, streamk,
+# num_stages), all of which are hashable, so caching is safe and gives
+# immediate speedup on repeated shapes (typical inference workloads call
+# matmul thousands of times with the same shape).
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -390,6 +434,39 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+def _matmul_impl(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    enable_streamk: bool,
+    sk_grid: Optional[int],
+    work_stealing: bool,
+) -> torch.Tensor:
+    """K-548: split body of _matmul out so the eager path can call this directly,
+    bypassing the torch.library dispatcher overhead (~30 µs per call). The
+    triton_op wrapper below preserves torch.compile traceability."""
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    out = a.new_empty(M, N)
+
+    # K-548: build selector with streamk=True so sk_grid is always available
+    # and we only have ONE cache entry per (shape, dtype, device) (not two
+    # depending on whether streamk happens to be enabled for a given call).
+    # Keeping a single cache entry maximises hit rate for mixed workloads.
+    # The marginal cost of running _compute_sk_grid once on cache miss is
+    # ~10 µs (vs the 200 µs Origami solver), and it's cached forever after.
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=True)
+    if (not enable_streamk and sk_grid is None and _auto_streamk_enabled()
+            and _should_route_to_streamk(selector)):
+        enable_streamk = True
+    config = matmul_preamble(selector) if work_stealing else None
+    if enable_streamk:
+        return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
+    else:
+        return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -398,18 +475,7 @@ def _matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
-    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
-    M, K = a.shape
-    _, N = b.shape
-
-    out = a.new_empty(M, N)
-
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
-    if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
-    else:
-        return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
+    return _matmul_impl(a, b, bool(enable_streamk), sk_grid, bool(work_stealing))
 
 
 def _setup_context_matmul_backwards(
@@ -461,7 +527,11 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-548: see _matmul_impl() for rationale.
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=True)
+    if (not enable_streamk and sk_grid is None and _auto_streamk_enabled()
+            and _should_route_to_streamk(selector)):
+        enable_streamk = True
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -481,7 +551,15 @@ def matmul(
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
     if out is None:
-        return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
+        # K-548: bypass triton_op dispatcher in eager mode (~30 µs/call savings,
+        # significant for tiny boundary shapes). The triton_op wrapper still
+        # registers the op so torch.compile can trace it AND so autograd is
+        # wired up via _matmul.register_autograd(...). Under tracing or when
+        # any input requires grad we MUST route through the registered op.
+        if (torch.compiler.is_compiling()
+                or (torch.is_grad_enabled() and (a.requires_grad or b.requires_grad))):
+            return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
+        return _matmul_impl(a, b, bool(enable_streamk), sk_grid, bool(work_stealing))
 
     if torch.is_grad_enabled() and (
         a.requires_grad

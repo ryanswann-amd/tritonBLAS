@@ -388,17 +388,31 @@ class OrigamiMatmulSelector:
 
         # Fewer tiles than CUs: split along k-dimension up to some factor
         elif tiles < cu_count:
+            split_chosen = False
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
 
                 if split_grid <= cu_count and iters_per_cu >= 8:
                     sk_grid = split_grid
+                    split_chosen = True
                     break
+
+            # K-548: even when no split factor satisfies iters_per_cu >= 8
+            # (boundary cohort: K just above the heuristic threshold so each tile
+            #  has only a few K-iterations), we can still benefit from spreading
+            # work across all CUs via stream-K. Empirical evidence (K-548 iter-1
+            # sweep on MI300X, 5 boundary shapes) shows sk_grid = cu_count gives
+            # ~4x speedup over the persistent path while sk_grid = tiles gives
+            # almost as much. Either way, the dispatcher (matmul.py) needs to
+            # actually route to streamk_matmul_lt — that part is handled there.
+            if not split_chosen and tiles < cu_count:
+                # Use cu_count programs over tiles tiles → fractional-tile streamk
+                sk_grid = cu_count
 
         # Final check: if the chosen grid leaves a remainder AND
         # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        if tiles % sk_grid != 0 and self._partial_tile_size(sk_grid) > max_workspace:
             sk_grid = tiles
 
         if tiles >= cu_count:

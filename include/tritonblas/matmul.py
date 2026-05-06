@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -24,6 +25,76 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Grid-stride persistent kernel heuristic (K-533)
+#
+# The persistent_matmul kernel already contains a grid-stride loop
+# (`for tile_id in range(start, total_tiles, NUM_SMS)`), but the launcher
+# below has historically passed `grid = total_tiles` and `NUM_SMS = total_tiles`
+# so the loop runs exactly once per workgroup — i.e. the kernel runs as a
+# data-parallel grid, never amortising launch overhead across tiles.
+#
+# For small-M / small-N shapes where total_tiles can substantially exceed
+# the physical CU count, this leaves performance on the table: every extra
+# tile costs another workgroup launch + scheduler dispatch + register init.
+# Switching to a true grid-stride launch (grid = num_cus, each WG processes
+# multiple tiles in the existing in-kernel loop) cuts the WG-launch count
+# by ~tiles/num_cus and improves tail-wave balance.
+#
+# The previous attempt at a persistent loop regressed performance because
+# the launcher over-eagerly enabled it for all shapes — for shapes with
+# total_tiles <= num_cus, persistent launches *more* WGs (the empty ones
+# just exit) and pays pointer-recompute cost in the loop without any
+# launch-overhead saving.  We therefore gate it carefully:
+#
+#   1. total_tiles > num_cus * GRID_STRIDE_TILE_RATIO   (must amortise)
+#   2. M * N <= GRID_STRIDE_MN_THRESHOLD                (small-problem bias —
+#      large GEMMs already amortise via per-tile compute)
+#
+# Both knobs are tunable via environment variables for benchmarking:
+#
+#   TBLAS_GRID_STRIDE_PERSISTENT = {auto, on, off}      default: auto
+#   TBLAS_GRID_STRIDE_MN_THRESHOLD = <int>              default: 1048576
+#   TBLAS_GRID_STRIDE_TILE_RATIO = <float>              default: 1.5
+# ──────────────────────────────────────────────────────────────────────────────
+
+_GRID_STRIDE_MODE = os.environ.get("TBLAS_GRID_STRIDE_PERSISTENT", "auto").lower()
+_GRID_STRIDE_MN_THRESHOLD = int(os.environ.get("TBLAS_GRID_STRIDE_MN_THRESHOLD", 1024 * 1024))
+_GRID_STRIDE_TILE_RATIO = float(os.environ.get("TBLAS_GRID_STRIDE_TILE_RATIO", 1.5))
+
+
+def _should_use_grid_stride_persistent(M, N, BLK_M, BLK_N, num_cus):
+    """Return True when small-M / small-N shapes will benefit from the
+    grid-stride persistent launch (grid = num_cus, each WG iterates over
+    multiple tiles).  See the block comment above for the rationale.
+
+    Args:
+        M, N: problem M and N dimensions
+        BLK_M, BLK_N: tile sizes selected by Origami
+        num_cus: physical CU count for the device (NOT the XCC mapping)
+    """
+    if _GRID_STRIDE_MODE == "off":
+        return False
+    if num_cus is None or num_cus <= 0:
+        return False
+
+    total_blocks_M = (M + BLK_M - 1) // BLK_M
+    total_blocks_N = (N + BLK_N - 1) // BLK_N
+    total_tiles = total_blocks_M * total_blocks_N
+
+    if _GRID_STRIDE_MODE == "on":
+        # Forced-on still requires more tiles than CUs — without that we
+        # only launch *more* WGs and pay pointer-recompute cost for nothing.
+        return total_tiles > num_cus
+
+    # auto: small problem AND tile count noticeably exceeds CU count.
+    if M * N > _GRID_STRIDE_MN_THRESHOLD:
+        return False
+    if total_tiles <= int(num_cus * _GRID_STRIDE_TILE_RATIO):
+        return False
+    return True
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -158,7 +229,30 @@ def persistent_matmul_lt(
             kpack=kpack,
         )
     else:
-        grids = total_tiles
+        # ────────────────────────────────────────────────────────────────────
+        # K-533: gate the *true* persistent (grid-stride) launch behind a
+        # narrow heuristic.  When triggered, grid = num_cus and the kernel's
+        # in-built `for tile_id in range(pid, total_tiles, NUM_SMS)` loop
+        # processes multiple tiles per workgroup, amortising launch overhead.
+        # ────────────────────────────────────────────────────────────────────
+        num_cus = selector._hardware.N_CU
+        use_grid_stride = _should_use_grid_stride_persistent(
+            M, N, BLK_M, BLK_N, num_cus
+        )
+
+        if use_grid_stride:
+            grids = num_cus
+            kernel_num_sms = num_cus
+            # Cap chunk_size to the per-XCD share of the new (smaller) grid.
+            persistent_chunk_size = chunk_size
+            if num_xcds > 0:
+                persistent_chunk_size = min(
+                    persistent_chunk_size, max(1, grids // num_xcds)
+                )
+        else:
+            grids = total_tiles
+            kernel_num_sms = total_programs
+            persistent_chunk_size = chunk_size
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
@@ -181,9 +275,9 @@ def persistent_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=total_programs,
+            NUM_SMS=kernel_num_sms,
             NUM_XCDS=num_xcds,
-            CHUNK_SIZE=chunk_size,
+            CHUNK_SIZE=persistent_chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,

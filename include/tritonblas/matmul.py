@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .lds_swizzle import select_lds_config
 
 
 
@@ -95,12 +96,21 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-580: select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
+    _lds_cfg = select_lds_config(
+        M, N, K,
+        a_dtype=str(a.dtype), b_dtype=str(b.dtype), c_dtype=str(c.dtype),
+        block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+        streamk=False, work_stealing=work_stealing,
+    )
+    num_warps = _lds_cfg.num_warps
+    kpack = _lds_cfg.kpack
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -241,12 +251,21 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-580: select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
+    _lds_cfg = select_lds_config(
+        M, N, K,
+        a_dtype=str(a.dtype), b_dtype=str(b.dtype), c_dtype=str(c.dtype),
+        block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+        streamk=True, work_stealing=work_stealing,
+    )
+    num_warps = _lds_cfg.num_warps
+    kpack = _lds_cfg.kpack
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

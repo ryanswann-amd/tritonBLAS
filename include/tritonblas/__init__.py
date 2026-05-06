@@ -5,3 +5,11 @@ from .matmul import addmm
 from .config import MatmulConfig, matmul_preamble
 from .bench import do_bench
 from .origami import OrigamiMatmulSelector
+from .lds_swizzle import (
+    LDSSwizzleConfig,
+    BASELINE_CONFIG as LDS_BASELINE_CONFIG,
+    SWIZZLED_CONFIG as LDS_SWIZZLED_CONFIG,
+    is_medium_k_residual,
+    select_lds_config,
+    get_cache as get_lds_swizzle_cache,
+)

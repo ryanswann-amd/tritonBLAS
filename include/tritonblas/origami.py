@@ -25,7 +25,7 @@ def compute_continuous_sk_grid(
     max_workspace_bytes: int = 128 * 1024 * 1024,
 ) -> int:
     """
-    Pure-Python continuous split-K grid heuristic (K-557 / K-583).
+    Pure-Python continuous split-K grid heuristic (K-557).
 
     Computes the StreamK ``sk_grid`` value for a (m, n, k) GEMM with the given
     macro-tile (block_m, block_n, block_k) on a device with ``cu_count`` CUs
@@ -61,7 +61,27 @@ def compute_continuous_sk_grid(
 
     Returns:
         Integer ``sk_grid``.
+
+    Raises:
+        ValueError: if any of ``m``, ``n``, ``k``, ``block_m``, ``block_n``,
+            ``block_k``, ``cu_count``, or ``out_dtype_bitsize`` is non-positive.
+            The heuristic has no meaningful output for zero-sized GEMMs and
+            must fail loudly rather than silently produce a bogus grid.
     """
+    # Defensive validation — fail loudly on garbage inputs so callers get a
+    # real error message instead of an arbitrary fallback grid (or, worse, a
+    # silent ZeroDivisionError deep inside the dispatch path).
+    for _name, _val in (
+        ("m", m), ("n", n), ("k", k),
+        ("block_m", block_m), ("block_n", block_n), ("block_k", block_k),
+        ("cu_count", cu_count), ("out_dtype_bitsize", out_dtype_bitsize),
+    ):
+        if not isinstance(_val, int) or _val <= 0:
+            raise ValueError(
+                f"compute_continuous_sk_grid: {_name}={_val!r} must be a "
+                f"positive integer (got {type(_val).__name__})"
+            )
+
     tiles = ceil(m / block_m) * ceil(n / block_n)
     iters_per_tile = max(1, ceil(k / block_k))
 
@@ -447,7 +467,7 @@ class OrigamiMatmulSelector:
 
     def _compute_sk_grid(self):
         """
-        Continuous split-K grid heuristic (K-557 / K-583).
+        Continuous split-K grid heuristic (K-557).
 
         Thin instance-level wrapper around :func:`compute_continuous_sk_grid`.
         Pulling the math out into a free function lets the heuristic be

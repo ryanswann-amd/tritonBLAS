@@ -1,6 +1,6 @@
 """
 Unit tests for the continuous split-K grid heuristic
-(``compute_continuous_sk_grid``) introduced in K-557 and validated in K-583.
+(``compute_continuous_sk_grid``) introduced in K-557.
 
 These tests do NOT require a GPU.  They import the helper directly from
 ``tritonblas.origami`` and exercise it against synthetic
@@ -374,7 +374,7 @@ def test_pure_function_determinism():
 
 
 def test_memoization_repeats_hit_cache():
-    """The helper is wrapped in ``functools.lru_cache`` (K-583 review fix)
+    """The helper is wrapped in ``functools.lru_cache``
     so hot-path callers (autotune, inference) skip the integer search on
     repeated shapes.  Verify cache is wired up and hits accumulate."""
     # Reset cache so this test is order-independent.
@@ -404,7 +404,63 @@ def test_memoization_repeats_hit_cache():
 
 
 # ---------------------------------------------------------------------------
-# §9  Boundary-shape regression set (K-548 / K-557 / K-583)
+# §8b  Error path — heuristic must fail loudly on garbage inputs
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kwargs,bad_field", [
+    (dict(m=0,    n=128,  k=128,  block_m=64,  block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "m"),
+    (dict(m=128,  n=0,    k=128,  block_m=64,  block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "n"),
+    (dict(m=128,  n=128,  k=0,    block_m=64,  block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "k"),
+    (dict(m=128,  n=128,  k=128,  block_m=0,   block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "block_m"),
+    (dict(m=128,  n=128,  k=128,  block_m=64,  block_n=0,   block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "block_n"),
+    (dict(m=128,  n=128,  k=128,  block_m=64,  block_n=64,  block_k=0,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "block_k"),
+    (dict(m=128,  n=128,  k=128,  block_m=64,  block_n=64,  block_k=64,
+          cu_count=0, out_dtype_bitsize=BF16_BITS), "cu_count"),
+    (dict(m=128,  n=128,  k=128,  block_m=64,  block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=0), "out_dtype_bitsize"),
+    (dict(m=-1,   n=128,  k=128,  block_m=64,  block_n=64,  block_k=64,
+          cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS), "m"),
+])
+def test_invalid_inputs_raise_value_error(kwargs, bad_field):
+    """Zero / negative dimensions, blocks, cu_count, dtype_bitsize MUST raise
+    ``ValueError`` rather than silently produce a bogus grid (or crash with
+    ``ZeroDivisionError`` deep inside the dispatch path).
+
+    This is the contract reviewers requested: the heuristic fails loudly on
+    garbage inputs.
+    """
+    # Clear cache so a previous (M, N, K, ...) tuple doesn't return its
+    # cached value through the lru_cache wrapper.
+    compute_continuous_sk_grid.cache_clear()
+    with pytest.raises(ValueError) as excinfo:
+        compute_continuous_sk_grid(**kwargs)
+    # The error message MUST identify which field was invalid so the operator
+    # can fix the call-site.
+    assert bad_field in str(excinfo.value), (
+        f"ValueError did not name the bad field {bad_field!r}: "
+        f"{excinfo.value}"
+    )
+
+
+def test_non_int_inputs_raise_value_error():
+    """Floats, strings, None must also raise (not silently coerce)."""
+    compute_continuous_sk_grid.cache_clear()
+    with pytest.raises(ValueError):
+        compute_continuous_sk_grid(
+            m=128.0, n=128, k=128,  # float instead of int
+            block_m=64, block_n=64, block_k=64,
+            cu_count=CU_MI300X, out_dtype_bitsize=BF16_BITS,
+        )
+
+
+# ---------------------------------------------------------------------------
+# §9  Boundary-shape regression set (K-548 / K-557)
 # ---------------------------------------------------------------------------
 
 # Each entry: (m, n, k, blk_m, blk_n, blk_k, expected_grid, label)

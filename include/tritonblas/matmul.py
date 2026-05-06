@@ -55,7 +55,7 @@ def _make_matmul_selector(
     # Persistent on-disk autotune cache: skip the expensive Origami
     # selection when we have a previously-recorded entry for this exact
     # shape / dtype / mode / arch.
-    arch, n_cu, active_cu = _resolve_arch_info(device)
+    arch, n_cu = _resolve_arch_info(device)
     cache = _autotune_cache.get_cache(arch, n_cu)
     a_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, str(a_dtype))
     b_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, str(b_dtype))
@@ -63,7 +63,7 @@ def _make_matmul_selector(
     key = _autotune_cache.make_cache_key(
         M, N, K, a_str, b_str, c_str,
         mx_block_size, streamk, num_stages,
-        n_cu, active_cu,
+        n_cu,
     )
     cached = cache.lookup(key)
     if cached is not None:
@@ -142,7 +142,11 @@ def _make_matmul_selector(
 
 
 def _resolve_arch_info(device):
-    """Return (arch_name, n_cu, active_cu) for the given torch device."""
+    """Return (arch_name, n_cu) for the given torch device.
+
+    A per-call sub-CU mask is intentionally not part of the cache identity
+    (see ``autotune_cache.make_cache_suffix`` for the rationale).
+    """
     try:
         props = torch.cuda.get_device_properties(device)
         gcn = getattr(props, "gcnArchName", "") or ""
@@ -150,7 +154,7 @@ def _resolve_arch_info(device):
         n_cu = int(getattr(props, "multi_processor_count", 0)) or 0
     except Exception:
         arch, n_cu = "unknown", 0
-    return arch, n_cu, None
+    return arch, n_cu
 
 
 def persistent_matmul_lt(

@@ -191,8 +191,6 @@ def make_cache_suffix(
     streamk: bool,
     num_stages: int,
     n_cu: int,
-    active_cu: Optional[int],  # accepted for API symmetry; intentionally
-    # NOT included in the suffix (see note below).
 ) -> str:
     """Return the non-shape ("suffix") portion of a cache key.
 
@@ -202,19 +200,18 @@ def make_cache_suffix(
     entries that are LDS-safe (K-588 F9) and grid-compatible without having
     to re-run any heuristic.
 
-    NOTE on ``active_cu``: a per-call sub-CU mask (e.g. running on a
-    partition of the device) does not change the LDS-safety of a cached
-    tile or the dtype/streamk/num_stages context, and on a given
-    architecture ``n_cu`` already pins the hardware identity.  We deliberately
-    omit ``active_cu`` from the suffix so that an entry stored with
-    ``active_cu=None`` (i.e. ``n_cu``) is reusable for a near-neighbor query
-    that might supply an explicit ``active_cu`` value — otherwise we would
-    silently re-introduce the exact "near-miss -> 0% hit" failure mode that
-    K-588 root-caused.  ``active_cu`` is still threaded through the public
-    API so we can re-introduce it (or fold it into ``n_cu``) without an API
-    break if a future kernel is shown to be sensitive to it.
+    A per-call sub-CU mask (``active_cu``) is intentionally NOT part of the
+    cache identity: on a given architecture ``n_cu`` already pins the
+    hardware, the cached tile's LDS-safety depends only on the dtype /
+    num_stages / tile shape, and including ``active_cu`` would silently
+    split the suffix bucket so a canonical entry stored with the default
+    full-CU value missed every near-neighbor query that supplied a smaller
+    value — re-introducing the exact "near-miss -> 0% hit" failure mode
+    K-588 root-caused.  The parameter has been removed from the cache API
+    entirely (K-591 Minimalist review) rather than deprecated in place; if
+    a future kernel is genuinely sensitive to a sub-CU mask the right fix
+    is to fold it into ``n_cu``, not to re-add a silently ignored knob.
     """
-    _ = active_cu  # consumed but intentionally not part of the key
     return (
         f"{a_dtype_str}|{b_dtype_str}|{out_dtype_str}"
         f"|mx{mx_block_size}|sk{int(bool(streamk))}|ns{num_stages}"
@@ -233,7 +230,6 @@ def make_cache_key(
     streamk: bool,
     num_stages: int,
     n_cu: int,
-    active_cu: Optional[int],
 ) -> str:
     """Stable string key for an autotune entry."""
     suffix = make_cache_suffix(
@@ -244,7 +240,6 @@ def make_cache_key(
         streamk,
         num_stages,
         n_cu,
-        active_cu,
     )
     return f"{M}x{N}x{K}|{suffix}"
 
@@ -372,11 +367,11 @@ class PersistentAutotuneCache:
 
         Two filters are applied in order:
 
-        1. The candidate's *suffix* (the non-shape part of the key — dtypes,
-           streamk, num_stages, n_cu, active_cu) must match exactly.  This
-           preserves K-588 F9's LDS-safety guarantee: the cached tile was
-           validated for the same dtype/num_stages and is therefore valid
-           for any (M', N', K') we substitute in.
+        1. The candidate's *suffix* (the non-shape part of the key —
+           dtypes, mx_block_size, streamk, num_stages, n_cu) must match
+           exactly.  This preserves K-588 F9's LDS-safety guarantee: the
+           cached tile was validated for the same dtype/num_stages and is
+           therefore valid for any (M', N', K') we substitute in.
         2. Each shape axis must be within the relative tolerance:
            ``|M - M'| / max(M, M') <= tolerance``, and likewise for N and K.
 

@@ -11,13 +11,21 @@ Disable with ``TRITONBLAS_AUTOTUNE_CACHE=0``; override directory with
 Boundary-tolerance fall-back (K-591):
    After an exact-key miss we scan cached entries that share the same
    non-shape suffix (dtypes, mx_block_size, streamk, num_stages, n_cu) and
-   whose (M', N', K') is within ``BOUNDARY_TOLERANCE`` (5%) on every axis,
-   and return the closest by log-L1 distance.  K-588 root-caused that
+   whose (M', N', K') is within the configured per-axis relative tolerance,
+   returning the closest by log-L1 distance.  K-588 root-caused that
    Origami picks the same tile within this band and that the cached tile
-   is LDS-safe whenever the suffix matches.  Nearest-match results are NOT
-   persisted under the requesting key — only true Origami-tuned entries
-   populate the on-disk file, which prevents drift through chained
-   interpolations.
+   is LDS-safe whenever the suffix matches.
+
+   The tolerance is operator-tunable via
+   ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (a relative fraction; default
+   ``0.05`` = 5%).  Setting it to ``0`` / ``off`` disables the fall-back;
+   values above ``0.5`` are clamped to prevent near-miss from serving
+   arbitrary shapes.  ``BOUNDARY_TOLERANCE`` is the compiled-in default
+   that the env-var overrides.
+
+   Nearest-match results are NOT persisted under the requesting key — only
+   true Origami-tuned entries populate the on-disk file, which prevents
+   drift through chained interpolations.
 """
 
 from __future__ import annotations
@@ -33,11 +41,18 @@ from typing import Any, Dict, Optional, Tuple
 # Schema version — bump if the cached entry layout changes.
 SCHEMA_VERSION = 1
 
-# Per-axis relative tolerance for the boundary-tolerance lookup.  5% covers
-# the typical M+/-{1..7} dynamic-batch jitter and the K-588 / K-510 held-out
-# workload while staying inside the band where Origami's tile selection is
-# stable (K-588 F10).  Module constant — no env-var knob (K-591 Minimalist).
+# Compiled-in default per-axis relative tolerance for the boundary-tolerance
+# lookup.  5% covers the typical M+/-{1..7} dynamic-batch jitter and the
+# K-588 / K-510 held-out workload while staying inside the band where
+# Origami's tile selection is stable (K-588 F10).  Operators with different
+# jitter profiles can override this at runtime via the env var
+# ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (see ``_configured_tolerance``).
 BOUNDARY_TOLERANCE = 0.05
+
+# Backwards-compatible aliases / clamps used by the env-var resolver and by
+# tests that pin the resolution semantics.
+_DEFAULT_TOLERANCE = BOUNDARY_TOLERANCE
+_MAX_TOLERANCE = 0.5
 
 _DEFAULT_REL_DIR = "state/tritonblas_autotune"
 _USER_FALLBACK_DIR = os.path.expanduser("~/.cache/tritonblas/autotune")
@@ -56,6 +71,39 @@ _REQUIRED_FIELDS = (
 def _is_cache_enabled() -> bool:
     val = os.environ.get("TRITONBLAS_AUTOTUNE_CACHE", "1").strip().lower()
     return val not in ("0", "false", "no", "off")
+
+
+def _configured_tolerance() -> float:
+    """Resolve the per-axis relative tolerance from the env var.
+
+    Resolution rules (kept simple so the env-var contract is auditable):
+
+    * unset             -> ``_DEFAULT_TOLERANCE`` (compiled-in 5%)
+    * empty / "0" / "off" / "false" / "no" / "none" -> ``0.0`` (fall-back disabled)
+    * negative value    -> ``0.0`` (treated as off)
+    * non-numeric       -> ``_DEFAULT_TOLERANCE`` (loud-fall-back to default)
+    * value > _MAX_TOLERANCE -> ``_MAX_TOLERANCE`` (clamped)
+    * otherwise         -> the parsed float
+
+    Re-evaluated per-call (rather than read once at import) so test fixtures
+    and short-lived deployments can adjust the tolerance without reloading
+    the module.
+    """
+    raw = os.environ.get("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE")
+    if raw is None:
+        return _DEFAULT_TOLERANCE
+    s = raw.strip().lower()
+    if s in ("", "0", "off", "false", "no", "none"):
+        return 0.0
+    try:
+        v = float(s)
+    except ValueError:
+        return _DEFAULT_TOLERANCE
+    if v < 0:
+        return 0.0
+    if v > _MAX_TOLERANCE:
+        return _MAX_TOLERANCE
+    return v
 
 
 def _cache_dir() -> Path:
@@ -138,8 +186,15 @@ def make_cache_key(
     )
 
 
-def _split_key(key: str) -> Optional[Tuple[int, int, int, str]]:
-    """Return ``(M, N, K, suffix)`` for a canonical key, else ``None``."""
+def parse_cache_key(key: Any) -> Optional[Tuple[int, int, int, str]]:
+    """Return ``(M, N, K, suffix)`` for a canonical key, else ``None``.
+
+    Public so external callers (tests, debug tools, the K-591 sweep
+    harness) can reason about the key format without re-parsing the
+    ``"MxNxK|..."`` shape themselves.  Two keys differing only in shape
+    must yield identical suffix strings — that's the bucketing invariant
+    the boundary-tolerance lookup relies on.
+    """
     if not isinstance(key, str):
         return None
     head, sep, suffix = key.partition("|")
@@ -155,6 +210,11 @@ def _split_key(key: str) -> Optional[Tuple[int, int, int, str]]:
     if m <= 0 or n <= 0 or k <= 0:
         return None
     return m, n, k, suffix
+
+
+# Internal alias retained so existing call-sites keep working; new code
+# should import the public ``parse_cache_key``.
+_split_key = parse_cache_key
 
 
 def _load_raw(path: Path) -> Optional[Dict[str, Any]]:
@@ -205,6 +265,16 @@ class PersistentAutotuneCache:
     def version(self) -> str:
         return self._version
 
+    @property
+    def tolerance(self) -> float:
+        """Per-axis relative tolerance used by ``lookup_nearest``.
+
+        Read from ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` per call so an
+        operator can adjust it at runtime; unset / off / garbage all
+        resolve through ``_configured_tolerance()``.
+        """
+        return _configured_tolerance()
+
     def __len__(self) -> int:
         return len(self._entries)
 
@@ -222,22 +292,27 @@ class PersistentAutotuneCache:
     def lookup_nearest(
         self, key: str
     ) -> Optional[Tuple[Dict[str, Any], str]]:
-        """Return the closest cached entry to ``key`` within
-        ``BOUNDARY_TOLERANCE`` per axis, or ``None``.
+        """Return the closest cached entry to ``key`` within the configured
+        per-axis tolerance, or ``None``.
 
         Filtering: candidates must share the non-shape suffix exactly
         (preserves LDS-safety, K-588 F9) and every axis must satisfy
-        ``|x - x'| / max(x, x') <= BOUNDARY_TOLERANCE``.  Ties are broken
-        by log-L1 distance (scale-free, matches Origami's tile sensitivity)
-        then lexicographic key order.
+        ``|x - x'| / max(x, x') <= tolerance``.  Ties are broken by log-L1
+        distance (scale-free, matches Origami's tile sensitivity) then by
+        lexicographic key order.
+
+        Returns ``None`` when the configured tolerance is zero — that's
+        the explicit kill switch operators rely on.
         """
         if not self._enabled:
             return None
-        parsed = _split_key(key)
+        tol = self.tolerance
+        if tol <= 0.0:
+            return None
+        parsed = parse_cache_key(key)
         if parsed is None:
             return None
         m, n, k, suffix = parsed
-        tol = BOUNDARY_TOLERANCE
 
         best_key: Optional[str] = None
         best_score = math.inf
@@ -245,7 +320,7 @@ class PersistentAutotuneCache:
             for cand_key in self._entries:
                 if cand_key == key:
                     continue
-                cparsed = _split_key(cand_key)
+                cparsed = parse_cache_key(cand_key)
                 if cparsed is None or cparsed[3] != suffix:
                     continue
                 cm, cn, ck, _ = cparsed

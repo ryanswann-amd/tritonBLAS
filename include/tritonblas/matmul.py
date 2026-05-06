@@ -22,6 +22,23 @@ current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
 MAX_BLOCK_SIZE = 65536
 
+# K-587 / K-383 §F7: tile-area gate for adaptive `kpack`.
+#
+# Empirically tuned on MI300X (gfx942, ROCm 7.2, Triton 3.6.0+rocm7.2.0):
+#   * tiles with BLK_M*BLK_N <= 32768 (i.e. 128x256, 256x128, 128x128, 128x64,
+#     64x256, etc.)  benefit +3 to +4 pp from kpack=2 because the codegen
+#     emits `ds_read_b128 vec=8` instead of paired `ds_read2st64_b64 vec=4`;
+#   * 256x256x64 (the dominant K-543 sub-band-A dispatch) regresses -7 to
+#     -9 pp because doubled LDS-load VGPRs crowd out the accumulator.
+#
+# 32768 = 128*256 (inclusive) but excludes 256*256=65536 — splits cleanly
+# between the two regimes.  When re-tuning, change THIS constant rather
+# than the threshold expression below.  See K-573 iter1 §F7 and the
+# rejected "flat kpack=2" experiment in include/tritonblas/origami.py
+# K-587 docstring above `_HIPBLASLT_SHAPE_OVERRIDES` for the falsification
+# record on the regression-guard control set.
+_KPACK2_TILE_AREA_THRESHOLD = 32768
+
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
@@ -98,11 +115,11 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
-    # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
-    # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
-    # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
-    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    # K-587 / K-383 §F7 CG-2: adaptive kpack — see _KPACK2_TILE_AREA_THRESHOLD
+    # at module top for the empirical rationale.  Skinny / small tiles win
+    # +3 to +4 pp from `ds_read_b128` (vec=8); 256x256 regresses -7 to -9 pp
+    # from doubled LDS-load VGPR pressure crowding out the accumulator.
+    kpack = 2 if (BLK_M * BLK_N) <= _KPACK2_TILE_AREA_THRESHOLD else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -248,11 +265,11 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
-    # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
-    # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
-    # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
-    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    # K-587 / K-383 §F7 CG-2: adaptive kpack — see _KPACK2_TILE_AREA_THRESHOLD
+    # at module top for the empirical rationale.  Skinny / small tiles win
+    # +3 to +4 pp from `ds_read_b128` (vec=8); 256x256 regresses -7 to -9 pp
+    # from doubled LDS-load VGPR pressure crowding out the accumulator.
+    kpack = 2 if (BLK_M * BLK_N) <= _KPACK2_TILE_AREA_THRESHOLD else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

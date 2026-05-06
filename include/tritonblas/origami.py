@@ -54,66 +54,87 @@ from math import ceil
 # code changes to the selector. The skinny-shape guard on the post-hoc
 # 256x256 fallback (below) is the more important structural fix.
 # Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
-_HIPBLASLT_SHAPE_OVERRIDES = {
-    # ---- K-545 entries (original) ----------------------------------------
-    # 1024x8192x8192: structurally-justified — baseline 256x128x64 puts
-    # the larger tile dim on the SHORT axis. Override aligns the larger
-    # tile dim with the long N axis. Mechanism validated on g09u31 MI300X;
-    # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
-    (1024, 8192, 8192, "bf16"): (128, 256, 64),
-    (1024, 8192, 8192, "fp16"): (128, 256, 64),
+#
+# K-587 (Architect feedback): the override table now carries per-entry
+# provenance — `source` (the upstream ticket / sweep that justifies the
+# entry) and `rationale` (a short structural note for future readers).
+# The flat `_HIPBLASLT_SHAPE_OVERRIDES` dict (for the lookup hot path) is
+# derived from `_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY` below — both stay in
+# sync via assertion at module import time.
+_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY = (
+    # (M, N, K, dtype, BM, BN, BK, source_ticket, rationale)
+    #
+    # K-545 entries
+    (1024, 8192, 8192, "bf16", 128, 256, 64, "K-545",
+     "Long-N axis: align larger tile dim with N=8192 (baseline picked 256x128x64, wrong direction)."),
+    (1024, 8192, 8192, "fp16", 128, 256, 64, "K-545",
+     "Long-N axis: align larger tile dim with N=8192 (baseline picked 256x128x64, wrong direction)."),
 
-    # ---- K-587 entries (extended overrides) ------------------------------
-    # Source: K-543 algos_local/algos_*.json `top_by_perf[0]` (hipBLASLt's
-    # offline-best tile per shape on MI300X). Triton requires tile dims to
-    # be powers of 2, so where hipBLASLt's pick is non-pow2 (e.g. 224, 192,
-    # 160) we use the in-range pow2 neighbor (128 or 256) that preserves
-    # the tile ORIENTATION (long-dim-aligned-to-long-axis). Tile orientation
-    # is the dominant structural lever per K-579 §1.
+    # K-587 extended overrides — sources: K-543 algos_local/algos_*.json
+    # top_by_perf[0] (hipBLASLt offline-best). Where the hipBLASLt pick is
+    # non-pow2 (224 / 192 / 160), we substitute the in-range pow2 neighbor
+    # (128 or 256) that preserves the long-axis tile orientation
+    # (the dominant structural lever per K-579 §1).
+    (8192, 1024, 8192, "bf16", 128, 256, 64, "K-587",
+     "K-545 cohort: hipBLASLt top-1 = 128x256x64; K-545 dispatched 256x128x64 (wrong axis) → ~0.78."),
+    (8192, 1024, 8192, "fp16", 128, 256, 64, "K-587",
+     "K-545 cohort: hipBLASLt top-1 = 128x256x64; K-545 dispatched 256x128x64 (wrong axis) → ~0.80."),
 
-    # 8192x1024x8192 (K-545 cohort): hipBLASLt top-1 = 128x256x64 (transpose
-    # orientation aligned with long N=8192). K-545 used 256x128x64 (the
-    # natural Origami pick) and got ratio ~0.78. K-579 §F2.f2 predicts the
-    # transpose closes part of the gap; remainder is codegen.
-    (8192, 1024, 8192, "bf16"): (128, 256, 64),
-    (8192, 1024, 8192, "fp16"): (128, 256, 64),
+    (2048, 4096, 4096, "bf16", 128, 256, 64, "K-587",
+     "K-545 cohort: hipBLASLt top-1 = 128x256x64; replaces post-hoc 256x256 fallback."),
+    (2048, 4096, 4096, "fp16", 128, 256, 64, "K-587",
+     "K-545 cohort: hipBLASLt top-1 = 128x224x64 (non-pow2) → 128x256x64 in-range neighbor."),
 
-    # 2048x4096x4096 (K-545 cohort): hipBLASLt top-1 bf16 = 128x256x64 in-
-    # range; fp16 perf-leader is 128x224x64 (non-pow2 → 128x256x64 is
-    # the in-range neighbor). bf16 already validated noise-bound at
-    # 128x256x64 in K-545 — so this entry primarily serves to disable the
-    # post-hoc 256x256 fallback for this shape.
-    (2048, 4096, 4096, "bf16"): (128, 256, 64),
-    (2048, 4096, 4096, "fp16"): (128, 256, 64),
+    (4096, 2048, 4096, "bf16", 256, 128, 64, "K-587",
+     "K-545 cohort: transpose of 2048x4096x4096; hipBLASLt top-1 = 256x128x64."),
+    (4096, 2048, 4096, "fp16", 256, 128, 64, "K-587",
+     "K-545 cohort: transpose of 2048x4096x4096; hipBLASLt top-1 = 256x128x64."),
 
-    # 4096x2048x4096 (K-545 cohort): transpose of 2048x4096x4096; hipBLASLt
-    # picks the transposed tile in turn.
-    (4096, 2048, 4096, "bf16"): (256, 128, 64),
-    (4096, 2048, 4096, "fp16"): (256, 128, 64),
+    (6144, 4096, 4096, "bf16", 128, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 192x224x64 (non-pow2); 128x256x64 keeps long-N orientation."),
+    (6144, 4096, 4096, "fp16", 128, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 192x224x64 (non-pow2); 128x256x64 keeps long-N orientation."),
 
-    # 6144x4096x4096 (K-543 sub-band-A): hipBLASLt top-1 bf16 = 192x224x64
-    # (non-pow2 → 128x256x64 in-range neighbor preserves the long-N
-    # orientation; symmetric 256x256x64 caused the 0.69 ratio at baseline).
-    (6144, 4096, 4096, "bf16"): (128, 256, 64),
-    (6144, 4096, 4096, "fp16"): (128, 256, 64),
+    (4096, 4096, 16384, "bf16", 256, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 256x224x64 (non-pow2); 256x256x64 = K-545 fallback. Doc-parity entry."),
+    (4096, 4096, 16384, "fp16", 256, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 256x224x64 (non-pow2); 256x256x64 = K-545 fallback. Doc-parity entry."),
 
-    # 4096x4096x16384 (K-543 sub-band-A): hipBLASLt top-1 = 256x224x64 for
-    # both dtypes (non-pow2 N=224 → 256x256x64 = K-545 fallback already
-    # in effect; entry kept for documentation).  No tile-shape lever is
-    # available for this shape inside the pow2 constraint; the kpack=2
-    # codegen lever (P2) is the only remaining win path.
-    (4096, 4096, 16384, "bf16"): (256, 256, 64),
-    (4096, 4096, 16384, "fp16"): (256, 256, 64),
-
-    # 8192x8192x4096 (K-543 sub-band-A): hipBLASLt top-1 = 256x224x64
-    # (non-pow2 → 256x256x64 already dispatched). Entry for documentation
-    # parity with the row above.
-    (8192, 8192, 4096, "bf16"): (256, 256, 64),
-    (8192, 8192, 4096, "fp16"): (256, 256, 64),
+    (8192, 8192, 4096, "bf16", 256, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 256x224x64 (non-pow2); 256x256x64 already dispatched. Doc-parity entry."),
+    (8192, 8192, 4096, "fp16", 256, 256, 64, "K-587",
+     "K-543 sub-band-A: hipBLASLt top-1 = 256x224x64 (non-pow2); 256x256x64 already dispatched. Doc-parity entry."),
 
     # Other K-543 cohort shapes intentionally NOT overridden — see
     # lessons.md "K-545 / S-002" entry for the falsification record.
+)
+
+# Hot-path lookup table — derived from the structured registry above.
+_HIPBLASLT_SHAPE_OVERRIDES = {
+    (m, n, k, dt): (bm, bn, bk)
+    for (m, n, k, dt, bm, bn, bk, _src, _why) in _HIPBLASLT_SHAPE_OVERRIDE_REGISTRY
 }
+# Side-table keyed identically to `_HIPBLASLT_SHAPE_OVERRIDES`, mapping each
+# entry to its `(source_ticket, rationale)` pair for tooling / audits.
+_HIPBLASLT_SHAPE_OVERRIDE_PROVENANCE = {
+    (m, n, k, dt): (src, why)
+    for (m, n, k, dt, _bm, _bn, _bk, src, why) in _HIPBLASLT_SHAPE_OVERRIDE_REGISTRY
+}
+assert len(_HIPBLASLT_SHAPE_OVERRIDES) == len(_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY), (
+    "duplicate (M,N,K,dtype) key in _HIPBLASLT_SHAPE_OVERRIDE_REGISTRY"
+)
+
+
+# K-587 (Performance Hawk feedback): memoize the override lookup to avoid
+# rebuilding the dict-key tuple and re-checking LDS capacity on every
+# tritonblas.matmul call. At realistic LLM serving rates (10K+ GEMMs/sec)
+# the per-call dict scan + tuple alloc became measurable Python-side
+# overhead. Cache key includes the LDS budget and num_stages so a different
+# device / pipeline depth still routes correctly.
+_OVERRIDE_LOOKUP_CACHE: "dict[tuple, tuple | None]" = {}
+# Sentinel used by `_OVERRIDE_LOOKUP_CACHE.get` to distinguish a cached
+# `None` (intentional miss, do not re-scan) from "key absent from cache".
+_SENTINEL = object()
 
 
 def _hipblaslt_shape_override(
@@ -137,26 +158,31 @@ def _hipblaslt_shape_override(
       - the user disables overrides via TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1.
 
     K-545 / S-002 — see _HIPBLASLT_SHAPE_OVERRIDES docstring above.
+    K-587 (perf): memoized via `_OVERRIDE_LOOKUP_CACHE`.
     """
     if os.environ.get("TRITONBLAS_DISABLE_SHAPE_OVERRIDES", "0") == "1":
         return None
     # Only fp16 / bf16 covered today; the FP8 / FP4 paths use different
     # selectors and need their own override tables.
-    if a_dtype_str not in ("fp16", "bf16", "f16", "bf16"):
-        # Normalize: matmul.py stores torch dtype mapped via dtype_to_str
-        # which returns "f16"/"bf16" — handle both common spellings.
-        if a_dtype_str not in ("f16", "bf16"):
-            return None
+    if a_dtype_str not in ("fp16", "bf16", "f16"):
+        return None
     # The override table is keyed by ("fp16","bf16") for human readability;
     # normalize the lookup key to match.
     key_dtype = "bf16" if "b" in a_dtype_str.lower() else "fp16"
+    cache_key = (m, n, k, key_dtype, bytes_a, bytes_b, lds_cap, num_stages)
+    cached = _OVERRIDE_LOOKUP_CACHE.get(cache_key, _SENTINEL)
+    if cached is not _SENTINEL:
+        return cached
     key = (m, n, k, key_dtype)
     tile = _HIPBLASLT_SHAPE_OVERRIDES.get(key)
     if tile is None:
+        _OVERRIDE_LOOKUP_CACHE[cache_key] = None
         return None
     bm, bn, bk = tile
     if not check_triton_lds_capacity(bm, bn, bk, bytes_a, bytes_b, lds_cap, num_stages):
+        _OVERRIDE_LOOKUP_CACHE[cache_key] = None
         return None
+    _OVERRIDE_LOOKUP_CACHE[cache_key] = tile
     return tile
 
 

@@ -61,8 +61,26 @@ _HIPBLASLT_SHAPE_OVERRIDES = {
     # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
     (1024, 8192, 8192, "bf16"): (128, 256, 64),
     (1024, 8192, 8192, "fp16"): (128, 256, 64),
-    # Other K-543 cohort shapes intentionally NOT overridden — see
-    # lessons.md "K-545 / S-002" entry for the falsification record.
+    # T1 — TILE-ORIENTATION (long-M skinny), residual-taxonomy follow-up
+    # to K-545. hipBLASLt's top-1 by-perf for the 8192x1024x8192 cohort
+    # rows is 128x256x64. Origami's native pick is 256x128x64, which puts
+    # the larger tile dim on the SHORT N axis. Forcing the flip is the
+    # mirror of the 1024x8192x8192 fix above (both are long-skinny, just
+    # rotated). LDS at ns=2 fits (49,152 B < 65,536 B cap on gfx942).
+    # Empirically validated on MI300X (m20u07): +3.2pp bf16 / +3.1pp fp16
+    # vs K-545 baseline; no measurable regression on the other 6 K-545
+    # cohort rows or on near-square control shapes.
+    #
+    # The other residual-taxonomy candidates (T2-b RANKING-OVERRIDE
+    # entries for 2048x4096x4096 and 4096x2048x4096; T5a kpack=2 dtype
+    # gate) were trialled in the same bench window and EMPIRICALLY
+    # FALSIFIED: the forced 128x256x64 tile on the (M=2048, N=4096)
+    # shapes regressed by ~16pp vs the native 256x256x64 fallback (140
+    # TF vs 234 TF), and kpack=2 produced a noisy mix of +/- 2pp deltas
+    # with no clear net win on the residual cohort. They are intentionally
+    # not added here. See PR description for the falsification anchors.
+    (8192, 1024, 8192, "bf16"): (128, 256, 64),
+    (8192, 1024, 8192, "fp16"): (128, 256, 64),
 }
 
 

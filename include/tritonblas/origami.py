@@ -396,10 +396,21 @@ class OrigamiMatmulSelector:
                     sk_grid = split_grid
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
+        # K-544 (K-398 F9): the original cleanup unconditionally reverted to
+        # no-split when `tiles % sk_grid != 0`, silently nullifying branch-A
+        # fractional and branch-B K-split decisions whenever the chosen grid
+        # was not a divisor of `tiles`. The original comment promised an
+        # "AND workspace exceeds what the problem allows" guard that was
+        # missing from the code. Restore the workspace guard so the cleanup
+        # only fires when the per-WG partial-tile buffer would actually
+        # overflow the workspace budget. With this guard, default callers
+        # (enable_streamk=False) are unaffected because matmul.py's
+        # persistent dispatch never reads selector.sk_grid; explicit
+        # streamk callers now consume the heuristic's actual choice
+        # instead of a silent revert.
         if tiles % sk_grid != 0:
-            sk_grid = tiles
+            if self._partial_tile_size(sk_grid) > max_workspace:
+                sk_grid = tiles
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count

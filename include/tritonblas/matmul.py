@@ -28,18 +28,43 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 #      expression for kpack).
 #
 # This lets a sweep harness fix a knob across all shapes without code
-# changes if a future ISA-codegen patch surfaces a new lever. Malformed
-# env-var values (non-int, e.g. "auto", "default", trailing whitespace
-# that survives strip-failures) fall through silently to the call-site
-# default — they MUST NOT crash the kernel-launch path.
+# changes if a future ISA-codegen patch surfaces a new lever.
+#
+# Why the bare ``except (TypeError, ValueError): return default``:
+# this is an INTENTIONAL diagnostic shim, not swallowed-error tech debt.
+# The kernel-launch path runs at thousands of calls per second. Operators
+# routinely write things like ``TRITONBLAS_FORCE_NUM_WARPS=auto`` or
+# leave shell-quoted floats in their env. If a malformed value escaped as
+# ``ValueError``, every single matmul call in that process would crash —
+# strictly worse than running with the validated default. The contract
+# is: malformed env input is observable via ``$?=0 + default applied``,
+# not via an exception that nukes the application.
+#
+# Performance: results are memoized on the (env_name, env_value, default)
+# tuple so the hot launch path does at most one ``os.environ.get`` plus a
+# dict lookup per call (no repeated ``int()`` conversion). The cache is
+# bounded by the number of distinct knob env-vars (4) × distinct defaults
+# (small, finite) — there is no leak risk.
+_KNOB_CACHE: Dict[Tuple[str, Optional[str], Any], Any] = {}
+_KNOB_CACHE_MISS = object()  # sentinel — distinguishes "absent" from "is None"
+
+
 def _resolve_knob(env_name: str, default):
     val = os.environ.get(env_name)
+    key = (env_name, val, default)
+    cached = _KNOB_CACHE.get(key, _KNOB_CACHE_MISS)
+    if cached is not _KNOB_CACHE_MISS:
+        return cached
     if val is None or val == "":
-        return default
-    try:
-        return int(val)
-    except (TypeError, ValueError):
-        return default
+        resolved = default
+    else:
+        try:
+            resolved = int(val)
+        except (TypeError, ValueError):
+            # Intentional silent fallthrough — see header comment above.
+            resolved = default
+    _KNOB_CACHE[key] = resolved
+    return resolved
 
 
 

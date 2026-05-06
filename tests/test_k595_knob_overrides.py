@@ -16,6 +16,21 @@ launch path — they must silently fall through to the call-site default.
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_knob_cache():
+    """Drop the resolver's memoization cache between tests.
+
+    `_resolve_knob` memoizes on (env_name, env_value, default) so the hot
+    kernel-launch path avoids repeated `int()` conversions. Tests that
+    monkeypatch the environment must start from an empty cache or they
+    would observe stale resolutions from a previous test's env state.
+    """
+    from tritonblas.matmul import _KNOB_CACHE
+    _KNOB_CACHE.clear()
+    yield
+    _KNOB_CACHE.clear()
+
+
 def test_resolve_knob_returns_default_when_env_unset(monkeypatch):
     from tritonblas.matmul import _resolve_knob
     monkeypatch.delenv("TRITONBLAS_FORCE_NUM_WARPS", raising=False)
@@ -111,3 +126,31 @@ def test_k587_shape_overrides_table_intact():
     from tritonblas.origami import _HIPBLASLT_SHAPE_OVERRIDES
     assert (1024, 8192, 8192, "fp16") in _HIPBLASLT_SHAPE_OVERRIDES
     assert (8192, 1024, 8192, "bf16") in _HIPBLASLT_SHAPE_OVERRIDES
+
+
+def test_resolve_knob_memoizes_repeat_calls(monkeypatch):
+    """Performance guard: repeat resolutions must hit the memoization cache.
+
+    The hot kernel-launch path calls ``_resolve_knob`` four times per
+    matmul. Without memoization that means 4 ``os.environ.get`` + 4
+    potential ``int()`` conversions per call. The cache reduces every
+    repeat lookup of the same (env_name, env_value, default) to a single
+    dict get.
+    """
+    from tritonblas.matmul import _resolve_knob, _KNOB_CACHE
+    monkeypatch.setenv("TRITONBLAS_FORCE_KPACK", "2")
+    assert len(_KNOB_CACHE) == 0
+    _resolve_knob("TRITONBLAS_FORCE_KPACK", 1)
+    assert len(_KNOB_CACHE) == 1
+    # Second call with the same (env, default) must NOT grow the cache.
+    _resolve_knob("TRITONBLAS_FORCE_KPACK", 1)
+    assert len(_KNOB_CACHE) == 1
+
+
+def test_resolve_knob_cache_invalidates_on_env_change(monkeypatch):
+    """Cache key includes the env value so a setenv mid-process is honored."""
+    from tritonblas.matmul import _resolve_knob
+    monkeypatch.setenv("TRITONBLAS_FORCE_NUM_WARPS", "4")
+    assert _resolve_knob("TRITONBLAS_FORCE_NUM_WARPS", 8) == 4
+    monkeypatch.setenv("TRITONBLAS_FORCE_NUM_WARPS", "16")
+    assert _resolve_knob("TRITONBLAS_FORCE_NUM_WARPS", 8) == 16

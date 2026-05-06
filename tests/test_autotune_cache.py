@@ -166,3 +166,253 @@ def test_make_cache_key_is_stable():
     assert a != c, "streamk flag must be part of the key"
     d = make_cache_key(1024, 2048, 4096, "bf16", "bf16", "bf16", 0, False, 2, 304, None)
     assert a != d, "dtype must be part of the key"
+
+
+# ---------------------------------------------------------------------------
+# Boundary-tolerance lookup (K-591 / K-588 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_cache_key_roundtrip():
+    from tritonblas.autotune_cache import make_cache_key, parse_cache_key
+
+    key = make_cache_key(2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None)
+    parsed = parse_cache_key(key)
+    assert parsed is not None
+    m, n, k, suffix = parsed
+    assert (m, n, k) == (2048, 4096, 4096)
+    # Suffix must round-trip exactly so two keys differing only in shape
+    # still share a suffix-index bucket.
+    other = make_cache_key(2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, None)
+    other_parsed = parse_cache_key(other)
+    assert other_parsed is not None
+    assert other_parsed[3] == suffix
+
+
+def test_parse_cache_key_rejects_garbage():
+    from tritonblas.autotune_cache import parse_cache_key
+
+    assert parse_cache_key("") is None
+    assert parse_cache_key("not-a-key") is None
+    assert parse_cache_key("1x2|suffix") is None  # missing K
+    assert parse_cache_key("axbxc|suffix") is None  # non-numeric
+    assert parse_cache_key("0x4096x4096|suffix") is None  # zero dim
+    assert parse_cache_key(None) is None  # type-safe
+
+
+def test_lookup_nearest_hit_within_tolerance(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon_key = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon_key, _sample_params())
+
+    # +/- 1 jitter on every axis (K-510 dynamic-batch pattern).
+    jit_key = ac.make_cache_key(
+        2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    assert cache.lookup(jit_key) is None, "exact lookup must miss the jittered key"
+
+    near = cache.lookup_nearest(jit_key)
+    assert near is not None, "jittered shape within 5% must hit boundary-tolerance lookup"
+    params, matched_key = near
+    assert matched_key == canon_key
+    assert params == _sample_params()
+
+
+def test_lookup_nearest_skips_when_tolerance_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    assert cache.tolerance == 0.0
+    canon_key = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon_key, _sample_params())
+
+    jit_key = ac.make_cache_key(
+        2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    assert cache.lookup_nearest(jit_key) is None, "tolerance=0 must disable fall-back"
+
+
+def test_lookup_nearest_outside_tolerance_misses(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon_key = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon_key, _sample_params())
+
+    # M shifted ~17% — far outside the 5% band on the M axis.
+    far_key = ac.make_cache_key(
+        2400, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    assert cache.lookup_nearest(far_key) is None
+
+
+def test_lookup_nearest_keeps_dtype_and_streamk_exact(tmp_path, monkeypatch):
+    """K-588 F9: the suffix (dtypes, streamk, num_stages, n_cu) must
+    match exactly so the cached tile is LDS-safe for the substituted
+    shape. Crossing dtypes or streamk modes is a hard miss even when the
+    shape is a near-neighbor."""
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon_key = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon_key, _sample_params())
+
+    # Same shape, different dtype — must not borrow.
+    diff_dtype = ac.make_cache_key(
+        2049, 4096, 4096, "bf16", "bf16", "bf16", 0, False, 2, 304, None
+    )
+    assert cache.lookup_nearest(diff_dtype) is None
+
+    # Same shape, different streamk flag — must not borrow.
+    diff_sk = ac.make_cache_key(
+        2049, 4096, 4096, "f16", "f16", "f16", 0, True, 2, 304, None
+    )
+    assert cache.lookup_nearest(diff_sk) is None
+
+    # Same shape, different num_stages — must not borrow.
+    diff_ns = ac.make_cache_key(
+        2049, 4096, 4096, "f16", "f16", "f16", 0, False, 3, 304, None
+    )
+    assert cache.lookup_nearest(diff_ns) is None
+
+
+def test_lookup_nearest_picks_closest_in_log_l1(tmp_path, monkeypatch):
+    """When two candidates are both within tolerance the lookup must
+    return the one with the smaller log-L1 distance."""
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.10")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    near_key = ac.make_cache_key(
+        2050, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    far_key = ac.make_cache_key(
+        2200, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    near_params = dict(_sample_params(), block_m=128)  # distinguishable
+    far_params = dict(_sample_params(), block_m=64)
+    cache.store(near_key, near_params)
+    cache.store(far_key, far_params)
+
+    query = ac.make_cache_key(
+        2049, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    near = cache.lookup_nearest(query)
+    assert near is not None
+    params, matched = near
+    assert matched == near_key
+    assert params["block_m"] == 128
+
+
+def test_lookup_nearest_skips_exact_key(tmp_path, monkeypatch):
+    """If the requested key is itself present, lookup() should already
+    have returned it — lookup_nearest must skip it to avoid masking the
+    bug where someone accidentally calls only the fall-back."""
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    key = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(key, _sample_params())
+    # Only entry is the exact key -> nearest must miss.
+    assert cache.lookup_nearest(key) is None
+
+
+def test_lookup_nearest_persists_across_reload(tmp_path, monkeypatch):
+    """The suffix index must be rebuilt from disk so a fresh process
+    still sees boundary-tolerance hits."""
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon = ac.make_cache_key(
+        4096, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon, _sample_params())
+
+    # Simulate a fresh process.
+    ac.reset_registry()
+    cache2 = ac.get_cache("gfx942", 304)
+    assert cache2 is not cache
+    near = cache2.lookup_nearest(
+        ac.make_cache_key(4097, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None)
+    )
+    assert near is not None
+    params, matched = near
+    assert matched == canon
+    assert params == _sample_params()
+
+
+def test_tolerance_env_parsing(tmp_path, monkeypatch):
+    """Resolution of TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE: explicit
+    overrides, off-toggles, and out-of-range values are all handled."""
+    import tritonblas.autotune_cache as ac
+
+    # Numeric override
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.10")
+    assert ac._configured_tolerance() == 0.10
+
+    # Off toggles -> 0
+    for off in ("0", "off", "false", "no", "none", ""):
+        monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", off)
+        assert ac._configured_tolerance() == 0.0, off
+
+    # Negative -> 0
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "-0.5")
+    assert ac._configured_tolerance() == 0.0
+
+    # Garbage -> default
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "not-a-float")
+    assert ac._configured_tolerance() == ac._DEFAULT_TOLERANCE
+
+    # Above ceiling -> clamped
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "10.0")
+    assert ac._configured_tolerance() == ac._MAX_TOLERANCE
+
+    # Unset -> default
+    monkeypatch.delenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", raising=False)
+    assert ac._configured_tolerance() == ac._DEFAULT_TOLERANCE

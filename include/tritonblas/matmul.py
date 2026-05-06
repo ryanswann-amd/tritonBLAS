@@ -14,6 +14,26 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# Public set of fused-activation epilogues that match hipBLASLt coverage and
+# are accepted by the host-side wrappers.  The kernel-side `apply_activation`
+# treats anything outside this set as identity, but the wrappers raise on
+# unknown strings so the caller does not silently get an unfused result.
+_SUPPORTED_ACTIVATIONS = frozenset(
+    ("none", "relu", "gelu", "gelu_exact", "sigmoid", "silu", "swish")
+)
+
+
+def _validate_activation(activation):
+    if activation is None:
+        return "none"
+    if activation not in _SUPPORTED_ACTIVATIONS:
+        raise ValueError(
+            f"tritonblas: unknown activation {activation!r}. "
+            f"Supported: {sorted(_SUPPORTED_ACTIVATIONS)}"
+        )
+    return activation
+
+
 
 _tensor_cache = {}
 
@@ -77,7 +97,14 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    activation: str = "none",
 ):
+    activation = _validate_activation(activation)
+    if work_stealing and activation != "none":
+        raise NotImplementedError(
+            "tritonblas: fused activation is not yet supported on the "
+            "work-stealing path. Pass work_stealing=False or activation='none'."
+        )
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -195,15 +222,16 @@ def persistent_matmul_lt(
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ACTIVATION=activation,
         )
 
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
@@ -211,7 +239,14 @@ def streamk_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    activation: str = "none",
 ):
+    activation = _validate_activation(activation)
+    if work_stealing and activation != "none":
+        raise NotImplementedError(
+            "tritonblas: fused activation is not yet supported on the "
+            "work-stealing path. Pass work_stealing=False or activation='none'."
+        )
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -361,6 +396,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            ACTIVATION=activation,
         )
 
     return c
@@ -368,14 +404,19 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False
+    enable_streamk=False, work_stealing=False,
+    activation: str = "none",
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return streamk_matmul_lt(a, b, c, selector, config,
+                                 work_stealing=work_stealing,
+                                 activation=activation)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config,
+                                    work_stealing=work_stealing,
+                                    activation=activation)
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
@@ -633,6 +674,7 @@ def _addmm(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
+    activation: str = "none",
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -646,9 +688,13 @@ def _addmm(
     out = a.new_empty(M, N)
 
     if enable_streamk:
-        return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
+        return streamk_matmul_lt(a, b, out, selector, config, bias=bias,
+                                 sk_grid=sk_grid, work_stealing=work_stealing,
+                                 activation=activation)
     else:
-        return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, out, selector, config, bias=bias,
+                                    work_stealing=work_stealing,
+                                    activation=activation)
 
 
 def _setup_context_addmm_backwards(
@@ -656,11 +702,12 @@ def _setup_context_addmm_backwards(
     inputs: tuple[Any, ...],
     output: Any
 ):
-    bias, a, b, enable_streamk, sk_grid, work_stealing = inputs
+    bias, a, b, enable_streamk, sk_grid, work_stealing, activation = inputs
     ctx.save_for_backward(a, b)
     ctx.enable_streamk = enable_streamk
     ctx.sk_grid = sk_grid
     ctx.work_stealing = work_stealing
+    ctx.activation = activation
 
 
 def _addmm_backwards(
@@ -671,6 +718,18 @@ def _addmm_backwards(
     enable_streamk = ctx.enable_streamk
     sk_grid = ctx.sk_grid
     work_stealing = ctx.work_stealing
+    activation = getattr(ctx, "activation", "none")
+
+    # Fused activations are not differentiable through this autograd op yet.
+    # The forward path supports them, but the backward formula would need to
+    # carry the pre-activation tile back to the grad to compute d(act)/dx.
+    # Until that lands, refuse to silently compute a wrong gradient.
+    if activation != "none":
+        raise NotImplementedError(
+            f"tritonblas: backward pass for fused activation {activation!r} "
+            "is not yet implemented. Use the forward-only path "
+            "(no requires_grad inputs / out= form) or activation='none'."
+        )
 
     # Make grad_output contiguous
     grad_output_cont = grad_output.contiguous()
@@ -686,10 +745,10 @@ def _addmm_backwards(
     # grad_bias = sum(grad_output)
     grad_bias = grad_output.sum(dim=0)
 
-    # tuple[bias, a, b, enable_streamk, sk_grid, work_stealing]
+    # tuple[bias, a, b, enable_streamk, sk_grid, work_stealing, activation]
     #   First 3 must be in the order that matches addmm()'s forward args
-    #   Last 3 are not part of the gradient and so are None
-    return grad_bias, grad_a, grad_b, None, None, None
+    #   Last 4 are not part of the gradient and so are None
+    return grad_bias, grad_a, grad_b, None, None, None, None
 
 
 _addmm.register_autograd(_addmm_backwards,
@@ -705,6 +764,7 @@ def _addmm_out(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
+    activation: str = "none",
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -715,9 +775,13 @@ def _addmm_out(
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
-        streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
+        streamk_matmul_lt(a, b, out, selector, config, bias=bias,
+                          sk_grid=sk_grid, work_stealing=work_stealing,
+                          activation=activation)
     else:
-        persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
+        persistent_matmul_lt(a, b, out, selector, config, bias=bias,
+                             work_stealing=work_stealing,
+                             activation=activation)
 
     # Custom torch ops cannot return a value which is an alias of an input.  So
     # even though torch returns a pointer to the out arg when used, we can't.
@@ -732,10 +796,35 @@ def addmm(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
+    activation: str = "none",
 ) -> Optional[torch.Tensor]:
+    """
+    Fused (bias + A @ B) with optional fused activation in the GEMM epilogue.
+
+    Args:
+        bias: (N,) bias broadcast across rows.
+        a: (M, K) input matrix.
+        b: (K, N) input matrix.
+        out: optional pre-allocated output (forces in-place form, no autograd).
+        enable_streamk: route to the Stream-K kernel.
+        sk_grid: explicit Stream-K grid override.
+        work_stealing: route to the work-stealing kernel.  Currently incompatible
+            with non-default activation.
+        activation: fused pointwise activation applied AFTER bias-add but BEFORE
+            the dtype cast.  Supported strings: ``"none"`` (default),
+            ``"relu"``, ``"gelu"`` (tanh approx), ``"gelu_exact"`` (erf-based),
+            ``"sigmoid"``, ``"silu"`` / ``"swish"``.  Closes the K-491
+            epilogue-fusion gap vs hipBLASLt for the inference-side modes.
+
+    Returns:
+        Tensor of shape (M, N) when ``out`` is None, else None.
+    """
+    activation = _validate_activation(activation)
+
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
-        return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing)
+        return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing,
+                      activation)
 
     # If out tensor provided - in-place - we do NOT support autograd
     # Check for autograd conditions (global and per-tensor)
@@ -749,5 +838,6 @@ def addmm(
             "tritonblas.addmm(): functions with out=... arguments don't support "
             "automatic differentiation, but one of the arguments requires grad."
         )
-    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
+    return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing,
+                      activation)
 

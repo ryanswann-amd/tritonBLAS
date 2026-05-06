@@ -34,6 +34,7 @@ Example
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
@@ -208,6 +209,70 @@ class BiasView:
         return acc
 
 
+# =============================================================================
+# Fused Activation Epilogue
+# =============================================================================
+#
+# Maps the K-491 audit's identified gap: tritonblas previously supported only
+# DEFAULT and BIAS (2 of hipBLASLt's 22 epilogue modes).  We add the canonical
+# pointwise activations that hipBLASLt fuses into its matmul kernel
+# (RELU, GELU, SIGMOID, SILU/SWISH).  These are applied *in registers* between
+# bias-add and dtype-convert so we save one global-memory round-trip vs the
+# unfused (matmul -> bias -> activation) pipeline.
+#
+# Supported activation strings (kept as `tl.constexpr` so the if/elif chain is
+# completely folded away at compile time and only the chosen branch survives):
+#
+#   "none"       : identity            (default; matches old behavior)
+#   "relu"       : max(x, 0)
+#   "gelu"       : tanh-approx GELU    (matches torch.nn.functional.gelu(approximate='tanh'))
+#   "gelu_exact" : erf-based GELU      (matches torch.nn.functional.gelu())
+#   "sigmoid"    : 1 / (1 + exp(-x))
+#   "silu"       : x * sigmoid(x)      (= SWISH with beta=1; alias: "swish")
+
+@triton.jit
+def apply_activation(x, kind: tl.constexpr):
+    """
+    Fused activation function applied in float32 (the accumulator dtype) before
+    the final dtype conversion in the epilogue.
+
+    Args:
+        x: tensor (typically the post-bias accumulator) in float32
+        kind: compile-time string selecting the activation (see module docstring)
+
+    Returns:
+        Activated tensor with the same shape and dtype as ``x``.
+
+    Notes:
+        - ``kind`` is ``tl.constexpr``: the if/elif chain is constant-folded so
+          only the selected activation reaches the generated code.
+        - For "none", this is a no-op (returns the input unchanged).  The
+          compiler eliminates the whole call.
+    """
+    if kind == "none":
+        return x
+    elif kind == "relu":
+        return tl.maximum(x, 0.0)
+    elif kind == "gelu":
+        # tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        # Constants inlined because Triton does not allow plain Python globals
+        # in @jit code (requires `tl.constexpr(...)` instantiation; literals are
+        # the simplest portable choice here).
+        inner = 0.7978845608028654 * (x + 0.044715 * x * x * x)
+        return 0.5 * x * (1.0 + libdevice.tanh(inner))
+    elif kind == "gelu_exact":
+        # erf-based: 0.5 * x * (1 + erf(x / sqrt(2)))
+        return 0.5 * x * (1.0 + libdevice.erf(x * 0.7071067811865475))
+    elif kind == "sigmoid":
+        return tl.sigmoid(x)
+    elif kind == "silu" or kind == "swish":
+        return x * tl.sigmoid(x)
+    else:
+        # Unknown kinds fall through as identity rather than failing the
+        # compile.  The host wrappers validate strings before launch.
+        return x
+
+
 @aggregate
 class OutputView:
     """
@@ -260,40 +325,65 @@ class OutputView:
         return ptrs, mask
     
     @triton.jit
-    def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None):
+    def store(
+        self,
+        data,
+        tile: Tile,
+        mask=None,
+        scale: ScaleView = None,
+        bias: BiasView = None,
+        activation: tl.constexpr = "none",
+    ):
         """
         Store data to a tile with optional epilogue operations.
-        
-        Applies epilogue in order: scale -> bias -> type convert -> store
-        
+
+        Applies epilogue in order:
+            scale -> bias -> activation -> type convert -> store
+
+        The activation runs in the accumulator dtype (typically float32) so the
+        non-linearity is computed at full precision; the final ``.to(out_dtype)``
+        cast happens after the activation.  This matches hipBLASLt's fused
+        post-processing layout (see K-491 epilogue audit).
+
         Args:
             data: Data to store [BLOCK_ROW, BLOCK_COL]
             tile: Tile with coordinates and shape
             mask: Optional mask (if None, computes from bounds)
             scale: Optional ScaleView for quantization scaling
             bias: Optional BiasView for bias addition
-        
+            activation: tl.constexpr string selecting fused activation
+                ("none" | "relu" | "gelu" | "gelu_exact" | "sigmoid" | "silu"
+                 | "swish"). Default "none" preserves prior behavior.
+
         Example::
-        
+
             # Simple store (no epilogue)
             tensorC.store(acc.to(C.type.element_ty), out_tile)
-            
-            # With full epilogue
-            tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+
+            # Full epilogue including fused activation
+            tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view,
+                          activation="gelu")
         """
         result = data
-        
+
         # Apply quantization scales if provided
         if scale is not None:
             result = scale.apply(result, tile)
-        
+
         # Add bias if provided
         if bias is not None:
             result = bias.apply(result, tile)
-        
+
+        # Fused activation (in accumulator dtype, before final cast).
+        # When activation == "none" this is a compile-time no-op.
+        if activation != "none":
+            # Promote to fp32 for the non-linearity to keep numerical behavior
+            # consistent across acc dtypes (handles the int32 quant path too).
+            result = apply_activation(result.to(tl.float32), activation)
+
         # Type conversion to output dtype
         result = result.to(self.ptr.type.element_ty)
-        
+
         # Compute pointers and store
         ptrs, bounds_mask = self.tile_ptrs(tile)
         if mask is None:

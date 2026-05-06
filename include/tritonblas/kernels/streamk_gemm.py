@@ -3,6 +3,7 @@ import triton.language as tl
 import torch
 
 from .stages.indexing.pid_transforms import chiplet_transform_chunked
+from .stages.matrix_view import apply_activation
 
 @triton.jit()
 def streamk_matmul(
@@ -38,6 +39,7 @@ def streamk_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     QUANTIZED: tl.constexpr = False,  # True for int8/fp8, False for fp16/bf16
     ALLOW_TF32: tl.constexpr = True,
+    ACTIVATION: tl.constexpr = "none",
 ):
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
@@ -140,14 +142,28 @@ def streamk_matmul(
             if QUANTIZED:
                 # For quantized mode: convert bias to float32, add to acc, then convert to output dtype
                 bias_float = bias.to(tl.float32)
-                c = acc + bias_float[None, :]
-                c = c.to(C.type.element_ty)
+                c_pre = acc + bias_float[None, :]
+                # Fused activation in fp32 before final cast (compile-time no-op when ACTIVATION="none")
+                if ACTIVATION != "none":
+                    c_pre = apply_activation(c_pre, ACTIVATION)
+                c = c_pre.to(C.type.element_ty)
             else:
-                # For non-quantized mode: convert acc to output dtype, then add bias
-                c = acc.to(C.type.element_ty)
-                c += bias[None, :]
+                # For non-quantized mode: do bias + activation in fp32, then cast.
+                # When ACTIVATION="none" we keep the original bias-after-cast path
+                # to preserve byte-identical behavior on the existing path.
+                if ACTIVATION != "none":
+                    c_pre = acc + bias.to(tl.float32)[None, :]
+                    c_pre = apply_activation(c_pre, ACTIVATION)
+                    c = c_pre.to(C.type.element_ty)
+                else:
+                    c = acc.to(C.type.element_ty)
+                    c += bias[None, :]
         else:
-            c = acc.to(C.type.element_ty)
+            if ACTIVATION != "none":
+                acc_act = apply_activation(acc.to(tl.float32), ACTIVATION)
+                c = acc_act.to(C.type.element_ty)
+            else:
+                c = acc.to(C.type.element_ty)
 
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -352,6 +368,14 @@ def streamk_matmul(
                     acc01 += bias_right_reshaped
                     acc10 += bias_left_reshaped
                     acc11 += bias_right_reshaped
+
+            # Fused activation per quadrant (in fp32 before final cast).
+            # Compile-time no-op when ACTIVATION="none".
+            if ACTIVATION != "none":
+                acc00 = apply_activation(acc00.to(tl.float32), ACTIVATION)
+                acc01 = apply_activation(acc01.to(tl.float32), ACTIVATION)
+                acc10 = apply_activation(acc10.to(tl.float32), ACTIVATION)
+                acc11 = apply_activation(acc11.to(tl.float32), ACTIVATION)
 
             # Convert to output dtype
             c00 = acc00.to(C.type.element_ty)

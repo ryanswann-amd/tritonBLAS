@@ -96,21 +96,56 @@ _HIPBLASLT_SHAPE_OVERRIDES = {
     # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
     (1024, 8192, 8192, "bf16"): (128, 256, 64),
     (1024, 8192, 8192, "fp16"): (128, 256, 64),
-    # === K-590 finding (no new entries added) ===
-    # K-590 attempted to seed the additional hipBLASLt top-1 tiles
-    # identified by K-543/K-567/K-579 (e.g. 128x224 for 1024x8192x8192,
-    # 192x160 for 4096x2048x4096, 256x224 for 8192x8192x4096) but ALL
-    # candidate tiles use at least one non-power-of-2 dimension
-    # (160, 192, or 224). Triton's IR enforces pow2 tile dimensions for
+    # === K-590 finding (no non-pow2 entries) ===
+    # The K-579/K-581 dispatch design originally proposed seeding
+    # hipBLASLt's per-shape top-1 tiles for the K-543/K-567 residual
+    # cohort (e.g. 128x224 for 1024x8192x8192, 192x160 for
+    # 4096x2048x4096, 256x224 for 8192x8192x4096). All those candidate
+    # tiles use at least one non-power-of-2 dimension (160, 192, or
+    # 224). Triton's IR enforces pow2 tile dimensions for
     # `tl.zeros((BLOCK_M, BLOCK_N))` in the accumulator allocation
-    # (`kernels/stages/gemm_context.py::init_accumulator`); attempting
-    # any of these tiles raises `ValueError: Shape element 1 must be a
-    # power of 2` at Triton compile time. The K-579/K-581 design that
-    # extending the search space would unblock +5-7pp dispatch headroom
-    # is therefore **structurally blocked at the Triton-AMD compiler
-    # layer**, not at the LDS filter (the hypothesis K-579 iter1 OQ4
-    # raised). The K-545 entries above remain the only structurally
-    # valid (pow2) overrides for the K-543 residual cohort.
+    # (`kernels/stages/gemm_context.py::init_accumulator`); they raise
+    # `ValueError: Shape element 1 must be a power of 2` at Triton
+    # compile time. The dispatch-side dispatch-headroom track is
+    # therefore **structurally blocked at the Triton-AMD compiler
+    # layer**, not at the LDS filter, until the upstream pow2
+    # constraint is lifted or `init_accumulator` learns to pad-and-mask.
+    #
+    # === K-590 / S-002 — pow2 entries from K-581 S1 (T1 + T2-b) ===
+    # The remaining lever for K-581's residual cohort is the entries
+    # below: each tile is a pow2 (128/256) flip of the asymmetric
+    # orientation that Origami's static cost model picks. Each entry
+    # is justified against hipBLASLt's algos top-1 by-perf data dumped
+    # in K-543 (`state/mc2/workspaces/K-543/output/algos_local/`):
+    #
+    #   T1 long-M skinny (M >> N) — flip Origami's 256x128 to 128x256
+    #   so the larger tile dim aligns with the long M axis. hb top-1
+    #   for 8192x1024x8192 {bf16,fp16} is 128x256x64 (864 / 871 TF).
+    #
+    #   T2-b RANKING-OVERRIDE — Origami's post-hoc 256x256 fallback
+    #   (origami.py L470-477) fires whenever aspect_ratio < 4 and one
+    #   Origami-picked dim is 256, suppressing the asymmetric tile
+    #   that hipBLASLt picks. For aspect_ratio=2 cohort rows (the
+    #   2048x4096x4096 / 4096x2048x4096 family) the post-hoc dispatch
+    #   is wrong; explicit override pins the tile so the post-hoc
+    #   never fires. hb top-1 in-pow2-range is 128x256x64 (799 / 790
+    #   TF) for the 2048x4096 family; the 4096x2048 family is the
+    #   transpose mirror.
+    #
+    # Predicted lift per K-581 §S1 (per-row +3-5pp on rows 1, 2, 5,
+    # 6, 7, 8 — MEDIUM confidence per the noise-floor caveats in
+    # K-545 PR description and K-573 §F5). The same-tile codegen gap
+    # (hb at the same tile is 2-3.6x faster than tritonblas — K-567
+    # §F2.2) caps total dispatch-side closure at ~10-15pp; the rest
+    # is codegen-bound and tracked in the codegen ticket family.
+    # Falsification gate (K-590 verify): regression > 3pp at any
+    # cohort row vs the K-545 baseline rolls back the offending entry.
+    (8192, 1024, 8192, "bf16"): (128, 256, 64),  # T1 long-M flip
+    (8192, 1024, 8192, "fp16"): (128, 256, 64),  # T1 long-M flip
+    (2048, 4096, 4096, "bf16"): (128, 256, 64),  # T2-b
+    (2048, 4096, 4096, "fp16"): (128, 256, 64),  # T2-b
+    (4096, 2048, 4096, "bf16"): (256, 128, 64),  # T2-b transpose mirror
+    (4096, 2048, 4096, "fp16"): (256, 128, 64),  # T2-b transpose mirror
     # Other K-543 cohort shapes intentionally NOT overridden — see
     # lessons.md "K-545 / S-002" entry for the falsification record,
     # plus the K-590 finding above for the further-attempted dispatch
@@ -118,32 +153,40 @@ _HIPBLASLT_SHAPE_OVERRIDES = {
 }
 
 
-# K-590: defensive guard against future authors re-introducing non-pow2
-# tile dimensions into the override table. Triton's IR rejects any
-# `tl.zeros` allocation whose shape contains a non-power-of-2 element,
-# so an entry like `(2048, 4096, 4096, "fp16"): (128, 224, 64)` will
-# raise CompilationError at first dispatch instead of being caught here.
-# This assertion turns the silent dispatch-time failure into an
-# import-time failure with a pointer to the K-590 finding.
+# K-590: single owner for the Triton-AMD pow2 tile-dim constraint.
+#
+# Triton's IR enforces power-of-2 shapes on every `tl.zeros((BLOCK_M,
+# BLOCK_N))` accumulator allocation; the constraint actually lives in
+# `kernels/stages/gemm_context.py::init_accumulator` (the
+# `tl.zeros((BLOCK_M, BLOCK_N), dtype=...)` call). A non-pow2 BLOCK_M
+# or BLOCK_N raises `ValueError: Shape element N must be a power of 2`
+# at first compile. The override-table lookup MUST mirror this
+# constraint before returning a tile to the dispatcher, otherwise the
+# compile error surfaces deep inside the Triton code path with no
+# pointer back to the override entry.
+#
+# This predicate is the single source of truth for "tile dim is
+# legal as a Triton accumulator BLOCK_*"; both the lookup-site guard
+# (`_hipblaslt_shape_override`) and the test suite import it. Do NOT
+# crash at import time on a bad table entry — the override table is
+# user-extensible per K-545 / S-002, and a bad entry should fail
+# *closed* (lookup returns None → native selector handles the shape)
+# rather than take down `import tritonblas` for every downstream
+# caller.
 def _is_pow2(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
-for _key, _tile in _HIPBLASLT_SHAPE_OVERRIDES.items():
-    _bm, _bn, _bk = _tile
-    if not (_is_pow2(_bm) and _is_pow2(_bn) and _is_pow2(_bk)):
-        raise ValueError(
-            f"_HIPBLASLT_SHAPE_OVERRIDES[{_key}] = {_tile} contains a "
-            f"non-power-of-2 dimension. Triton's `tl.zeros` accumulator "
-            f"allocation requires pow2 tile dims; non-pow2 tiles will "
-            f"fail at first dispatch with `ValueError: Shape element N "
-            f"must be a power of 2`. See K-590 finding in this file. "
-            f"Pow2 sizes <= 256 are limited to {{16, 32, 64, 128, 256}}; "
-            f"hipBLASLt's {{160, 192, 224}} tile widths are not "
-            f"reachable from tritonblas without upstream Triton-AMD "
-            f"work to lift the pow2 constraint or to add internal "
-            f"pad-and-mask in `init_accumulator`."
-        )
+def _is_triton_valid_block_tile(bm: int, bn: int, bk: int) -> bool:
+    """K-590: predicate matching the Triton-AMD `init_accumulator` pow2
+    constraint on `tl.zeros((BLOCK_M, BLOCK_N))`. Returns True iff a
+    `(BM, BN, BK)` triple can be safely passed to the Triton matmul
+    kernel; False means at least one dim is non-pow2 and the kernel
+    will fail at compile time. BK is included for symmetry — non-pow2
+    BK also fails Triton's accumulator-loop unrolling. Cross-ref:
+    `include/tritonblas/kernels/stages/gemm_context.py::init_accumulator`.
+    """
+    return _is_pow2(bm) and _is_pow2(bn) and _is_pow2(bk)
 
 
 def _hipblaslt_shape_override(
@@ -185,6 +228,12 @@ def _hipblaslt_shape_override(
     if tile is None:
         return None
     bm, bn, bk = tile
+    # K-590: fail-closed pow2 guard. If a future contributor adds an
+    # entry that hipBLASLt likes (e.g. (128, 224, 64)) but Triton's
+    # `init_accumulator` rejects, skip the override and let the native
+    # selector handle the shape — do NOT raise from inside dispatch.
+    if not _is_triton_valid_block_tile(bm, bn, bk):
+        return None
     if not check_triton_lds_capacity(bm, bn, bk, bytes_a, bytes_b, lds_cap, num_stages):
         return None
     return tile

@@ -142,10 +142,18 @@ class GemmContext:
         
         Returns:
             Accumulator tensor [BLOCK_M, BLOCK_N] initialized to zeros
-        
+
         Example::
-        
+
             acc = ctx.init_accumulator()
+
+        Note:
+            Triton's IR requires `tl.zeros` shape elements to be powers of 2.
+            BLOCK_M / BLOCK_N originating from the dispatcher must therefore be
+            pow2; the `tritonblas.origami._is_triton_valid_block_tile` predicate
+            (used by `_hipblaslt_shape_override`) is the single owner of this
+            constraint on the dispatch side. See K-590 finding in `origami.py`
+            for the rationale and prior empirical validation.
         """
         return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
     

@@ -189,7 +189,11 @@ class OrigamiMatmulSelector:
         self._ACTIVE_CU = active_cus if active_cus is not None else self._N_CU
 
         # Create list of Origami config_t objects from defaults.
-        self._block_mn_range = [16, 32, 64, 128, 256]
+        # 192 added so non-power-of-two M/N sweet spots (e.g. 2048x12288
+        # -> 11x96 tiles with 192x128) are reachable — avoids the
+        # 1.26-wave wave-quantization regime that wastes ~20% of the
+        # tail wave on the original 256x256 tile.
+        self._block_mn_range = [16, 32, 64, 128, 192, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
         self._kernel_occupancy_range = [1]
         self._configs = self._generate_default_configs()

@@ -109,6 +109,7 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
+        _cached_params: dict = None,
     ):
         # Save tensor sizes
         self._m = m
@@ -188,6 +189,42 @@ class OrigamiMatmulSelector:
         self._N_CU = self._hardware.N_CU
         self._ACTIVE_CU = active_cus if active_cus is not None else self._N_CU
 
+        # Fast-path: skip the expensive Origami autotune when cached params
+        # are supplied.  We still need _problem, _hardware, and _arch_name to
+        # remain valid for downstream callers.
+        if _cached_params is not None:
+            self._block_mn_range = [16, 32, 64, 128, 256]
+            self._block_k_range = [16, 32, 64, 128, 256, 512]
+            self._kernel_occupancy_range = [1]
+            self._configs = []
+            self._problem = self._make_problem()
+            # Build a minimal "result" object exposing the same shape as
+            # origami.select_config(...).config.mt so downstream property
+            # accessors keep working.
+            mt = origami.dim3_t(
+                int(_cached_params["block_m"]),
+                int(_cached_params["block_n"]),
+                int(_cached_params["block_k"]),
+            )
+            cfg = origami.config_t()
+            cfg.mt = mt
+            cfg.mi = self._infer_matrix_instruction_dimensions()
+            cfg.occupancy = 1
+            cfg.grid_selection = (
+                origami.grid_selection_t.k_split_aware
+                if streamk
+                else origami.grid_selection_t.data_parallel
+            )
+            self._result = type("CachedResult", (), {"config": cfg})()
+            self._workgroup_mapping = int(_cached_params["workgroup_mapping"])
+            self._xcc_workgroup_mapping = int(_cached_params["xcc_workgroup_mapping"])
+            self.COUNTERS_PER_XCD = int(_cached_params["counters_per_xcd"])
+            self._grid = int(_cached_params["grid"])
+            self._cache_hit = True
+            return
+
+        self._cache_hit = False
+
         # Create list of Origami config_t objects from defaults.
         self._block_mn_range = [16, 32, 64, 128, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
@@ -262,6 +299,20 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+    def get_cache_params(self) -> dict:
+        """Return a JSON-serializable dict of selector params used by the
+        persistent autotune cache (see autotune_cache.PersistentAutotuneCache).
+        """
+        return {
+            "block_m": int(self._result.config.mt.m),
+            "block_n": int(self._result.config.mt.n),
+            "block_k": int(self._result.config.mt.k),
+            "workgroup_mapping": int(self._workgroup_mapping),
+            "xcc_workgroup_mapping": int(self._xcc_workgroup_mapping),
+            "counters_per_xcd": int(self.COUNTERS_PER_XCD),
+            "grid": int(self._grid),
+        }
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

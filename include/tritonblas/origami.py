@@ -61,6 +61,17 @@ from math import ceil
 # The flat `_HIPBLASLT_SHAPE_OVERRIDES` dict (for the lookup hot path) is
 # derived from `_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY` below — both stay in
 # sync via assertion at module import time.
+#
+# IMPORTANT — pow2 BLOCK_M / BLOCK_N constraint (do NOT add 192 / 224 / 160):
+#   `_block_mn_range` below is `[16, 32, 64, 128, 256]` and Triton's
+#   persistent_matmul kernel raises a `triton.compiler.errors.CompilationError`
+#   when forced to a non-power-of-2 BLOCK_M / BLOCK_N (verified empirically:
+#   128x224x64 fails at line 94:14 in persistent_gemm_monolithic.py). When
+#   hipBLASLt's offline-best tile is non-pow2 (224 / 192 / 160), substitute
+#   the in-range pow2 neighbor (128 or 256) that preserves the long-axis
+#   tile orientation — the dominant structural lever per K-579 §1. Tests in
+#   tests/test_K587_overrides.py::test_every_override_entry_is_power_of_two
+#   pin this avoidance against future regression.
 _HIPBLASLT_SHAPE_OVERRIDE_REGISTRY = (
     # (M, N, K, dtype, BM, BN, BK, source_ticket, rationale)
     #
@@ -125,16 +136,36 @@ assert len(_HIPBLASLT_SHAPE_OVERRIDES) == len(_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY
 )
 
 
-# K-587 (Performance Hawk feedback): memoize the override lookup to avoid
-# rebuilding the dict-key tuple and re-checking LDS capacity on every
-# tritonblas.matmul call. At realistic LLM serving rates (10K+ GEMMs/sec)
-# the per-call dict scan + tuple alloc became measurable Python-side
-# overhead. Cache key includes the LDS budget and num_stages so a different
-# device / pipeline depth still routes correctly.
-_OVERRIDE_LOOKUP_CACHE: "dict[tuple, tuple | None]" = {}
-# Sentinel used by `_OVERRIDE_LOOKUP_CACHE.get` to distinguish a cached
-# `None` (intentional miss, do not re-scan) from "key absent from cache".
-_SENTINEL = object()
+# K-587 (Architect feedback): codegen-knob policy lives next to the override
+# registry so tile selection AND per-tile codegen tuning have a single
+# source of truth. `kpack_for_tile` below is consumed by both
+# `persistent_matmul_lt` and `streamk_matmul_lt`; future per-tile knobs
+# (waves_per_eu, num_stages, GSU when the persistent path exposes it) can
+# be added here without re-threading constants through the kernel-launch
+# files.
+#
+# Empirical inflection point on MI300X (gfx942, ROCm 7.2, Triton
+# 3.6.0+rocm7.2.0):
+#   * tiles with BLK_M*BLK_N <= 32768 (e.g. 128x256, 256x128, 128x128,
+#     64x256) win +3 to +4 pp from kpack=2 because the codegen emits
+#     `ds_read_b128` (vec=8) instead of paired `ds_read2st64_b64` (vec=4);
+#   * 256x256x64 (the dominant K-543 sub-band-A dispatch) regresses -7 to
+#     -9 pp because doubled LDS-load VGPRs crowd out the accumulator.
+#   * 32768 = 128*256 inclusive, but excludes 256*256=65536 — splits
+#     cleanly between the two regimes.
+# Source: K-573 iter1 §F7 + the K-587 cohort sweep + the rejected "flat
+# kpack=2" experiment recorded in lessons.md.  Re-tuning belongs in this
+# named constant — do NOT duplicate the magic number inline.
+KPACK2_TILE_AREA_THRESHOLD = 32768
+
+
+def kpack_for_tile(blk_m: int, blk_n: int) -> int:
+    """Return the per-tile `kpack` Triton-AMD codegen knob (1 or 2).
+
+    Co-located with `_HIPBLASLT_SHAPE_OVERRIDE_REGISTRY` so the dispatch
+    side and the codegen-tuning side cannot drift out of sync.
+    """
+    return 2 if (blk_m * blk_n) <= KPACK2_TILE_AREA_THRESHOLD else 1
 
 
 def _hipblaslt_shape_override(
@@ -158,7 +189,15 @@ def _hipblaslt_shape_override(
       - the user disables overrides via TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1.
 
     K-545 / S-002 — see _HIPBLASLT_SHAPE_OVERRIDES docstring above.
-    K-587 (perf): memoized via `_OVERRIDE_LOOKUP_CACHE`.
+
+    K-587 (Performance Hawk + Minimalist feedback): the prior iteration
+    wrapped this in an unbounded `_OVERRIDE_LOOKUP_CACHE` memo. That cache
+    has been removed — the underlying lookup is already two O(1) dict
+    operations (env check + frozen-dict get) plus one cheap LDS arithmetic
+    check. The cache risked monotonic memory growth on long-lived inference
+    servers (variable seq_len x batch x head_dim → unbounded distinct
+    keys), and benchmark profiling showed the wrapped lookup was slower
+    than the bare dict.get path it replaced.
     """
     if os.environ.get("TRITONBLAS_DISABLE_SHAPE_OVERRIDES", "0") == "1":
         return None
@@ -169,20 +208,12 @@ def _hipblaslt_shape_override(
     # The override table is keyed by ("fp16","bf16") for human readability;
     # normalize the lookup key to match.
     key_dtype = "bf16" if "b" in a_dtype_str.lower() else "fp16"
-    cache_key = (m, n, k, key_dtype, bytes_a, bytes_b, lds_cap, num_stages)
-    cached = _OVERRIDE_LOOKUP_CACHE.get(cache_key, _SENTINEL)
-    if cached is not _SENTINEL:
-        return cached
-    key = (m, n, k, key_dtype)
-    tile = _HIPBLASLT_SHAPE_OVERRIDES.get(key)
+    tile = _HIPBLASLT_SHAPE_OVERRIDES.get((m, n, k, key_dtype))
     if tile is None:
-        _OVERRIDE_LOOKUP_CACHE[cache_key] = None
         return None
     bm, bn, bk = tile
     if not check_triton_lds_capacity(bm, bn, bk, bytes_a, bytes_b, lds_cap, num_stages):
-        _OVERRIDE_LOOKUP_CACHE[cache_key] = None
         return None
-    _OVERRIDE_LOOKUP_CACHE[cache_key] = tile
     return tile
 
 

@@ -44,11 +44,19 @@ depends only on the tile + dtype + num_stages, not on the shape.
 
 After an exact-key miss we therefore perform a *nearest-neighbor* fall-back:
 candidate cached entries that match the non-shape suffix of the key exactly
-(dtype-a, dtype-b, dtype-c, mx_block_size, streamk, num_stages, n_cu,
-active_cu) and whose (M', N', K') is within a configurable per-axis
-relative tolerance of (M, N, K) are scored by log-L1 distance, and the
-closest is returned.  The default tolerance is 0.05 (5%) per axis; override
-with ``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (set to ``0`` to disable).
+(dtype-a, dtype-b, dtype-c, mx_block_size, streamk, num_stages, n_cu) and
+whose (M', N', K') is within a configurable per-axis relative tolerance of
+(M, N, K) are scored by log-L1 distance, and the closest is returned.  The
+default tolerance is 0.05 (5%) per axis; override with
+``TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE`` (set to ``0`` to disable).
+
+Nearest-match entries are **not** persisted under the requesting key.  Only
+the original Origami-tuned configs (the ``store()`` calls in the cold path)
+ever populate the on-disk cache, which keeps the cache from drifting:
+without this guard a chain of near-neighbors A -> A' -> A'' could each be
+within tolerance of their predecessor while A'' lies arbitrarily far from
+the actually-tuned canonical entry.  See the K-591 reviewer feedback
+(devil's-advocate concern about self-reinforcing cache drift).
 """
 
 from __future__ import annotations
@@ -183,7 +191,8 @@ def make_cache_suffix(
     streamk: bool,
     num_stages: int,
     n_cu: int,
-    active_cu: Optional[int],
+    active_cu: Optional[int],  # accepted for API symmetry; intentionally
+    # NOT included in the suffix (see note below).
 ) -> str:
     """Return the non-shape ("suffix") portion of a cache key.
 
@@ -192,12 +201,24 @@ def make_cache_suffix(
     boundary-tolerance lookup uses this to restrict the candidate set to
     entries that are LDS-safe (K-588 F9) and grid-compatible without having
     to re-run any heuristic.
+
+    NOTE on ``active_cu``: a per-call sub-CU mask (e.g. running on a
+    partition of the device) does not change the LDS-safety of a cached
+    tile or the dtype/streamk/num_stages context, and on a given
+    architecture ``n_cu`` already pins the hardware identity.  We deliberately
+    omit ``active_cu`` from the suffix so that an entry stored with
+    ``active_cu=None`` (i.e. ``n_cu``) is reusable for a near-neighbor query
+    that might supply an explicit ``active_cu`` value — otherwise we would
+    silently re-introduce the exact "near-miss -> 0% hit" failure mode that
+    K-588 root-caused.  ``active_cu`` is still threaded through the public
+    API so we can re-introduce it (or fold it into ``n_cu``) without an API
+    break if a future kernel is shown to be sensitive to it.
     """
-    ac = active_cu if active_cu is not None else n_cu
+    _ = active_cu  # consumed but intentionally not part of the key
     return (
         f"{a_dtype_str}|{b_dtype_str}|{out_dtype_str}"
         f"|mx{mx_block_size}|sk{int(bool(streamk))}|ns{num_stages}"
-        f"|cu{n_cu}|ac{ac}"
+        f"|cu{n_cu}"
     )
 
 

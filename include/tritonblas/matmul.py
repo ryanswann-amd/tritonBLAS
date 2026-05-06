@@ -90,13 +90,19 @@ def _make_matmul_selector(
     # missed but a near-neighbor entry sharing the same (dtype, mode, arch)
     # may still be reusable.  K-588 F9 confirmed the cached tile is
     # LDS-safe for any (M', N', K') with the same dtype/num_stages, so we
-    # can adopt it directly and persist it under the requested key for
-    # future exact-match hits.
+    # adopt it directly *for this call* without persisting it under the new
+    # key.  Persisting an interpolated entry would let later near-neighbor
+    # lookups treat it as a tuned source, which can compound into arbitrary
+    # drift from any actually-tuned canonical config (see K-591 reviewer
+    # feedback, devil's-advocate concern).  The on-disk cache therefore
+    # contains only true Origami-tuned entries; the in-memory nearest-lookup
+    # is recomputed on every cold-key call (a single suffix-bucket scan,
+    # microseconds).
     nearest = cache.lookup_nearest(key)
     if nearest is not None:
         cached_params, _matched_key = nearest
         try:
-            selector = OrigamiMatmulSelector(
+            return OrigamiMatmulSelector(
                 M,
                 N,
                 K,
@@ -109,12 +115,6 @@ def _make_matmul_selector(
                 num_stages=num_stages,
                 _cached_params=cached_params,
             )
-            try:
-                cache.store(key, cached_params)
-            except Exception:
-                # Persistence failures must never break the kernel call.
-                pass
-            return selector
         except Exception:
             # Cached params for the neighbor can't be reconstructed for
             # this shape; fall through to the full Origami path.

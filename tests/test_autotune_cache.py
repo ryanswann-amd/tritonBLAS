@@ -387,6 +387,106 @@ def test_lookup_nearest_persists_across_reload(tmp_path, monkeypatch):
     assert params == _sample_params()
 
 
+def test_make_cache_suffix_omits_active_cu(tmp_path, monkeypatch):
+    """K-591 Minimalist: ``active_cu`` must NOT appear in the suffix.
+
+    On a single architecture ``n_cu`` already pins the hardware identity;
+    if we let ``active_cu`` differ between the canonical-store call (which
+    typically passes ``None``) and a near-neighbor query (which might pass
+    an explicit value), the suffix-keyed bucket would silently miss and we
+    would re-introduce the K-588 "near-miss -> 0% hit" failure.  Cover the
+    invariant explicitly so a future refactor can't slip it back in.
+    """
+    import tritonblas.autotune_cache as ac
+
+    # Same n_cu, varying active_cu must produce identical suffix.
+    s_none = ac.make_cache_suffix("f16", "f16", "f16", 0, False, 2, 304, None)
+    s_eq = ac.make_cache_suffix("f16", "f16", "f16", 0, False, 2, 304, 304)
+    s_lt = ac.make_cache_suffix("f16", "f16", "f16", 0, False, 2, 304, 256)
+    assert s_none == s_eq == s_lt
+    # And keys built from those suffixes must collapse into one bucket.
+    k_none = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    k_lt = ac.make_cache_key(
+        2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, 256
+    )
+    p_none = ac.parse_cache_key(k_none)
+    p_lt = ac.parse_cache_key(k_lt)
+    assert p_none is not None and p_lt is not None
+    assert p_none[3] == p_lt[3], "varying active_cu must not split the bucket"
+
+
+def test_lookup_nearest_ignores_active_cu_difference(tmp_path, monkeypatch):
+    """End-to-end check for the Minimalist fix: a cached canonical entry
+    stored with ``active_cu=None`` is still returned by ``lookup_nearest``
+    when the query supplies a different ``active_cu`` value.
+    """
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon, _sample_params())
+
+    query = ac.make_cache_key(
+        2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, 256
+    )
+    near = cache.lookup_nearest(query)
+    assert near is not None, (
+        "varying active_cu must not break nearest-neighbor matching"
+    )
+    params, matched = near
+    assert matched == canon
+    assert params == _sample_params()
+
+
+def test_lookup_nearest_does_not_propagate_synthetic_entries(
+    tmp_path, monkeypatch
+):
+    """K-591 Devil's Advocate: nearest-match results must NOT be persisted
+    to the on-disk cache.  Only true Origami-tuned ``store()`` calls
+    populate it; the in-memory nearest lookup is recomputed each time.
+    Otherwise an interpolated entry could be picked as the source for a
+    further interpolation, drifting arbitrarily from any tuned config.
+    """
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE", "1")
+    monkeypatch.setenv("TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE", "0.05")
+    import tritonblas.autotune_cache as ac
+    importlib.reload(ac)
+    ac.reset_registry()
+
+    cache = ac.get_cache("gfx942", 304)
+    canon = ac.make_cache_key(
+        2048, 4096, 4096, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    cache.store(canon, _sample_params())
+    assert len(cache) == 1
+
+    # Hit nearest-lookup — but do not call store() on the new key.
+    jit = ac.make_cache_key(
+        2049, 4097, 4090, "f16", "f16", "f16", 0, False, 2, 304, None
+    )
+    near = cache.lookup_nearest(jit)
+    assert near is not None
+
+    # The cache must still hold exactly one entry: the canonical store.
+    assert len(cache) == 1
+    assert canon in cache
+    assert jit not in cache
+
+    # On-disk file must mirror that — only the canonical entry is persisted.
+    raw = json.loads(cache.path.read_text())
+    assert list(raw["entries"].keys()) == [canon]
+
+
 def test_tolerance_env_parsing(tmp_path, monkeypatch):
     """Resolution of TRITONBLAS_AUTOTUNE_CACHE_TOLERANCE: explicit
     overrides, off-toggles, and out-of-range values are all handled."""

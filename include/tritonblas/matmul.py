@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,29 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-595 (S-002): T7 per-shape hardware-knob resolver.
+#
+# Resolution order (first non-None wins):
+#   1. TRITONBLAS_FORCE_<KNOB> environment variable (diagnostic / sweep).
+#   2. selector.<knob>_hint (per-shape entry in _HIPBLASLT_KNOB_OVERRIDES).
+#   3. callsite_default — the K-587 / pre-K-595 hardcoded value (or the
+#      adaptive expression for kpack).
+#
+# Setting TRITONBLAS_DISABLE_KNOB_OVERRIDES=1 zeroes step 2 (per-shape
+# table is bypassed; env vars and defaults still apply). The per-call env
+# var precedence is intentional so a sweep harness can fix a knob across
+# all shapes without code changes.
+def _resolve_knob(env_name: str, selector, hint_attr: str, default):
+    val = os.environ.get(env_name)
+    if val is not None and val != "":
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+    h = getattr(selector, hint_attr, None)
+    return h if h is not None else default
 
 
 
@@ -95,14 +119,17 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
+    # K-595 T7: per-shape hardware-knob exposure. Defaults preserved when no
+    # registry entry / env-var override is set.
+    num_warps = _resolve_knob("TRITONBLAS_FORCE_NUM_WARPS", selector, "num_warps_hint", 8)
+    waves_per_eu = _resolve_knob("TRITONBLAS_FORCE_WAVES_PER_EU", selector, "waves_per_eu_hint", 0)
+    mfmaInstrSize = _resolve_knob("TRITONBLAS_FORCE_MFMA_INSTR_SIZE", selector, "mfma_instr_size_hint", 16)
     # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
     # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
     # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
     # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
-    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    _kpack_default = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    kpack = _resolve_knob("TRITONBLAS_FORCE_KPACK", selector, "kpack_hint", _kpack_default)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -245,14 +272,16 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
+    # K-595 T7: per-shape hardware-knob exposure (Stream-K path).
+    num_warps = _resolve_knob("TRITONBLAS_FORCE_NUM_WARPS", selector, "num_warps_hint", 8)
+    waves_per_eu = _resolve_knob("TRITONBLAS_FORCE_WAVES_PER_EU", selector, "waves_per_eu_hint", 0)
+    mfmaInstrSize = _resolve_knob("TRITONBLAS_FORCE_MFMA_INSTR_SIZE", selector, "mfma_instr_size_hint", 16)
     # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
     # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
     # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
     # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
-    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    _kpack_default = 2 if (BLK_M * BLK_N) <= 32768 else 1
+    kpack = _resolve_knob("TRITONBLAS_FORCE_KPACK", selector, "kpack_hint", _kpack_default)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

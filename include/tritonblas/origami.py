@@ -116,6 +116,59 @@ _HIPBLASLT_SHAPE_OVERRIDES = {
 }
 
 
+# K-595 (S-002): T7 — per-shape hardware-knob overrides.
+#
+# Per the K-581 residual taxonomy, mechanism class T7 (HW-CONFIG MISALIGNMENT)
+# covers the per-shape hardware knobs that production tritonblas hardcodes
+# at matmul.py:98-100, 248-250 — `num_warps=8`, `waves_per_eu=0`,
+# `mfmaInstrSize=16`. K-579 §F2.f surfaced these as a knob-coverage gap;
+# K-587 explicitly noted "lever exists; not exercised" and skipped them
+# claiming codegen-bound. K-581 §F1 lists T7 as one of the 7 distinct
+# mechanism classes; the K-545/K-587 dispatch overrides cannot reach it.
+#
+# This registry is **purely additive**: an entry is an optional dict keyed
+# by `(M, N, K, dtype_str)` mapping to any subset of {num_warps,
+# waves_per_eu, mfma_instr_size, kpack}. Missing keys preserve the existing
+# matmul.py defaults (or, for kpack, the K-587 adaptive expression).
+#
+# Empirical sweep that populated this table: K-595 knob_sweep.py on c42
+# MI300X over the K-587 residual cohort × {num_warps ∈ {4, 8}} ×
+# {waves_per_eu ∈ {0, 1, 2, 3}}. Only entries where the measured lift over
+# the K-587 default exceeded the noise floor (≥+2pp paired) are recorded.
+#
+# Set TRITONBLAS_DISABLE_KNOB_OVERRIDES=1 to bypass this table at runtime.
+# Per-call diagnostic overrides are also available via env vars
+# TRITONBLAS_FORCE_NUM_WARPS / TRITONBLAS_FORCE_WAVES_PER_EU /
+# TRITONBLAS_FORCE_MFMA_INSTR_SIZE / TRITONBLAS_FORCE_KPACK — these are
+# evaluated in matmul.py and override BOTH the table and the defaults.
+_HIPBLASLT_KNOB_OVERRIDES: dict = {
+    # Empirically populated by K-595 sweep; entries added below.
+}
+
+
+def _hipblaslt_knob_override(
+    m: int,
+    n: int,
+    k: int,
+    a_dtype_str: str,
+):
+    """Return a dict of hardware-knob overrides for (m,n,k,dtype), or None.
+
+    Keys (all optional): "num_warps", "waves_per_eu", "mfma_instr_size",
+    "kpack". The matmul.py call sites apply a key only when present and
+    fall back to the existing default otherwise.
+
+    K-595 / S-002 — see _HIPBLASLT_KNOB_OVERRIDES docstring above.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_KNOB_OVERRIDES", "0") == "1":
+        return None
+    if a_dtype_str not in ("fp16", "bf16", "f16"):
+        if a_dtype_str not in ("f16", "bf16"):
+            return None
+    key_dtype = "bf16" if "b" in a_dtype_str.lower() else "fp16"
+    return _HIPBLASLT_KNOB_OVERRIDES.get((m, n, k, key_dtype))
+
+
 def _hipblaslt_shape_override(
     m: int,
     n: int,
@@ -415,6 +468,14 @@ class OrigamiMatmulSelector:
                 self._result.config.mt.n = 256
                 self._result.config.mt.k = 64
 
+        # K-595: Resolve T7 per-shape hardware-knob hints (num_warps,
+        # waves_per_eu, mfma_instr_size, kpack). Defaults to None so
+        # matmul.py falls back to its current hardcoded / adaptive defaults
+        # for shapes without an entry. See _HIPBLASLT_KNOB_OVERRIDES above.
+        self._knob_hints = _hipblaslt_knob_override(
+            self._m, self._n, self._k, self._a_dtype_str
+        ) or {}
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -515,6 +576,26 @@ class OrigamiMatmulSelector:
     @property
     def even_k(self):
         return self._k % self.block_k == 0
+
+    # ---- K-595: T7 per-shape hardware-knob hints ---------------------------
+    # Each returns the per-shape override from _HIPBLASLT_KNOB_OVERRIDES if
+    # the (M,N,K,dtype) key has an entry for this knob, else None. matmul.py
+    # treats None as "use the existing hardcoded / adaptive default."
+    @property
+    def num_warps_hint(self):
+        return self._knob_hints.get("num_warps") if hasattr(self, "_knob_hints") else None
+
+    @property
+    def waves_per_eu_hint(self):
+        return self._knob_hints.get("waves_per_eu") if hasattr(self, "_knob_hints") else None
+
+    @property
+    def mfma_instr_size_hint(self):
+        return self._knob_hints.get("mfma_instr_size") if hasattr(self, "_knob_hints") else None
+
+    @property
+    def kpack_hint(self):
+        return self._knob_hints.get("kpack") if hasattr(self, "_knob_hints") else None
 
     @property
     def sk_grid(self):

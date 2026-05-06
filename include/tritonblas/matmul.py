@@ -100,11 +100,11 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     # Centralized kpack policy (see `tritonblas.constraints.kpack_for_dtype`).
-    # Passes the selected tile so the helper can apply the
-    # asymmetric-tile gate that captures the residual cohort win
-    # (256x128 / 128x256) without the symmetric-tile regression
-    # measured at 256x256x64 on 8192x8192x8192.
-    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N)
+    # Passes the selected (BM, BN, BK) tile so the helper can apply
+    # its validated whitelist gate; tiles outside the whitelist fall
+    # back to kpack=1 to avoid known regressions on the symmetric
+    # 256x256x64 tile and on the long-N 128x256x64 tile.
+    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N, BLK_K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -251,9 +251,9 @@ def streamk_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     # Centralized kpack policy (see `tritonblas.constraints.kpack_for_dtype`).
-    # Passes the selected tile so the helper can apply the
-    # asymmetric-tile gate; same rationale as `persistent_matmul_lt`.
-    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N)
+    # Passes the selected (BM, BN, BK) tile so the helper can apply the
+    # validated whitelist gate; same rationale as `persistent_matmul_lt`.
+    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N, BLK_K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

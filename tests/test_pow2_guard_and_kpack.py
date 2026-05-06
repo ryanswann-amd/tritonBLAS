@@ -20,10 +20,18 @@ These tests lock in two invariants that prior empirical work surfaced:
 2.  `kpack_for_dtype` is the single source of truth for the kpack
     setting passed to both `persistent_matmul_lt` and
     `streamk_matmul_lt`; the two launch paths must not drift. The
-    helper returns 2 for fp16 / bf16 (denser dword-packed mfma operand
-    layout, measured +3-6pp same-tile lift on residual cohort) and 1
-    for everything else (fp8 / fp4 / fp32 paths kept on the existing
-    setting).
+    helper is whitelist-driven: kpack=2 ships ONLY for the validated
+    `(BLOCK_M, BLOCK_N, BLOCK_K, a_dtype)` tuples in
+    `KPACK2_TILE_DTYPE_WHITELIST`. Every other dispatch — symmetric
+    tile, asymmetric tile that failed the paired-bench gate (e.g.
+    128x256x64 / T2-a, where bf16 regressed -1.56pp), and all
+    non-fp16/bf16 dtypes — gets kpack=1.
+
+    The whitelist tests below explicitly lock in the regressions that
+    must NOT recur: the symmetric `8192^3` 256x256x64 case (-8.8pp
+    when kpack=2 was unconditional) and the asymmetric T2-a 128x256x64
+    case (which failed the +1.5pp noise-floor gate even though the
+    earlier asymmetry-only heuristic would have allowed it).
 
 These tests do NOT require a GPU — they exercise pure Python selector
 logic.
@@ -33,6 +41,7 @@ import pytest
 import torch
 
 from tritonblas.constraints import (
+    KPACK2_TILE_DTYPE_WHITELIST,
     is_pow2 as _is_pow2,
     is_triton_valid_block_tile as _is_triton_valid_block_tile,
     kpack_for_dtype,
@@ -245,40 +254,127 @@ def test_selector_init_asserts_final_pick_is_pow2():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "dtype,bm,bn,expected",
+    "dtype,bm,bn,bk,expected",
     [
-        # Asymmetric tile + fp16/bf16 → kpack=2 (the only case that
-        # produced a clean win in the paired bench).
-        (torch.float16,  256, 128, 2),
-        (torch.float16,  128, 256, 2),
-        (torch.bfloat16, 256, 128, 2),
-        (torch.bfloat16, 128, 256, 2),
-        # Symmetric tile + fp16/bf16 → kpack=1 (the symmetric tile
-        # regressed -10pp on 8192x8192x8192 in the paired bench; gated
-        # back to the existing default).
-        (torch.float16,  256, 256, 1),
-        (torch.float16,  128, 128, 1),
-        (torch.bfloat16, 256, 256, 1),
-        (torch.bfloat16, 128, 128, 1),
-        # Non-fp16/bf16 dtypes are always kpack=1 regardless of tile.
-        (torch.float32,  256, 128, 1),
-        (torch.int8,     256, 256, 1),
+        # ---- Whitelist hits: long-M skinny 256x128x64 fp16/bf16 →
+        # kpack=2. These are the ONLY two (tile, dtype) combinations
+        # validated by the paired bench (+2 to +4pp lift across two
+        # independent runs at 8192x1024x8192, both above the +1.5pp
+        # noise floor with zero rows regressing).
+        (torch.float16,  256, 128, 64, 2),
+        (torch.bfloat16, 256, 128, 64, 2),
+
+        # ---- 128x256x64 EXCLUSION (regression lock).
+        # An earlier asymmetry-only heuristic would have allowed this
+        # tile, but the paired bench measured a median Δ inside noise
+        # with bf16 regressing — failing the falsification gate. The
+        # whitelist correctly excludes it.
+        (torch.float16,  128, 256, 64, 1),
+        (torch.bfloat16, 128, 256, 64, 1),
+
+        # ---- 256x256x64 symmetric tile → kpack=1. Whitelist excludes
+        # 256x256x64 entirely (no symmetric-tile entry shipped — see
+        # the dedicated regression-lock test below).
+        (torch.float16,  256, 256, 64, 1),
+        (torch.bfloat16, 256, 256, 64, 1),
+
+        # ---- Other symmetric / control-bucket tiles → kpack=1.
+        (torch.float16,  128, 128, 128, 1),
+        (torch.bfloat16, 128, 128, 128, 1),
+
+        # ---- Whitelist-tile + wrong BK → kpack=1. The validation was
+        # at BK=64 specifically; widening to BK=128/32 has no
+        # supporting paired-bench data.
+        (torch.float16,  256, 128, 32, 1),
+        (torch.float16,  256, 128, 128, 1),
+        (torch.bfloat16, 256, 128, 32, 1),
+
+        # ---- Whitelist-tile + wrong dtype → kpack=1.
+        (torch.float32,  256, 128, 64, 1),
+        (torch.int8,     256, 128, 64, 1),
+
+        # ---- Non-fp16/bf16 dtypes are always kpack=1 regardless of
+        # tile (fp8 path is gfx950-clamped at codegen, fp4 has its
+        # own kernel entry).
+        (torch.float32,  256, 256, 64, 1),
+        (torch.int8,     256, 256, 64, 1),
     ],
 )
-def test_kpack_for_dtype_asymmetric_gate(dtype, bm, bn, expected):
-    assert kpack_for_dtype(dtype, bm, bn) == expected
+def test_kpack_for_dtype_whitelist(dtype, bm, bn, bk, expected):
+    assert kpack_for_dtype(dtype, bm, bn, bk) == expected
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_kpack_for_dtype_falls_back_to_one_without_tile(dtype):
-    """When `block_m`/`block_n` are not supplied (legacy or external
-    caller), the helper MUST fall back to the safe `kpack=1` setting
-    rather than guessing `kpack=2` based on dtype alone (which would
-    re-introduce the symmetric-tile regression for any caller that
-    happens to land on a 256x256x64 tile)."""
-    assert kpack_for_dtype(dtype) == 1
-    assert kpack_for_dtype(dtype, None, 256) == 1
-    assert kpack_for_dtype(dtype, 256, None) == 1
+def test_kpack2_whitelist_contents_are_locked():
+    """The whitelist is the audit-trail-bearing surface for kpack=2.
+    Lock its EXACT contents so that any widening — even a one-line
+    addition — forces the contributor to also update the bench
+    harness, the docstring, and this test together. Both a previous
+    unconditional kpack=2 policy and a subsequent overly broad
+    asymmetry-only gate shipped real regressions; a tightly locked
+    whitelist is the structural defense against repeating that miss.
+    """
+    expected = frozenset({
+        (256, 128, 64, torch.float16),
+        (256, 128, 64, torch.bfloat16),
+    })
+    assert KPACK2_TILE_DTYPE_WHITELIST == expected, (
+        f"KPACK2_TILE_DTYPE_WHITELIST has been changed. Current: "
+        f"{sorted(KPACK2_TILE_DTYPE_WHITELIST, key=str)}. "
+        f"If this is intentional, re-run the paired-bench harness on "
+        f"the candidate tile and update both this test and the "
+        f"docstring in `tritonblas.constraints` together."
+    )
+
+
+def test_kpack_8192_cubed_symmetric_tile_returns_kpack1():
+    """REGRESSION LOCK.
+
+    A historical unconditional kpack=2 measured -8.8 to -10.1pp on
+    `8192x8192x8192` at the symmetric `256x256x64` tile (well outside
+    the ±1.5pp noise floor; reproduced across two paired runs after
+    clearing `~/.triton/cache/`). This test pins the post-fix
+    behavior so a future helper rewrite cannot silently re-enable
+    kpack=2 on this exact `(tile, dtype)` and re-introduce the
+    regression.
+    """
+    # Both fp16 and bf16 must return kpack=1 at the symmetric tile.
+    assert kpack_for_dtype(torch.float16, 256, 256, 64) == 1
+    assert kpack_for_dtype(torch.bfloat16, 256, 256, 64) == 1
+    # And the same exclusion holds for any other symmetric pow2 tile
+    # at the same (BK=64, dtype) combination, since none have been
+    # paired-benched.
+    assert kpack_for_dtype(torch.float16, 128, 128, 64) == 1
+    assert kpack_for_dtype(torch.bfloat16, 128, 128, 64) == 1
+
+
+def test_kpack_long_n_skinny_128x256x64_returns_kpack1():
+    """REGRESSION LOCK.
+
+    The ``128x256x64`` tile (long-N skinny, 1024x8192x8192) is
+    asymmetric, so an earlier "block_m != block_n" heuristic would
+    have shipped kpack=2 here — but the paired bench measured bf16
+    regressing with a median Δ inside noise, falsifying the
+    heuristic. The whitelist correctly excludes this tile; this test
+    locks that exclusion in so a future broadening proposal cannot
+    silently re-enable it without re-validating the paired bench.
+    """
+    assert kpack_for_dtype(torch.float16, 128, 256, 64) == 1
+    assert kpack_for_dtype(torch.bfloat16, 128, 256, 64) == 1
+
+
+def test_kpack_for_dtype_falls_back_to_one_without_tile():
+    """When ANY of `block_m`/`block_n`/`block_k` is not supplied (legacy
+    or external caller), the helper MUST fall back to the safe
+    `kpack=1` setting rather than guessing `kpack=2`. Without all
+    three tile dims, the whitelist lookup cannot run and the safe
+    default is the only option that cannot re-introduce a regression.
+    """
+    for dtype in (torch.float16, torch.bfloat16):
+        assert kpack_for_dtype(dtype) == 1
+        assert kpack_for_dtype(dtype, 256, 128) == 1                # missing BK
+        assert kpack_for_dtype(dtype, None, 128, 64) == 1           # missing BM
+        assert kpack_for_dtype(dtype, 256, None, 64) == 1           # missing BN
+        assert kpack_for_dtype(dtype, 256, 128, None) == 1          # missing BK
 
 
 def test_kpack_force_kpack1_env(monkeypatch):
@@ -286,9 +382,32 @@ def test_kpack_force_kpack1_env(monkeypatch):
     used by the paired bench harness to isolate the kpack contribution
     without checking out an older revision."""
     monkeypatch.setenv("TRITONBLAS_FORCE_KPACK1", "1")
-    # Even the case that would normally pick kpack=2 must clamp to 1.
-    assert kpack_for_dtype(torch.float16, 256, 128) == 1
-    assert kpack_for_dtype(torch.bfloat16, 128, 256) == 1
+    # Even the whitelist hits must clamp to kpack=1.
+    assert kpack_for_dtype(torch.float16, 256, 128, 64) == 1
+    assert kpack_for_dtype(torch.bfloat16, 256, 128, 64) == 1
+
+
+def test_kpack_helper_call_passes_block_k():
+    """The launchers MUST pass `BLK_K` to the helper (the whitelist is
+    keyed on the full `(BM, BN, BK, dtype)` tuple). A 3-arg call
+    would silently fall back to kpack=1 for every dispatch — losing
+    the T1 win — so we assert structurally that both launchers pass
+    four positional args.
+    """
+    import importlib
+    import inspect
+
+    _matmul_mod = importlib.import_module("tritonblas.matmul")
+    src_persistent = inspect.getsource(_matmul_mod.persistent_matmul_lt)
+    src_streamk = inspect.getsource(_matmul_mod.streamk_matmul_lt)
+
+    for label, src in (("persistent_matmul_lt", src_persistent),
+                       ("streamk_matmul_lt", src_streamk)):
+        assert "kpack_for_dtype(a.dtype, BLK_M, BLK_N, BLK_K)" in src, (
+            f"{label} must call `kpack_for_dtype(a.dtype, BLK_M, BLK_N, BLK_K)` "
+            f"to consult the whitelist; a 3-arg call would silently "
+            f"fall back to kpack=1 for every dispatch."
+        )
 
 
 def test_kpack_helper_used_at_both_launch_sites():

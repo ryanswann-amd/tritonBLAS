@@ -98,6 +98,15 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # NOTE (K-524, MI300X / Triton 3.6.0+rocm7.2.0): K-383's prediction that
+    # lifting kpack from 1->2 would close 3-6 pp of the large-K residual gap
+    # has been empirically FALSIFIED on this Triton version. Direct A/B
+    # measurement on the K-518 large-K cohort (13 shapes, K>=4096, M,N>=2048)
+    # showed kpack=2 *regresses* the tritonblas/hipBLASLt ratio by 5-8 pp
+    # (e.g., 8192^3 fp16: 0.882 -> 0.801; 4096x4096x16384 fp16: 0.875 -> 0.810).
+    # Tuned-cohort 4096^3 fp16 also regressed 0.976 -> 0.812. The K-383 patch
+    # is therefore NOT applied here. See state/mc2/workspaces/K-524/output/
+    # for raw before/after CSVs. Re-measure before re-applying.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -244,6 +253,10 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # See persistent_matmul_lt above (K-524 falsification note): kpack=2 was
+    # measured to regress on Triton 3.6.0+rocm7.2.0 / gfx942, contrary to
+    # K-383's prediction. Keep kpack=1 until a fresh ISA-level audit shows
+    # the regression cause and produces a Triton-version-conditioned fix.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

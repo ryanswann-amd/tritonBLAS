@@ -188,6 +188,10 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
     num_stage_range = [2, 3]
     waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32]
+    # NOTE (K-524 / 2026-05-06): kpack=2 was measured to regress the large-K
+    # residual cohort on Triton 3.6.0+rocm7.2.0 / gfx942 (see falsification
+    # note in include/tritonblas/matmul.py near the kpack assignment). Keep
+    # kpack_range = [1] until a Triton-version-aware fix lands.
     kpack_range = [1]
 
     # CHUNK_SIZE options

@@ -251,6 +251,25 @@ def streamk_matmul_lt(
     if sk_grid is not None:
         total_programs_streamk = sk_grid
 
+    # K-551: short-circuit when the chosen sk_grid equals total_tiles, i.e. the
+    # heuristic determined no real K-split is beneficial (sk_factor == 1).  In
+    # this case the StreamK kernel is reduced to a per-tile assignment that
+    # carries the cost of partial-tile workspace + per-program locks for no
+    # parallelism gain.  Empirically (K-551 sweep on the K-542 boundary cohort)
+    # the persistent kernel is 12-17% faster on these shapes.  Falling back is
+    # safe whenever there is no quantization scaling and no work-stealing
+    # state to thread through (those paths run a different kernel that this
+    # short-circuit must not skip).
+    if (
+        total_programs_streamk == total_tiles
+        and not work_stealing
+        and not quantized
+        and a_scale is None
+        and b_scale is None
+        and bias is None
+    ):
+        return persistent_matmul_lt(a, b, c, selector, config)
+
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N
 

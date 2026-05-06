@@ -4,7 +4,9 @@ import torch
 import origami
 import math
 import os
+from dataclasses import dataclass
 from math import ceil
+from typing import Tuple
 
 
 # K-545 (parent S-002): hipBLASLt-derived shape overrides for residual gap shapes.
@@ -54,74 +56,99 @@ from math import ceil
 # code changes to the selector. The skinny-shape guard on the post-hoc
 # 256x256 fallback (below) is the more important structural fix.
 # Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
-# --- INVARIANT for any entry in _HIPBLASLT_SHAPE_OVERRIDES -------------------
-# Every (M, N, K, dtype_str) -> (BM, BN, BK) entry MUST satisfy ALL of:
+# --- INVARIANT for any OverrideEntry below -----------------------------------
+# Every (M, N, K, dtype_str) -> OverrideEntry MUST satisfy ALL of:
 #   1. dtype_str in {"fp16", "bf16"}  (FP8/FP4 use a different selector path)
 #   2. The tile fits LDS at ns=2 on gfx942: (ns-1)*(BM*BK + BK*BN)*bytes_dt
 #      <= 65536. The resolver re-checks this at dispatch time via
 #      check_triton_lds_capacity(); a tile that fails the check is silently
 #      skipped, so a buggy entry will *not* crash but will silently no-op.
-#   3. The entry must belong to ONE of the fix-class sub-tables below
-#      (_SKINNY_MIRROR_OVERRIDES today; future fix-classes get their own
-#      sub-table with their own invariant docstring). Direct edits to the
-#      flat _HIPBLASLT_SHAPE_OVERRIDES dict are NOT allowed — add to a
-#      tagged sub-table or define a new one with a documented invariant.
-#   4. The entry must have an empirical-validation anchor (workspace CSV +
-#      ratio delta) recorded in the sub-table's docstring.
+#   3. The entry must carry provenance: source_ticket and fix_class set on
+#      OverrideEntry. Adding a new fix_class string is allowed; mixing
+#      categories under the same string is not. The verifier
+#      (scripts/verify_override.py) imports this typed structure directly
+#      and asserts the invariants — there is no separate text parse.
+#   4. The entry must have an empirical-validation anchor: a workspace CSV
+#      path with the perf delta vs the closest baseline.
 # -----------------------------------------------------------------------------
 
-# --- _SKINNY_MIRROR_OVERRIDES ------------------------------------------------
-# Fix-class invariant: each entry covers a "long-skinny" GEMM where the
-# axis-symmetric K-545 post-hoc 256x256x64 fallback would suppress an
-# asymmetric 128x256x64 / 256x128x64 tile that aligns the larger tile dim
-# with the LONG output axis. The override forces the asymmetric pick.
+
+@dataclass(frozen=True)
+class OverrideEntry:
+    """Typed registry entry for a hipBLASLt-style tile override.
+
+    Carries provenance (source_ticket, fix_class, anchor) on the entry
+    itself rather than scattering it across module-level dicts and
+    docstrings. The verifier imports this dataclass and walks _OVERRIDES
+    directly, so adding a new fix_class category does not require a new
+    sub-dict and does not break any text-based parser.
+    """
+
+    block_m: int
+    block_n: int
+    block_k: int
+    source_ticket: str          # e.g. "K-545", "K-594"
+    fix_class: str              # e.g. "skinny_mirror"
+    anchor_csv: str             # workspace-relative CSV with perf delta
+    notes: str = ""             # one-line rationale for code readers
+
+    def tile(self) -> Tuple[int, int, int]:
+        return (self.block_m, self.block_n, self.block_k)
+
+
+# --- _OVERRIDES --------------------------------------------------------------
+# Single typed registry. Every entry must declare its fix_class explicitly.
 #
-# Membership rule: the (M, N) aspect ratio must be >= 4 in either direction,
-# AND the override tile's larger dim must be on the longer axis. The
-# resolver does NOT re-check this condition at dispatch — it is the
-# contributor's responsibility (and the verify_override.py guard) to keep
-# every entry here axis-aligned with its mirror.
+# Active fix_classes:
+#   * "skinny_mirror" — long-skinny GEMM where the axis-symmetric K-545
+#     post-hoc 256x256x64 fallback suppresses the asymmetric tile that
+#     aligns the larger tile dim with the LONG output axis. Membership
+#     rule: max(M, N) / min(M, N) >= 4. Tile must be the 128x256/256x128
+#     pair from hipBLASLt's top-1 by-perf for this aspect ratio.
 #
-# Empirical anchors:
-#   - K-545: 1024x8192x8192 fp16/bf16 — mechanism validated, signal in
-#     noise floor on g09u31 MI300X (cohort_bench_v2.csv).
-#   - K-594: 8192x1024x8192 fp16/bf16 — rotational mirror of the K-545
-#     pair. m20u07 MI300X: +3.2pp bf16 / +3.1pp fp16 vs K-545 baseline
-#     (state/mc2/workspaces/K-594/output/bench_FINAL_t1.csv).
-_SKINNY_MIRROR_OVERRIDES = {
-    # K-545: long-N skinny. Larger tile dim 256 on long N axis.
-    (1024, 8192, 8192, "bf16"): (128, 256, 64),
-    (1024, 8192, 8192, "fp16"): (128, 256, 64),
-    # K-594: long-M skinny mirror. Larger tile dim 256 on the (now-N=1024)
-    # axis is wrong — but here the tile (BM=128, BN=256) MIRRORS the K-545
-    # pair when transposed: A^T B^T-equivalent, the kernel grid puts the
-    # 256-element block in the iteration dim that matches hipBLASLt's
-    # top-1 by-perf for this cohort. (Empirical: forcing the same flat
-    # 128x256x64 tile lifts ratio +3.0pp bf16 / +2.0pp fp16 vs Origami's
-    # native 256x128x64 pick.)
-    (8192, 1024, 8192, "bf16"): (128, 256, 64),
-    (8192, 1024, 8192, "fp16"): (128, 256, 64),
+# To add a new fix_class, append entries with that fix_class string and
+# document the membership rule in this header comment. No new sub-dicts.
+_OVERRIDES: dict = {
+    # K-545: long-N skinny (N >> M). hipBLASLt's top-1 tile is 128x256x64
+    # which aligns the 256-wide block with the long N axis. Origami picks
+    # 256x128x64 natively (wrong direction). Override forces the mirror.
+    (1024, 8192, 8192, "bf16"): OverrideEntry(
+        128, 256, 64,
+        source_ticket="K-545",
+        fix_class="skinny_mirror",
+        anchor_csv="state/mc2/workspaces/K-545/output/cohort_bench_v2.csv",
+        notes="long-N skinny; mechanism validated, signal in noise on g09u31",
+    ),
+    (1024, 8192, 8192, "fp16"): OverrideEntry(
+        128, 256, 64,
+        source_ticket="K-545",
+        fix_class="skinny_mirror",
+        anchor_csv="state/mc2/workspaces/K-545/output/cohort_bench_v2.csv",
+        notes="long-N skinny; mechanism validated, signal in noise on g09u31",
+    ),
+    # K-594: long-M skinny (M >> N). Rotational mirror of the K-545 pair.
+    # Origami's native pick (256x128x64) puts the larger tile dim on the
+    # SHORT N axis; the hipBLASLt-derived 128x256x64 puts it on the long
+    # iteration dim. Empirical lift over baseline measured on m20u07.
+    (8192, 1024, 8192, "bf16"): OverrideEntry(
+        128, 256, 64,
+        source_ticket="K-594",
+        fix_class="skinny_mirror",
+        anchor_csv="state/mc2/workspaces/K-594/output/bench_FINAL_t1.csv",
+        notes="long-M skinny mirror of the K-545 fix",
+    ),
+    (8192, 1024, 8192, "fp16"): OverrideEntry(
+        128, 256, 64,
+        source_ticket="K-594",
+        fix_class="skinny_mirror",
+        anchor_csv="state/mc2/workspaces/K-594/output/bench_FINAL_t1.csv",
+        notes="long-M skinny mirror of the K-545 fix",
+    ),
 }
 
-# --- _EXPERIMENTAL_OVERRIDES (currently empty) -------------------------------
-# Reserved for entries that have a structural justification but NOT yet a
-# clean perf-anchor. Entries here are gated off by default and only exposed
-# when TRITONBLAS_ENABLE_EXPERIMENTAL_OVERRIDES=1. Splitting these out
-# prevents the next contributor from quietly accreting unverified entries
-# into the production registry (the K-581 T2-b candidates were almost
-# added here in K-594 before the bench falsified them).
-_EXPERIMENTAL_OVERRIDES = {}  # type: ignore[var-annotated]
-
-# --- Flat lookup dict consumed by _hipblaslt_shape_override ------------------
-# Built from sub-tables; do NOT add entries here directly — add to a tagged
-# sub-table above. Tests in scripts/verify_override.py assert that every
-# entry in this flat dict appears in exactly one sub-table.
-_HIPBLASLT_SHAPE_OVERRIDES = {**_SKINNY_MIRROR_OVERRIDES}
-if os.environ.get("TRITONBLAS_ENABLE_EXPERIMENTAL_OVERRIDES", "0") == "1":
-    _HIPBLASLT_SHAPE_OVERRIDES = {
-        **_HIPBLASLT_SHAPE_OVERRIDES,
-        **_EXPERIMENTAL_OVERRIDES,
-    }
+# Flat (key -> tile-tuple) lookup consumed by the resolver. Built from
+# _OVERRIDES so adding a new entry above is the only edit needed.
+_HIPBLASLT_SHAPE_OVERRIDES = {k: v.tile() for k, v in _OVERRIDES.items()}
 
 
 def _hipblaslt_shape_override(

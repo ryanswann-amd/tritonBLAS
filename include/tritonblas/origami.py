@@ -5,6 +5,8 @@ import origami
 import math
 from math import ceil
 
+from .priority_configs import lookup as _priority_lookup, PriorityConfig
+
 
 def estimate_triton_lds_bytes(
     block_m: int,
@@ -241,6 +243,33 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-549: hipBLASLt-informed priority configs override Origami's
+        # tile pick (and the post-hoc 256x256x64 heuristic above) for known
+        # under-performing residual shapes. The mapping is in
+        # ``tritonblas.priority_configs.PRIORITY_CONFIGS`` and is keyed by
+        # (M, N, K, dtype_str).
+        self._priority_config: PriorityConfig | None = _priority_lookup(
+            self._m, self._n, self._k, self._a_dtype_str
+        )
+        if self._priority_config is not None:
+            pc = self._priority_config
+            # LDS sanity: only apply if the priority tile fits at the
+            # selector's num_stages. (PriorityConfig.num_stages is a hint;
+            # we honor it below.)
+            if check_triton_lds_capacity(pc.block_m, pc.block_n, pc.block_k,
+                                          bytes_a, bytes_b, lds_cap,
+                                          pc.num_stages):
+                self._result.config.mt.m = pc.block_m
+                self._result.config.mt.n = pc.block_n
+                self._result.config.mt.k = pc.block_k
+                self._num_stages = pc.num_stages
+            else:
+                # Tile would overflow LDS; skip override but keep the rest
+                # of the priority hints (num_warps/mfma/etc.) for callers
+                # that may still benefit. Set to None so callers don't
+                # think the override fired.
+                self._priority_config = None
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -262,6 +291,12 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+        # K-549: priority configs also pin GROUP_SIZE_M (workgroup mapping)
+        # because ``_select_ws_params`` resets it via ``min(8, tiles_m)``.
+        # Apply *after* ``_select_ws_params`` so we win the last write.
+        if self._priority_config is not None:
+            self._workgroup_mapping = self._priority_config.group_m
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

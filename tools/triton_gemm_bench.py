@@ -134,7 +134,30 @@ def calculate_lds_usage(block_m, block_n, block_k, elemBytes_a, elemBytes_b, num
     return LDS
 
 
-def get_full_tuning_space(num_cus):
+def _prepend_priority_configs(configs, M, N, K, dtype_str, num_cus):
+    """K-549: if a hipBLASLt-informed priority config exists for this
+    shape, push it to the front of the autotuner's config list so that it
+    is always considered (and evaluated first, which speeds the autotune
+    by warming the priority candidate's compile cache early).
+
+    No-op if the shape is not in the priority set, or if M/N/K/dtype_str
+    is None (autotuner mode without per-shape context).
+    """
+    if M is None or N is None or K is None or dtype_str is None:
+        return configs
+    try:
+        from tritonblas.priority_configs import lookup as _priority_lookup, as_autotune_dict
+    except Exception:
+        return configs
+    pc = _priority_lookup(M, N, K, dtype_str)
+    if pc is None:
+        return configs
+    seed = as_autotune_dict(pc, num_cus)
+    # Avoid duplicate insertion if the seed is already present.
+    return [seed] + [c for c in configs if c != seed]
+
+
+def get_full_tuning_space(num_cus, M=None, N=None, K=None, dtype_str=None):
     configs = []
 
     block_mn_range = [16, 32, 64, 128, 256]
@@ -163,6 +186,8 @@ def get_full_tuning_space(num_cus):
             'matrix_instr_nonkdim': matrix_instr_nonkdim, 'kpack': kpack, 'CHUNK_SIZE': chunk_size
         })
 
+    # K-549: prepend hipBLASLt-informed priority config (if any).
+    configs = _prepend_priority_configs(configs, M, N, K, dtype_str, num_cus)
     return configs
 
 
@@ -239,6 +264,13 @@ def get_tuning_space_with_selector(M, N, K, dtype_a, dtype_b, dtype_c, num_cus):
             'CHUNK_SIZE': chunk_size,   # TUNE
         })
 
+    # K-549: prepend hipBLASLt-informed priority config (if any). The
+    # selector path locks tile shape, but the priority config can still
+    # override num_warps/num_stages/matrix_instr/etc., so we let it
+    # in even though the BLOCK_M/N/K may differ from the selector pick.
+    from tritonblas.origami import OrigamiMatmulSelector as _SE
+    _dtype_str = _SE.dtype_to_str.get(dtype_a, None)
+    configs = _prepend_priority_configs(configs, M, N, K, _dtype_str, num_cus)
     return configs
 
 def prune_configs(M, N, K, configs, elemBytes_a, elemBytes_b):

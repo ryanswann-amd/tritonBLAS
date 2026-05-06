@@ -95,10 +95,19 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # K-549: honor priority configs (hipBLASLt-informed) when present;
+    # fall back to the historical defaults otherwise.
+    _pc = getattr(selector, "_priority_config", None)
+    if _pc is not None:
+        num_warps = _pc.num_warps
+        waves_per_eu = _pc.waves_per_eu
+        mfmaInstrSize = _pc.matrix_instr_nonkdim
+        kpack = _pc.kpack
+    else:
+        num_warps = 8
+        waves_per_eu = 0
+        mfmaInstrSize = 16
+        kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -241,10 +250,18 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # K-549: honor priority configs (hipBLASLt-informed) when present.
+    _pc = getattr(selector, "_priority_config", None)
+    if _pc is not None:
+        num_warps = _pc.num_warps
+        waves_per_eu = _pc.waves_per_eu
+        mfmaInstrSize = _pc.matrix_instr_nonkdim
+        kpack = _pc.kpack
+    else:
+        num_warps = 8
+        waves_per_eu = 0
+        mfmaInstrSize = 16
+        kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

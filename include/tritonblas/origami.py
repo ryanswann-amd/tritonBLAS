@@ -3,6 +3,7 @@ import itertools
 import torch
 import origami
 import math
+from functools import lru_cache
 from math import ceil
 
 
@@ -64,6 +65,7 @@ def check_triton_lds_capacity(
 _GFX942_LAST_WAVE_CU_COUNTS = (304, 80, 64)
 
 
+@lru_cache(maxsize=4096)
 def _sk_grid_from_geometry(
     M: int,
     N: int,
@@ -78,47 +80,98 @@ def _sk_grid_from_geometry(
     min_iters_per_cu: int = 8,
 ) -> int:
     """
-    Continuous StreamK grid heuristic — pure, no hardware dependencies.
+    Continuous StreamK grid heuristic -- pure, no hardware dependencies.
 
-    Replaces the prior discrete table of split factors {8, 6, 4, 3, 2, 1} and
-    tile fractions {0, 1/2, 1/8, 1/5, 1/4, 1/3} with a continuous formulation
-    that varies smoothly with problem size. The discrete tables produced
-    boundary-residual cliffs whenever K (or tile count) crossed a cutoff
-    between adjacent table entries, leaving 5-30% perf on the table at those
-    boundaries on observed sweep data.
+    Inputs
+    ------
+    ``M``, ``N``, ``K`` : int
+        Problem dimensions of the GEMM ``C[M,N] = A[M,K] @ B[K,N]``.
+    ``BLK_M``, ``BLK_N``, ``BLK_K`` : int
+        Macro-tile dims (per Triton kernel config).  ``ceil(M/BLK_M) *
+        ceil(N/BLK_N)`` is the number of output tiles.
+    ``cu_count`` : int
+        Number of compute units the kernel will launch onto.  On gfx942
+        MI300X this is 304; on MI210 80; on MI100/MI250 64 (per-XCD slice).
+    ``bytes_per_out_elem`` : int
+        Bytes per element of the C tensor (2 for bf16/fp16, 4 for f32, 1
+        for fp8).  Used by the workspace-overflow guard, which checks that
+        the per-WG partial-tile footprint
+        ``BLK_M * BLK_N * bytes_per_out_elem * sk_grid`` fits in
+        ``max_workspace``.
+    ``max_workspace`` (kw-only) : int
+        Per-WG StreamK partial-tile workspace budget in bytes.  Default
+        ``128 MiB``; matches the original discrete heuristic.
+    ``min_iters_per_cu`` (kw-only) : int
+        Minimum K-iters each split must execute to amortise launch +
+        epilogue overhead.  Default ``8``; matches the original discrete
+        cutoff.
+
+    Returns
+    -------
+    int
+        ``sk_grid`` satisfying ``1 <= sk_grid <= max(tiles, cu_count)``.
+
+    Background
+    ----------
+    Replaces the prior discrete table of split factors {8, 6, 4, 3, 2, 1}
+    and tile fractions {0, 1/2, 1/8, 1/5, 1/4, 1/3} with a continuous
+    formulation that varies smoothly with problem size.  The discrete
+    tables produced boundary-residual cliffs whenever K (or tile count)
+    crossed a cutoff between adjacent table entries, leaving 5-30 % perf
+    on the table at those boundaries on observed sweep data.
+
+    Historical context: K-535 first surfaced the boundary residuals on
+    one-shape-at-a-time investigations, K-542 reproduced them across a
+    wider sweep, and K-555 root-caused the pair (discrete-table cliffs +
+    a buggy unconditional cleanup) and designed this continuous
+    replacement.  See tickets K-535, K-542, K-555 for the full
+    investigation trail; the legacy heuristic is preserved verbatim in
+    :func:`_sk_grid_from_geometry_legacy` (same signature) for A/B
+    benchmarking.
 
     Two regimes:
 
-    * ``tiles < cu_count`` -- split-K case. Pick the largest integer factor
-      ``f`` satisfying both
+    * ``tiles < cu_count`` -- **split-K case**.  Pick the largest integer
+      factor ``f`` satisfying both
       ::
           tiles * f <= cu_count                  # don't oversubscribe
           iters_per_tile / f >= min_iters_per_cu # amortise launch + epilogue
 
-      and return ``sk_grid = tiles * f``. Both bounds are continuous in
-      ``K``, ``M``, ``N``, so ``f`` changes by 1 instead of jumping across
-      a discrete table. ``min_iters_per_cu = 8`` matches the threshold the
-      old discrete heuristic used.
+      and return ``sk_grid = tiles * f``.  Both bounds are continuous in
+      ``K``, ``M``, ``N``, so ``f`` changes by 1 instead of jumping
+      across a discrete table.
 
-    * ``tiles > cu_count`` -- wave-balance case. Set
+    * ``tiles > cu_count`` -- **wave-balance case**.  Set
       ::
           waves   = ceil(tiles / cu_count)
           sk_grid = ceil(tiles / waves)
 
       i.e. the grid that fills every wave evenly while keeping
-      ``sk_grid <= cu_count``. Last-wave occupancy now degrades smoothly
+      ``sk_grid <= cu_count``.  Last-wave occupancy now degrades smoothly
       with problem size instead of stepping at the 1/2, 1/3, 1/4, 1/5,
       1/8 cutoffs.
 
-    The previous unconditional cleanup ``if tiles % sk_grid != 0: sk_grid =
-    tiles`` -- which zeroed out the split on any remainder, ignoring its own
-    comment about workspace -- is corrected so the reset to ``tiles`` only
-    fires when the remainder also exceeds the per-WG workspace budget.
+    Workspace-overflow fallback
+    ---------------------------
+    The previous unconditional cleanup ``if tiles % sk_grid != 0:
+    sk_grid = tiles`` -- which zeroed out the split on any remainder,
+    ignoring its own comment about workspace -- is corrected so the reset
+    to ``tiles`` only fires when the remainder *also* causes the per-WG
+    partial-tile footprint to exceed ``max_workspace``.  This is the
+    single line that, by itself, was killing the split-K branch on
+    ``tiles < cu_count`` shapes (since ``(tiles*factor) % tiles != 0``
+    whenever ``factor > 1``).
 
-    The last-wave gfx942 hack and the workspace guard are preserved verbatim.
+    The last-wave gfx942 hack (clamp ``sk_grid`` to 256 / 64 when
+    ``tiles >= cu_count`` and the last-wave remainder is in
+    ``(0, 128)`` and ``cu_count`` is a known gfx942 value) is preserved
+    verbatim from the original heuristic; see
+    :data:`_GFX942_LAST_WAVE_CU_COUNTS`.
 
-    Returns an ``sk_grid`` integer satisfying
-    ``1 <= sk_grid <= max(tiles, cu_count)``.
+    This function is memoised with ``lru_cache(maxsize=4096)`` because
+    real workloads repeat the same GEMM shape thousands of times across
+    training iterations and the heuristic is on the per-dispatch hot
+    path.  All inputs are hashable (ints), so the cache key is exact.
     """
     tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
     iters_per_tile = max(1, ceil(K / BLK_K))
@@ -173,6 +226,88 @@ def _sk_grid_from_geometry(
         # Really bad last wave, which would have originally been compensated
         # for by changing tile size, but Triton tile sizes are limited.
         # gfx942-specific: clamp to a balanced grid for the known SKUs.
+        if (
+            0 < last_wave_remainder < 128
+            and cu_count in _GFX942_LAST_WAVE_CU_COUNTS
+        ):
+            sk_grid = 256 if cu_count == 304 else 64
+    return sk_grid
+
+
+def _sk_grid_from_geometry_legacy(
+    M: int,
+    N: int,
+    K: int,
+    BLK_M: int,
+    BLK_N: int,
+    BLK_K: int,
+    cu_count: int,
+    bytes_per_out_elem: int,
+    *,
+    max_workspace: int = 128 * 1024 * 1024,
+) -> int:
+    """
+    Legacy (pre-K-557) discrete-table StreamK grid heuristic.
+
+    Preserved verbatim as a sibling helper to :func:`_sk_grid_from_geometry`
+    so that benchmarks and unit tests can do A/B comparisons against the
+    original heuristic without re-pasting it (single source of truth).
+
+    Same signature as the new helper modulo the ``min_iters_per_cu`` knob
+    (the legacy code hard-coded ``8``).  This function is **not** wired
+    into the dispatcher; it exists purely for diagnostic / regression use
+    by ``scripts/bench_continuous_splitk.py`` and
+    ``scripts/test_continuous_splitk_heuristic.py``.
+
+    The two known issues this heuristic exhibits (both fixed in
+    :func:`_sk_grid_from_geometry`):
+
+    1. Discrete table cliffs at boundaries between adjacent split factors
+       / tile fractions (5-30 % perf left on the table at cutoffs).
+    2. The unconditional cleanup ``if tiles % sk_grid != 0: sk_grid =
+       tiles`` -- whose own comment promised a workspace check that was
+       never written -- which wiped out every non-divisor split.
+    """
+    split_factors = [8, 6, 4, 3, 2, 1]
+    tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
+
+    tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
+    sk_grid = tiles
+    iters_per_tile = max(1, ceil(K / BLK_K))
+
+    def _partial_tile_size(grid: int) -> int:
+        return BLK_M * BLK_N * bytes_per_out_elem * grid
+
+    if tiles > cu_count:
+        virt_cu_count = cu_count
+        min_even_tiles = tiles / virt_cu_count
+        for frac in tile_fractions:
+            frac_grid = int((tiles / (min_even_tiles + frac)) + 0.5)
+            if frac_grid <= 0:
+                continue
+            if (
+                tiles % frac_grid != 0
+                and _partial_tile_size(frac_grid) > max_workspace
+            ):
+                continue
+            if frac_grid <= virt_cu_count:
+                sk_grid = frac_grid
+                break
+    elif tiles < cu_count:
+        for factor in split_factors:
+            split_grid = tiles * factor
+            iters_per_cu = iters_per_tile // factor
+            if split_grid <= cu_count and iters_per_cu >= 8:
+                sk_grid = split_grid
+                break
+
+    # ORIGINAL (buggy) unconditional cleanup -- preserved here for fidelity
+    # to the legacy behaviour.  Fixed in _sk_grid_from_geometry.
+    if tiles % sk_grid != 0:
+        sk_grid = tiles
+
+    if tiles >= cu_count:
+        last_wave_remainder = tiles % cu_count
         if (
             0 < last_wave_remainder < 128
             and cu_count in _GFX942_LAST_WAVE_CU_COUNTS

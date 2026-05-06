@@ -55,12 +55,62 @@ from math import ceil
 # 256x256 fallback (below) is the more important structural fix.
 # Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
 _HIPBLASLT_SHAPE_OVERRIDES = {
+    # ---- K-545 entries (original) ----------------------------------------
     # 1024x8192x8192: structurally-justified — baseline 256x128x64 puts
     # the larger tile dim on the SHORT axis. Override aligns the larger
     # tile dim with the long N axis. Mechanism validated on g09u31 MI300X;
     # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
     (1024, 8192, 8192, "bf16"): (128, 256, 64),
     (1024, 8192, 8192, "fp16"): (128, 256, 64),
+
+    # ---- K-587 entries (extended overrides) ------------------------------
+    # Source: K-543 algos_local/algos_*.json `top_by_perf[0]` (hipBLASLt's
+    # offline-best tile per shape on MI300X). Triton requires tile dims to
+    # be powers of 2, so where hipBLASLt's pick is non-pow2 (e.g. 224, 192,
+    # 160) we use the in-range pow2 neighbor (128 or 256) that preserves
+    # the tile ORIENTATION (long-dim-aligned-to-long-axis). Tile orientation
+    # is the dominant structural lever per K-579 §1.
+
+    # 8192x1024x8192 (K-545 cohort): hipBLASLt top-1 = 128x256x64 (transpose
+    # orientation aligned with long N=8192). K-545 used 256x128x64 (the
+    # natural Origami pick) and got ratio ~0.78. K-579 §F2.f2 predicts the
+    # transpose closes part of the gap; remainder is codegen.
+    (8192, 1024, 8192, "bf16"): (128, 256, 64),
+    (8192, 1024, 8192, "fp16"): (128, 256, 64),
+
+    # 2048x4096x4096 (K-545 cohort): hipBLASLt top-1 bf16 = 128x256x64 in-
+    # range; fp16 perf-leader is 128x224x64 (non-pow2 → 128x256x64 is
+    # the in-range neighbor). bf16 already validated noise-bound at
+    # 128x256x64 in K-545 — so this entry primarily serves to disable the
+    # post-hoc 256x256 fallback for this shape.
+    (2048, 4096, 4096, "bf16"): (128, 256, 64),
+    (2048, 4096, 4096, "fp16"): (128, 256, 64),
+
+    # 4096x2048x4096 (K-545 cohort): transpose of 2048x4096x4096; hipBLASLt
+    # picks the transposed tile in turn.
+    (4096, 2048, 4096, "bf16"): (256, 128, 64),
+    (4096, 2048, 4096, "fp16"): (256, 128, 64),
+
+    # 6144x4096x4096 (K-543 sub-band-A): hipBLASLt top-1 bf16 = 192x224x64
+    # (non-pow2 → 128x256x64 in-range neighbor preserves the long-N
+    # orientation; symmetric 256x256x64 caused the 0.69 ratio at baseline).
+    (6144, 4096, 4096, "bf16"): (128, 256, 64),
+    (6144, 4096, 4096, "fp16"): (128, 256, 64),
+
+    # 4096x4096x16384 (K-543 sub-band-A): hipBLASLt top-1 = 256x224x64 for
+    # both dtypes (non-pow2 N=224 → 256x256x64 = K-545 fallback already
+    # in effect; entry kept for documentation).  No tile-shape lever is
+    # available for this shape inside the pow2 constraint; the kpack=2
+    # codegen lever (P2) is the only remaining win path.
+    (4096, 4096, 16384, "bf16"): (256, 256, 64),
+    (4096, 4096, 16384, "fp16"): (256, 256, 64),
+
+    # 8192x8192x4096 (K-543 sub-band-A): hipBLASLt top-1 = 256x224x64
+    # (non-pow2 → 256x256x64 already dispatched). Entry for documentation
+    # parity with the row above.
+    (8192, 8192, 4096, "bf16"): (256, 256, 64),
+    (8192, 8192, 4096, "fp16"): (256, 256, 64),
+
     # Other K-543 cohort shapes intentionally NOT overridden — see
     # lessons.md "K-545 / S-002" entry for the falsification record.
 }

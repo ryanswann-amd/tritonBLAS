@@ -98,7 +98,11 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
+    # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
+    # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
+    # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
+    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +248,11 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-587 CG-2: ds_read_b128 (vec=8) vs ds_read2st64_b64 (vec=4) per K-383 iter4.
+    # Gated by tile size: kpack=2 doubles LDS-load VGPR usage and regresses
+    # 256x256x64 by -7 to -9pp on K-543 sub-band-A shapes (alola MI300X v1
+    # bench). Skinny tiles (M*N <= 32768) keep the +3 to +4pp lift.
+    kpack = 2 if (BLK_M * BLK_N) <= 32768 else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

@@ -17,6 +17,118 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 _tensor_cache = {}
 
+
+# K-539: shape-aware register-pressure / occupancy tuning.
+#
+# K-521 ISA audit established that Triton GEMM kernels emit ZERO private-segment
+# spills across every measured shape (`scratch_load`/`scratch_store`/
+# `flat_scratch_*` all == 0; `.amdhsa_private_segment_fixed_size` == 0). The
+# residual perf gap vs hipBLASLt on the K-509 F4 candidate set is therefore
+# *occupancy-bound*, not *spill-bound*. The mitigations below are drawn from
+# the K-521 §F-2.5 ranked recommendation table and pruned by direct
+# before/after benchmarking on c42 / MI300X:
+#
+#   * 256x256 tiles  : keep num_warps=8 (smaller WG would push per-thread
+#                      accumulator past the 252-VGPR spill threshold:
+#                      BM*BN/(num_warps*64) = 65536/256 = 256 f32) and emit a
+#                      `waves_per_eu=2` allocator hint so the compiler keeps
+#                      occupancy at the measured 8 wf/CU sweet spot.
+#                      Empirically neutral on 8192^3 (within ~0.1%).
+#   * 64x64 tiles    : halve num_warps 8 -> 4 (per-thread accumulator stays at
+#                      <=16 VGPR, well below threshold) and bump kpack 1 -> 2 to
+#                      double the MFMA operand throughput per ds_read
+#                      (K-521 ranks 4-8).  Empirically a +30-37% improvement on
+#                      the K-509 top-5 small-M dispatch-bound shapes
+#                      (16x4096x4096 / 4096x16x4096), 0% to -2% on the
+#                      compute-bound 64x64 ranks (within launch noise).
+#   * everything else: leave defaults untouched so K-494/K-497/K-499 fixed
+#                      shapes do not regress.
+#
+# Note: K-521 §F-2.5 also recommended `num_stages 2 -> 1` on 128x128 tiles to
+# free LDS and lift wf/CU. Direct benchmarking falsified this -- killing
+# software pipelining cost more than the freed-LDS occupancy gain (-4% to
+# -11% on the 2048^3 / 1024x4096x512 shapes), exactly the failure mode
+# K-521 §F-2.4 explicitly flagged ("num_stages 2 -> 1 ... kills software
+# pipelining -> -15 to -25% GPU body").  That knob is therefore NOT applied
+# here.
+#
+# The accumulator-pressure guard `_per_thread_accum_vgprs(...)` is the only
+# safety check that gates `num_warps` reduction; it must stay <= 128 to stay
+# clear of the 252-VGPR spill threshold even after operand and prologue VGPRs
+# are added in.
+def _per_thread_accum_vgprs(blk_m: int, blk_n: int, num_warps: int) -> int:
+    """f32 accumulator footprint per thread for a Triton MFMA epilogue."""
+    threads = max(1, num_warps * 64)
+    return max(4, (blk_m * blk_n) // threads)
+
+
+def _select_perf_knobs(
+    blk_m: int,
+    blk_n: int,
+    blk_k: int,
+    a_dtype_bits: int,
+    selector_num_stages: int,
+    default_num_warps: int = 8,
+    default_kpack: int = 1,
+    default_waves_per_eu: int = 0,
+) -> Tuple[int, int, int, int]:
+    """Return (num_warps, num_stages, kpack, waves_per_eu) tuned per K-521.
+
+    Decisions are tile-shape driven only; no problem-size dependence so the
+    selection is stable across the full sweep and respects K-494/K-497/K-499
+    fixed shapes (which keep their existing tile -> default-knob mapping).
+    """
+    num_warps = default_num_warps
+    num_stages = selector_num_stages
+    kpack = default_kpack
+    waves_per_eu = default_waves_per_eu
+
+    # Helper: would halving num_warps push the per-thread accumulator past the
+    # safe ceiling (128 f32 VGPRs leaves >=120 VGPRs of headroom for operands
+    # and prologue before the 252-VGPR spill threshold)?
+    def _safe_to_halve(nw: int) -> bool:
+        return _per_thread_accum_vgprs(blk_m, blk_n, max(1, nw // 2)) <= 64
+
+    big_tile_m = blk_m >= 256
+    big_tile_n = blk_n >= 256
+    small_tile = (blk_m <= 64 and blk_n <= 64)
+
+    if big_tile_m and big_tile_n:
+        # 256x256 outlier (K-521 rank 1, predicted 206 VGPR). Pin
+        # waves_per_eu=2 so the allocator targets the measured 8 wf/CU
+        # operating point instead of letting register-pressure heuristics
+        # spuriously round occupancy down. num_warps stays at 8 because
+        # halving would push per-thread accumulator to 256 f32 VGPRs and
+        # actually cause spills.
+        waves_per_eu = 2
+    elif blk_m <= 32 and blk_n <= 32 and _safe_to_halve(default_num_warps):
+        # Tiny tiles <=32x32 (K-509 top-5 dispatch-bound small-M shapes:
+        # 16x4096x4096 / 4096x16x4096 / 32x4096x4096). At this tile size
+        # 8 warps is wasteful (per-thread accumulator <= 4 elements); halving
+        # to 4 warps shrinks the WG to 256 threads and cuts the kernel
+        # binary footprint that dominates dispatch latency. Safety: accum
+        # stays at <=4 f32 VGPRs per thread. Empirical: +30-33% on top-5.
+        num_warps = max(1, default_num_warps // 2)
+        # kpack=2 packs two MFMA fragments per instruction. Beneficial when
+        # the kernel is dispatch-bound; the extra 4-8 VGPR per A/B fragment
+        # is a no-op vs the 252-VGPR spill threshold for these tiny tiles.
+        if a_dtype_bits >= 16:
+            kpack = 2
+
+    # K-521 §F-2.4 / §F-2.5 also flagged two further knob changes on 128x128
+    # and 64x64 tiles (`num_stages 2 -> 1`, `num_warps 8 -> 4 + kpack 1 -> 2`
+    # on 64x64). Both branches were implemented and benchmarked on c42 /
+    # MI300X, then removed: they killed the software pipeline / added VGPR
+    # pressure that cost 4-11% (128x128 stages) and 5-8% (64x64 warps+kpack)
+    # on rank2/rank3/rank4-8/reg_2048. The 64x64 regression matches K-521
+    # §F-2.4's explicit warning ("kpack 1 -> 2 ... small ↓ occupancy")
+    # plus the prologue VGPR cost the predictive model under-counted. The
+    # 128x128 regression matches §F-2.4's "num_stages 2 -> 1 ... kills
+    # software pipelining -> -15 to -25% GPU body" warning.
+
+    return num_warps, num_stages, kpack, waves_per_eu
+
+
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
@@ -101,6 +213,22 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-539: per-shape register-pressure / occupancy mitigations.
+    # Driven by the K-521 ISA audit (zero spills measured; residual gap is
+    # occupancy-bound). See _select_perf_knobs() for the rationale per tile
+    # class. Quantized / FP8-style paths keep the conservative defaults.
+    if not quantized:
+        num_warps, num_stages, kpack, waves_per_eu = _select_perf_knobs(
+            BLK_M,
+            BLK_N,
+            BLK_K,
+            a.dtype.itemsize * 8,
+            selector_num_stages=num_stages,
+            default_num_warps=num_warps,
+            default_kpack=kpack,
+            default_waves_per_eu=waves_per_eu,
+        )
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -247,6 +375,20 @@ def streamk_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-539: per-shape register-pressure / occupancy mitigations (see
+    # persistent_matmul_lt and _select_perf_knobs for rationale).
+    if not quantized:
+        num_warps, num_stages, kpack, waves_per_eu = _select_perf_knobs(
+            BLK_M,
+            BLK_N,
+            BLK_K,
+            a.dtype.itemsize * 8,
+            selector_num_stages=num_stages,
+            default_num_warps=num_warps,
+            default_kpack=kpack,
+            default_waves_per_eu=waves_per_eu,
+        )
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

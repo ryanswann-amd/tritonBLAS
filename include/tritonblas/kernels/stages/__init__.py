@@ -75,6 +75,7 @@ from .matrix_view import (
     InputView, OutputView, ScaleView, BiasView,
     make_input_view, make_tensor_view, make_output_view,
     make_scale_view, make_bias_view,
+    apply_activation,
 )
 
 # Grid utilities (used by streamk_gemm, fp4_matmul, persistent_gemm_monolithic)
@@ -95,6 +96,8 @@ __all__ = [
     'make_output_view',
     'make_scale_view',
     'make_bias_view',
+    # Fused activation epilogue
+    'apply_activation',
     # Grid utilities
     'chiplet_transform',
     'chiplet_transform_chunked',

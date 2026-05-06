@@ -172,9 +172,9 @@ class ScaleView:
 class BiasView:
     """
     Bias vector view for GEMM epilogue.
-    
+
     Stores pointer to bias vector and dimension for bounds checking.
-    
+
     Attributes:
         ptr: Pointer to bias vector (length M, broadcast across columns)
         M: Number of rows (for bounds checking)
@@ -183,22 +183,22 @@ class BiasView:
     ptr: tl.tensor
     N: tl.tensor
     stride: tl.tensor
-    
+
     @triton.constexpr_function
     def __init__(self, ptr, N, stride):
         self.ptr = ptr
         self.N = N
         self.stride = stride
-    
+
     @triton.jit
     def apply(self, acc, tile: Tile):
         """
         Add bias vector to accumulator.
-        
+
         Args:
             acc: Accumulator tensor [BLOCK_M, BLOCK_N]
             tile: Tile with coordinates for indexing
-        
+
         Returns:
             Accumulator with bias added
         """
@@ -206,6 +206,90 @@ class BiasView:
         bias_vector = tl.load(self.ptr + rn * self.stride, mask=rn < self.N, other=0.0)
         acc = acc + bias_vector[None, :]
         return acc
+
+
+# =============================================================================
+# Fused activation epilogues (closes coverage gap vs hipBLASLt — see K-491)
+# =============================================================================
+#
+# hipBLASLt exposes 22 epilogue modes; before this change tritonblas exposed
+# only DEFAULT and BIAS (2 of 22).  This module adds the four pointwise
+# activation modes (RELU, GELU, SWISH/SiLU, SIGMOID).  When combined with the
+# existing BiasView these provide RELU_BIAS / GELU_BIAS / SWISH_BIAS /
+# SIGMOID_BIAS automatically, since the activation is applied AFTER the bias
+# add in OutputView.store (matching hipBLASLt's `hipblasLtEpilogue_t` order:
+# bias is applied first, then the activation).
+#
+# Activation strings accepted by ``OutputView.store(..., activation="..."):
+#
+#   "none"     — identity (no extra ops, hot path unchanged)
+#   "relu"     — max(0, x)
+#   "gelu"     — exact GELU using erf:  0.5 * x * (1 + erf(x / sqrt(2)))
+#   "gelu_tanh"— tanh-approx GELU (Tensile's geluAssembly equivalent):
+#                0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+#   "swish"    — x * sigmoid(x)        (a.k.a. SiLU; β=1 SWISH_EXT)
+#   "sigmoid"  — 1 / (1 + exp(-x))
+#
+# All variants run in fp32 in registers between bias add and the output-dtype
+# cast in OutputView.store, so they cost ~one VOP3 instruction per element and
+# add no extra HBM traffic.
+
+# Numerical constants for activation epilogues.  Wrapped in
+# ``triton.language.constexpr`` so they are visible to ``@triton.jit`` functions
+# (annotation-only constexpr is not allowed for module-level globals; see
+# https://github.com/triton-lang/triton/issues/4197).
+_GELU_TANH_C0 = tl.constexpr(0.7978845608028654)   # sqrt(2 / pi)
+_GELU_TANH_C1 = tl.constexpr(0.044715)
+_GELU_ERF_INV_SQRT2 = tl.constexpr(0.7071067811865475)  # 1 / sqrt(2)
+
+
+@triton.jit
+def apply_activation(acc, ACTIVATION: tl.constexpr):
+    """
+    Apply a fused pointwise activation in-register.
+
+    Computes in fp32 for numerical stability; the caller is expected to cast to
+    the output dtype after the activation.
+
+    Args:
+        acc: Pre-activation tensor (any 2D shape)
+        ACTIVATION: compile-time string selecting the activation
+
+    Returns:
+        Post-activation tensor in fp32
+    """
+    # Promote to fp32 for the transcendentals.  This is a no-op if acc is
+    # already fp32 (the common case for the GEMM accumulator).
+    x = acc.to(tl.float32)
+    if ACTIVATION == "none":
+        result = x
+    elif ACTIVATION == "relu":
+        result = tl.maximum(x, 0.0)
+    elif ACTIVATION == "gelu":
+        # Exact GELU via erf — matches torch.nn.functional.gelu(approximate="none")
+        result = 0.5 * x * (1.0 + tl.erf(x * _GELU_ERF_INV_SQRT2))
+    elif ACTIVATION == "gelu_tanh":
+        # Tanh-approx GELU — matches torch.nn.functional.gelu(approximate="tanh")
+        # and Tensilelite's geluAssembly (Activation.py:579-637).
+        # Use the identity tanh(z) = 2 * sigmoid(2z) - 1 to avoid relying on a
+        # libdevice tanh symbol whose path differs across Triton/ROCm versions
+        # (tl.extra.libdevice on CUDA, tl.extra.cuda.libdevice elsewhere).
+        x3 = x * x * x
+        inner = _GELU_TANH_C0 * (x + _GELU_TANH_C1 * x3)
+        tanh_inner = 2.0 * tl.sigmoid(2.0 * inner) - 1.0
+        result = 0.5 * x * (1.0 + tanh_inner)
+    elif ACTIVATION == "swish":
+        # SiLU / SWISH(β=1) — matches torch.nn.functional.silu
+        result = x * tl.sigmoid(x)
+    elif ACTIVATION == "sigmoid":
+        result = tl.sigmoid(x)
+    else:
+        # Fail loudly at compile time for typos
+        tl.static_assert(False, "unknown ACTIVATION: must be one of "
+                                "'none', 'relu', 'gelu', 'gelu_tanh', "
+                                "'swish', 'sigmoid'")
+        result = x
+    return result
 
 
 @aggregate
@@ -260,40 +344,54 @@ class OutputView:
         return ptrs, mask
     
     @triton.jit
-    def store(self, data, tile: Tile, mask=None, scale: ScaleView = None, bias: BiasView = None):
+    def store(self, data, tile: Tile, mask=None, scale: ScaleView = None,
+              bias: BiasView = None, ACTIVATION: tl.constexpr = "none"):
         """
         Store data to a tile with optional epilogue operations.
-        
-        Applies epilogue in order: scale -> bias -> type convert -> store
-        
+
+        Applies epilogue in order:
+            scale -> bias -> activation -> type convert -> store
+
+        The activation order matches hipBLASLt's `hipblasLtEpilogue_t`
+        semantics (e.g. `GELU_BIAS` = bias then GELU), so a tritonblas
+        ``store(..., bias=bv, ACTIVATION="gelu")`` is numerically equivalent
+        to a hipBLASLt `HIPBLASLT_EPILOGUE_GELU_BIAS` call.
+
         Args:
             data: Data to store [BLOCK_ROW, BLOCK_COL]
             tile: Tile with coordinates and shape
             mask: Optional mask (if None, computes from bounds)
             scale: Optional ScaleView for quantization scaling
             bias: Optional BiasView for bias addition
-        
+            ACTIVATION: Compile-time activation selector. One of
+                ``"none"`` (default), ``"relu"``, ``"gelu"``, ``"gelu_tanh"``,
+                ``"swish"`` (a.k.a. SiLU), or ``"sigmoid"``.
+
         Example::
-        
+
             # Simple store (no epilogue)
             tensorC.store(acc.to(C.type.element_ty), out_tile)
-            
-            # With full epilogue
-            tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+
+            # With full epilogue (closes Llama-2 FFN1 fusion gap)
+            tensorC.store(acc, out_tile, bias=bias_view, ACTIVATION="swish")
         """
         result = data
-        
+
         # Apply quantization scales if provided
         if scale is not None:
             result = scale.apply(result, tile)
-        
+
         # Add bias if provided
         if bias is not None:
             result = bias.apply(result, tile)
-        
+
+        # Apply fused activation (constexpr — no runtime cost when "none")
+        if ACTIVATION != "none":
+            result = apply_activation(result, ACTIVATION)
+
         # Type conversion to output dtype
         result = result.to(self.ptr.type.element_ty)
-        
+
         # Compute pointers and store
         ptrs, bounds_mask = self.tile_ptrs(tile)
         if mask is None:

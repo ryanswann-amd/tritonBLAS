@@ -66,6 +66,25 @@ def _make_matmul_selector(
     )
 
 
+_VALID_ACTIVATIONS = ("none", "relu", "gelu", "gelu_tanh", "swish", "sigmoid")
+
+
+def _check_activation(activation: str) -> str:
+    """Validate the activation kwarg before plumbing it into a Triton kernel.
+
+    Raising on the host side gives a much better traceback than the JIT
+    static_assert that fires inside ``apply_activation``.
+    """
+    if activation is None:
+        return "none"
+    if activation not in _VALID_ACTIVATIONS:
+        raise ValueError(
+            f"tritonblas: unknown activation {activation!r}; expected one of "
+            f"{_VALID_ACTIVATIONS}"
+        )
+    return activation
+
+
 def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -77,10 +96,17 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    activation: str = "none",
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    activation = _check_activation(activation)
+    if activation != "none" and work_stealing:
+        # Work-stealing kernel doesn't currently plumb ACTIVATION; fall back
+        # to the persistent kernel rather than silently dropping the fusion.
+        work_stealing = False
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n
@@ -195,6 +221,7 @@ def persistent_matmul_lt(
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ACTIVATION=activation,
         )
 
     return c
@@ -368,14 +395,24 @@ def streamk_matmul_lt(
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
-    enable_streamk=False, work_stealing=False
+    enable_streamk=False, work_stealing=False,
+    activation: str = "none",
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+
+    activation = _check_activation(activation)
+    if enable_streamk and activation != "none":
+        # Activation fusion is currently only wired into the persistent kernel
+        # (see persistent_matmul_lt).  Fall back rather than silently dropping.
+        enable_streamk = False
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+        return persistent_matmul_lt(
+            a, b, c, selector, config,
+            work_stealing=work_stealing, activation=activation,
+        )
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
@@ -750,4 +787,111 @@ def addmm(
             "automatic differentiation, but one of the arguments requires grad."
         )
     return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
+
+
+# =============================================================================
+# Fused-activation epilogue API (closes K-491 coverage gap vs hipBLASLt)
+# =============================================================================
+#
+# These helpers expose the new ``activation`` argument that ``OutputView.store``
+# now understands.  They are deliberately kept separate from ``matmul`` /
+# ``addmm`` so the existing ``triton_op``-registered schemas (and their
+# autograd setup) remain untouched.  Activation backward is not implemented; if
+# you need autograd, materialise the activation with ``torch.nn.functional``
+# after a regular ``matmul``/``addmm`` call.
+#
+# Equivalence with hipBLASLt:
+#
+#   matmul_activation(a, b, activation="relu")         ≡ HIPBLASLT_EPILOGUE_RELU
+#   matmul_activation(a, b, activation="gelu_tanh")    ≡ HIPBLASLT_EPILOGUE_GELU
+#   matmul_activation(a, b, activation="swish")        ≡ HIPBLASLT_EPILOGUE_SWISH_EXT(β=1)
+#   addmm_activation(bias, a, b, activation="relu")    ≡ HIPBLASLT_EPILOGUE_RELU_BIAS
+#   addmm_activation(bias, a, b, activation="gelu_tanh") ≡ HIPBLASLT_EPILOGUE_GELU_BIAS
+#   addmm_activation(bias, a, b, activation="swish")   ≡ HIPBLASLT_EPILOGUE_SWISH_BIAS_EXT
+def matmul_activation(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    activation: str = "none",
+    out: Optional[torch.Tensor] = None,
+    enable_streamk: bool = False,
+    work_stealing: bool = False,
+) -> torch.Tensor:
+    """Single-launch fused matmul + pointwise activation.
+
+    Equivalent to ``activation_fn(a @ b)`` but with the activation applied
+    in-register between the MFMA accumulator and the output store, saving
+    a full HBM round-trip and a kernel launch.
+
+    Args:
+        a, b: Input matrices ``(M, K)`` and ``(K, N)``.
+        activation: One of ``"none"``, ``"relu"``, ``"gelu"``, ``"gelu_tanh"``,
+            ``"swish"`` (SiLU), or ``"sigmoid"``.
+        out: Optional pre-allocated ``(M, N)`` output tensor.
+        enable_streamk: Ignored when ``activation != "none"`` — the StreamK
+            kernel does not yet plumb the fused activation; this falls back to
+            the persistent kernel rather than dropping the fusion silently.
+        work_stealing: Same fallback semantics as ``enable_streamk``.
+
+    Returns:
+        The output tensor (allocated if ``out is None``).
+    """
+    activation = _check_activation(activation)
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    if out is None:
+        out = a.new_empty(M, N)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=False)
+    config = matmul_preamble(selector) if work_stealing else None
+    return persistent_matmul_lt(
+        a, b, out, selector, config,
+        work_stealing=work_stealing, activation=activation,
+    )
+
+
+def addmm_activation(
+    bias: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    activation: str = "none",
+    out: Optional[torch.Tensor] = None,
+    enable_streamk: bool = False,
+    work_stealing: bool = False,
+) -> torch.Tensor:
+    """Single-launch fused bias-add + matmul + pointwise activation.
+
+    Computes ``activation_fn(bias + a @ b)`` with the bias broadcast across the
+    M dimension and the activation applied in-register, matching hipBLASLt's
+    ``HIPBLASLT_EPILOGUE_<ACT>_BIAS`` semantics.
+
+    Args:
+        bias: 1-D bias of length ``N``, broadcast across rows.
+        a, b: Input matrices ``(M, K)`` and ``(K, N)``.
+        activation: See :func:`matmul_activation`.
+        out: Optional pre-allocated ``(M, N)`` output tensor.
+        enable_streamk: See :func:`matmul_activation`.
+        work_stealing: See :func:`matmul_activation`.
+
+    Returns:
+        The output tensor (allocated if ``out is None``).
+    """
+    activation = _check_activation(activation)
+    assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+    assert bias.dim() == 1 and bias.shape[0] == N, (
+        f"bias must be 1-D of length N={N}, got shape {tuple(bias.shape)}"
+    )
+
+    if out is None:
+        out = a.new_empty(M, N)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=False)
+    config = matmul_preamble(selector) if work_stealing else None
+    return persistent_matmul_lt(
+        a, b, out, selector, config,
+        bias=bias, work_stealing=work_stealing, activation=activation,
+    )
 

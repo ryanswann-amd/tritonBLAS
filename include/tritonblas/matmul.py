@@ -36,6 +36,55 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+def _auto_streamk_for_small_n(
+    M: int,
+    N: int,
+    enable_streamk: bool,
+    device: torch.device,
+) -> bool:
+    """Auto-engage StreamK for small-N tail shapes (N <= 128).
+
+    The persistent kernel launches a grid of
+    ``ceil(M/BLK_M) * ceil(N/BLK_N)`` workgroups. For small-N shapes the
+    ``ceil(N/BLK_N)`` factor is at most 1-2, so the grid is dominated by
+    ``ceil(M/BLK_M)``. On MI300X (304 CUs) that leaves the chip almost
+    entirely idle for M ≲ 4096 with the larger-tile picks — a textbook
+    wave-occupancy starvation regime.
+
+    StreamK routes through ``_compute_sk_grid``, which can split work
+    along the K-dimension to fill the chip. Combined with the
+    `_compute_sk_grid` K-split floor relaxation in `origami.py`, this
+    auto-override closes the small-N gap to hipBLASLt with no impact on
+    N > 128 shapes (gate exits early).
+
+    Conservative gate: only override when
+      (i)   the caller did not explicitly set ``enable_streamk``,
+      (ii)  N <= 128, and
+      (iii) the estimated persistent grid would cover <= 25% of the CU
+            array (i.e. >= 75% of CUs would otherwise be idle).
+    The grid is estimated using a 128×128 tile (the common origami pick
+    for this cohort); the gate is dtype-independent so we do not need to
+    build a full selector to decide.
+
+    Args:
+        M, N: Output matrix dims.
+        enable_streamk: Caller-supplied flag — if True we keep it,
+            if False we may flip to True.
+        device: Torch device for CU-count introspection.
+
+    Returns:
+        Possibly-modified ``enable_streamk`` value.
+    """
+    if enable_streamk or N > 128:
+        return enable_streamk
+    persistent_grid_estimate = ((M + 127) // 128) * ((N + 127) // 128)
+    try:
+        cu_count = torch.cuda.get_device_properties(device).multi_processor_count
+    except Exception:
+        cu_count = 304  # MI300X default
+    return persistent_grid_estimate <= cu_count // 4
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -404,6 +453,8 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    enable_streamk = _auto_streamk_for_small_n(M, N, enable_streamk, a.device)
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -461,6 +512,8 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    enable_streamk = _auto_streamk_for_small_n(M, N, enable_streamk, a.device)
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
@@ -508,6 +561,8 @@ def matmul_a8w8(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    enable_streamk = _auto_streamk_for_small_n(M, N, enable_streamk, a.device)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

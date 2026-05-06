@@ -386,19 +386,50 @@ class OrigamiMatmulSelector:
                     sk_grid = frac_grid
                     break
 
-        # Fewer tiles than CUs: split along k-dimension up to some factor
-        elif tiles < cu_count:
+        # Fewer tiles than CUs: split along k-dimension up to some factor.
+        # Track whether we picked sk_grid via the K-split lower branch so
+        # we can apply the right post-check below — in this branch
+        # `split_grid = tiles * factor` is always a multiple of `tiles`
+        # by construction, so the upper-branch divisor invariant
+        # (`tiles % sk_grid == 0`) does NOT apply. Applying it would
+        # silently reset sk_grid back to `tiles` for every factor > 1 and
+        # neutralise the entire K-split.
+        chose_via_k_split = False
+        if tiles < cu_count:
+            # For small-N / skinny tail shapes (tiles << cu_count) the
+            # original `iters_per_cu >= 8` floor capped the K-split before
+            # the chip was filled — for tiles=1 on a 304-CU MI300X the
+            # autotuner could pick at most factor=2 (sk_grid=2) even when
+            # 302 CUs were idle. Adaptively relax the floor when there is
+            # significant coverage room so the chip fills.
+            #
+            # `coverage_room = cu_count // tiles` is how many factors we
+            # could in principle apply before exceeding the chip:
+            #   >= 32  ⇒ accept iters_per_cu >= 1 (maximum coverage)
+            #   >=  8  ⇒ accept iters_per_cu >= 2
+            #   else   ⇒ keep the original >= 8 floor (preserves large-tile
+            #            behavior; no change for N > 128 / square shapes).
+            coverage_room = cu_count // max(tiles, 1)
+            if coverage_room >= 32:
+                iters_floor = 1
+            elif coverage_room >= 8:
+                iters_floor = 2
+            else:
+                iters_floor = 8
+
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
 
-                if split_grid <= cu_count and iters_per_cu >= 8:
+                if split_grid <= cu_count and iters_per_cu >= iters_floor:
                     sk_grid = split_grid
+                    chose_via_k_split = True
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # Final check (upper branch only): if the chosen grid leaves a
+        # remainder, fall back to no split. Skipped for the K-split lower
+        # branch — see chose_via_k_split comment above.
+        if not chose_via_k_split and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

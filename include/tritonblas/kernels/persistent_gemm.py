@@ -54,6 +54,7 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
+    ACTIVATION: tl.constexpr = "none",
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -123,4 +124,5 @@ def persistent_matmul(
         # STORE RESULT: Epilogue (scale, bias, convert) handled by OutputView
         # Store Accumulator to output matrix C at pointers defined by out_tile
         # ════════════════════════════════════════════════════════════════════
-        tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+        tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view,
+                      ACTIVATION=ACTIVATION)

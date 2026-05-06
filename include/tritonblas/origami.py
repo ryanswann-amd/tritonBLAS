@@ -234,7 +234,18 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
+        # K-524 (NUDGE-AR): skip the unconditional 256x256 nudge for skinny
+        # problems where the C++ ranker's asymmetric tile is load-bearing.
+        # Promoting 128x256/256x128 -> 256x256 on a shape like 1024x8192 collapses
+        # the grid below CU count (e.g., 8x32=256 -> 4x32=128 tiles) and starves
+        # ~50% of the 304 MI300X CUs on a single wave, with no compute payoff.
+        # The aspect threshold (4.0) protects square / mildly-asymmetric shapes
+        # where the 256x256 nudge IS load-bearing (sub-band A) while releasing
+        # the asymmetric ranker pick on truly skinny shapes (sub-band B).
+        # See state/mc2/workspaces/K-518/output/PR_B_asymm_nudge_guard.patch.
+        prob_aspect = max(self._m, self._n) / max(1, min(self._m, self._n))
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+            prob_aspect < 4.0 and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
@@ -398,7 +409,13 @@ class OrigamiMatmulSelector:
 
         # Final check: if the chosen grid leaves a remainder AND
         # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # K-524 (skgrid_cleanup): tighten to match Branch A's L378-381 guard.
+        # Previously this revert was unconditional, which killed Branch B
+        # (`tiles*factor`) regardless of workspace fit. Branch B is precisely
+        # where K-split is most useful (tiles < cu_count -> single-wave under-
+        # subscription). Inert on production path (enable_streamk=False default)
+        # but removes a latent footgun for opt-in streamk callers.
+        if tiles % sk_grid != 0 and self._partial_tile_size(sk_grid) > max_workspace:
             sk_grid = tiles
 
         if tiles >= cu_count:

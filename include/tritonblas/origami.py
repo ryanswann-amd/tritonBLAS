@@ -7,6 +7,40 @@ import os
 from math import ceil
 
 
+# K-590 (parent S-002): targeted-fix attempt from K-581 residual taxonomy
+# synthesis. The K-579/K-581 dispatch design called for extending
+# `_block_mn_range` to include {160, 192, 224} and seeding
+# `_HIPBLASLT_SHAPE_OVERRIDES` with hipBLASLt's per-shape top-1 tiles —
+# 14 entries total, projected to add +5-7pp on K-567 cohort rows 3/6/7/8
+# and to unblock 6 K-543 sub-band-A rows whose hb top-1 was entirely
+# out-of-range. Empirically (paired baseline-vs-K590 bench on l20u31
+# MI300X, 30 iters, torch.cuda.Event timing): **all candidate tiles
+# fail at Triton compile time with `ValueError: Shape element 1 must
+# be a power of 2`** raised from `tl.zeros((BLOCK_M, BLOCK_N))` inside
+# `kernels/stages/gemm_context.py::init_accumulator`. Triton's IR
+# rejects non-pow2 accumulator shapes; the 14 hb top-1 tiles all use
+# at least one of {160, 192, 224}, none of which are powers of 2.
+#
+# Net K-590 outcome: the dispatch-side track is exhausted at the K-545
+# plateau. The taxonomy buckets reduce to:
+#   - codegen-pure (rows 1, 2, 5): no dispatch fix possible (same-tile
+#     gap is 2-3.6x; needs ds_read/s_waitcnt/MFMA scheduling work in
+#     Triton-AMD codegen — K-567 iter3 §6 tickets A/B).
+#   - codegen+headroom (rows 3, 6, 7, 8) and false-closure-hb (row 4):
+#     +5-7pp dispatch headroom blocked at Triton pow2 constraint;
+#     codegen residual still dominates at 2-3.6x even if dispatch
+#     headroom were unblocked.
+#   - search-space-hard (rows 9-14): hb top-1 tiles entirely
+#     non-pow2; tritonblas continues to dispatch 256x256x64 with
+#     ratio in 0.82-0.86 range. No dispatch fix possible.
+#
+# Code change scope of K-590: defensive `_is_pow2` guard on the
+# override table (turns the silent compile-time failure into an
+# import-time error that points at this comment), plus an explicit
+# code-comment recording the structural ceiling so future K-579/K-581
+# reruns do not repeat the attempt without first lifting the upstream
+# Triton-AMD pow2 constraint.
+#
 # K-545 (parent S-002): hipBLASLt-derived shape overrides for residual gap shapes.
 #
 # Source of the override-mechanism rationale: K-543 iter1 §F6 prediction —
@@ -55,15 +89,61 @@ from math import ceil
 # 256x256 fallback (below) is the more important structural fix.
 # Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
 _HIPBLASLT_SHAPE_OVERRIDES = {
+    # === K-545 entries (preserved) ===
     # 1024x8192x8192: structurally-justified — baseline 256x128x64 puts
     # the larger tile dim on the SHORT axis. Override aligns the larger
     # tile dim with the long N axis. Mechanism validated on g09u31 MI300X;
     # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
     (1024, 8192, 8192, "bf16"): (128, 256, 64),
     (1024, 8192, 8192, "fp16"): (128, 256, 64),
+    # === K-590 finding (no new entries added) ===
+    # K-590 attempted to seed the additional hipBLASLt top-1 tiles
+    # identified by K-543/K-567/K-579 (e.g. 128x224 for 1024x8192x8192,
+    # 192x160 for 4096x2048x4096, 256x224 for 8192x8192x4096) but ALL
+    # candidate tiles use at least one non-power-of-2 dimension
+    # (160, 192, or 224). Triton's IR enforces pow2 tile dimensions for
+    # `tl.zeros((BLOCK_M, BLOCK_N))` in the accumulator allocation
+    # (`kernels/stages/gemm_context.py::init_accumulator`); attempting
+    # any of these tiles raises `ValueError: Shape element 1 must be a
+    # power of 2` at Triton compile time. The K-579/K-581 design that
+    # extending the search space would unblock +5-7pp dispatch headroom
+    # is therefore **structurally blocked at the Triton-AMD compiler
+    # layer**, not at the LDS filter (the hypothesis K-579 iter1 OQ4
+    # raised). The K-545 entries above remain the only structurally
+    # valid (pow2) overrides for the K-543 residual cohort.
     # Other K-543 cohort shapes intentionally NOT overridden — see
-    # lessons.md "K-545 / S-002" entry for the falsification record.
+    # lessons.md "K-545 / S-002" entry for the falsification record,
+    # plus the K-590 finding above for the further-attempted dispatch
+    # entries that were blocked by Triton's pow2 constraint.
 }
+
+
+# K-590: defensive guard against future authors re-introducing non-pow2
+# tile dimensions into the override table. Triton's IR rejects any
+# `tl.zeros` allocation whose shape contains a non-power-of-2 element,
+# so an entry like `(2048, 4096, 4096, "fp16"): (128, 224, 64)` will
+# raise CompilationError at first dispatch instead of being caught here.
+# This assertion turns the silent dispatch-time failure into an
+# import-time failure with a pointer to the K-590 finding.
+def _is_pow2(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
+for _key, _tile in _HIPBLASLT_SHAPE_OVERRIDES.items():
+    _bm, _bn, _bk = _tile
+    if not (_is_pow2(_bm) and _is_pow2(_bn) and _is_pow2(_bk)):
+        raise ValueError(
+            f"_HIPBLASLT_SHAPE_OVERRIDES[{_key}] = {_tile} contains a "
+            f"non-power-of-2 dimension. Triton's `tl.zeros` accumulator "
+            f"allocation requires pow2 tile dims; non-pow2 tiles will "
+            f"fail at first dispatch with `ValueError: Shape element N "
+            f"must be a power of 2`. See K-590 finding in this file. "
+            f"Pow2 sizes <= 256 are limited to {{16, 32, 64, 128, 256}}; "
+            f"hipBLASLt's {{160, 192, 224}} tile widths are not "
+            f"reachable from tritonblas without upstream Triton-AMD "
+            f"work to lift the pow2 constraint or to add internal "
+            f"pad-and-mask in `init_accumulator`."
+        )
 
 
 def _hipblaslt_shape_override(
@@ -293,6 +373,24 @@ class OrigamiMatmulSelector:
         self._ACTIVE_CU = active_cus if active_cus is not None else self._N_CU
 
         # Create list of Origami config_t objects from defaults.
+        # NOTE (K-590, attempted but reverted): extending this menu to
+        # include {160, 192, 224} — the per-shape top-1 tile widths
+        # hipBLASLt picks for the K-567/K-543 residual cohorts —
+        # **fails at Triton compile time** with `ValueError: Shape
+        # element 1 must be a power of 2` from `tl.zeros((BLOCK_M,
+        # BLOCK_N))` inside `init_accumulator()` of
+        # `kernels/stages/gemm_context.py`. Triton's IR enforces pow2
+        # tile dimensions for accumulator allocation, so any non-pow2
+        # entry here propagates a hard failure even when Origami /
+        # the LDS filter would otherwise accept it. This is the
+        # **structural ceiling** on the K-579/K-581 "extend the
+        # search space" dispatch track: closing it requires either
+        # (a) lifting the pow2 constraint upstream in Triton-AMD's
+        # accumulator codegen, or (b) padding non-pow2 tiles to the
+        # next pow2 inside tritonblas with masking. Neither is in
+        # scope for K-590; the dispatch track is therefore exhausted
+        # at the K-545 plateau. See PR description and K-567 iter3
+        # §6 ticket-partition for the codegen-track follow-on.
         self._block_mn_range = [16, 32, 64, 128, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
         self._kernel_occupancy_range = [1]

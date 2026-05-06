@@ -233,13 +233,26 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
+        # K-539 / K-521 §F-3.2: heuristic to favor 256x256x64 tile, but ONLY
+        # when forcing this larger tile still leaves at least one full wave of
+        # work for the GPU. Without the tile-count guard, shapes like
+        # 2048x4096x512 collapse from 512 tiles (128x128x64) to 128 tiles
+        # (256x256x64), giving first-wave fill of only 128/304 = 42% on
+        # MI300X. The K-521 audit predicted +30-40% on the rank-1 candidate
+        # (2048x4096x512 fp16) by switching back to the smaller tile.
+        # Mitigation class: wave-underfill (NOT register-pressure -- K-521
+        # confirmed zero spills on every measured config).
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
-            self._result.config.mt.m = 256
-            self._result.config.mt.n = 256
-            self._result.config.mt.k = 64
+            tile_count_at_256 = ((self._m + 255) // 256) * ((self._n + 255) // 256)
+            n_cu = getattr(self._hardware, "N_CU", 304)
+            # Only force 256x256x64 if it still gives at least one full wave
+            # (>= N_CU tiles) so the GPU stays fully utilised.
+            if tile_count_at_256 >= n_cu:
+                self._result.config.mt.m = 256
+                self._result.config.mt.n = 256
+                self._result.config.mt.k = 64
 
         if streamk:
             self._grid = self._compute_sk_grid()

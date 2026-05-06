@@ -36,9 +36,12 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Function will behave like an LRU-Cache of heuristic results.
+# Saves ~155 µs per call for previously-seen (M, N, K, dtype, device) keys by
+# avoiding redundant OrigamiMatmulSelector construction. The selector is a
+# deterministic analytical model — caching it is safe across calls within a
+# single process. See K-500 (S-002) cold-start strategy doc.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,

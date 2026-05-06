@@ -82,4 +82,6 @@ setup(
     package_dir={"": "include"},
     cmdclass={"build_ext": CustomBuildExt},
     ext_modules=[Extension("_trigger_ext", sources=[])],
+    package_data={"tritonblas": ["data/*.csv"]},
+    include_package_data=True,
 )

@@ -5,3 +5,4 @@ from .matmul import addmm
 from .config import MatmulConfig, matmul_preamble
 from .bench import do_bench
 from .origami import OrigamiMatmulSelector
+from .prewarm import prewarm, load_playlist

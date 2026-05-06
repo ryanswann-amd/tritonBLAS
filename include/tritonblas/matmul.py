@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from . import warm_cache as _warm_cache
 
 
 
@@ -51,6 +52,29 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
+    # Warm-cache fast path: if a previous warmup() call has registered a
+    # neighbour for this (M, N, K, dtypes) bucket, use the K-NN-voted tile
+    # config and skip the (~20us) Origami search.  Crucially, the
+    # constexpr signature of the resulting kernel launch matches one
+    # already in Triton's on-disk cache, so the JIT cost is also avoided.
+    # When the cache is empty / disabled / no neighbour is close enough,
+    # this returns None and we fall through to the original Origami path
+    # so behaviour for never-warmed callers is unchanged.
+    warm = _warm_cache.lookup_warm_selector(
+        M,
+        N,
+        K,
+        a_dtype,
+        b_dtype,
+        c_dtype,
+        device,
+        mx_block_size=mx_block_size,
+        streamk=streamk,
+        num_stages=num_stages,
+    )
+    if warm is not None:
+        return warm
+
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
         M,

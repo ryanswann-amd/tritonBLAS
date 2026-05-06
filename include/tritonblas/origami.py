@@ -6,187 +6,53 @@ import math
 import os
 from math import ceil
 
+from .constraints import (
+    is_pow2 as _is_pow2,
+    is_triton_valid_block_tile as _is_triton_valid_block_tile,
+    kpack_for_dtype,
+)
 
-# K-590 (parent S-002): targeted-fix attempt from K-581 residual taxonomy
-# synthesis. The K-579/K-581 dispatch design called for extending
-# `_block_mn_range` to include {160, 192, 224} and seeding
-# `_HIPBLASLT_SHAPE_OVERRIDES` with hipBLASLt's per-shape top-1 tiles —
-# 14 entries total, projected to add +5-7pp on K-567 cohort rows 3/6/7/8
-# and to unblock 6 K-543 sub-band-A rows whose hb top-1 was entirely
-# out-of-range. Empirically (paired baseline-vs-K590 bench on l20u31
-# MI300X, 30 iters, torch.cuda.Event timing): **all candidate tiles
-# fail at Triton compile time with `ValueError: Shape element 1 must
-# be a power of 2`** raised from `tl.zeros((BLOCK_M, BLOCK_N))` inside
-# `kernels/stages/gemm_context.py::init_accumulator`. Triton's IR
-# rejects non-pow2 accumulator shapes; the 14 hb top-1 tiles all use
-# at least one of {160, 192, 224}, none of which are powers of 2.
+# Re-export (back-compat for callers that imported from origami).
+__all__ = [
+    "OrigamiMatmulSelector",
+    "kpack_for_dtype",
+    "estimate_triton_lds_bytes",
+    "check_triton_lds_capacity",
+]
+
+
+# hipBLASLt-derived shape overrides for shapes where the native Origami
+# pick is structurally wrong for the workload (e.g. it puts the larger
+# tile dim on the SHORT axis of a skinny matrix). The mechanism is left
+# in place so future audits can register additional empirically-validated
+# entries without touching the selector itself.
 #
-# Net K-590 outcome: the dispatch-side track is exhausted at the K-545
-# plateau. The taxonomy buckets reduce to:
-#   - codegen-pure (rows 1, 2, 5): no dispatch fix possible (same-tile
-#     gap is 2-3.6x; needs ds_read/s_waitcnt/MFMA scheduling work in
-#     Triton-AMD codegen — K-567 iter3 §6 tickets A/B).
-#   - codegen+headroom (rows 3, 6, 7, 8) and false-closure-hb (row 4):
-#     +5-7pp dispatch headroom blocked at Triton pow2 constraint;
-#     codegen residual still dominates at 2-3.6x even if dispatch
-#     headroom were unblocked.
-#   - search-space-hard (rows 9-14): hb top-1 tiles entirely
-#     non-pow2; tritonblas continues to dispatch 256x256x64 with
-#     ratio in 0.82-0.86 range. No dispatch fix possible.
+# Each entry has two bucket tags so future maintainers can extend
+# per-bucket logic without having to re-derive provenance:
 #
-# Code change scope of K-590: defensive `_is_pow2` guard on the
-# override table (turns the silent compile-time failure into an
-# import-time error that points at this comment), plus an explicit
-# code-comment recording the structural ceiling so future K-579/K-581
-# reruns do not repeat the attempt without first lifting the upstream
-# Triton-AMD pow2 constraint.
+#   "TILE-ORIENTATION": flip the asymmetric tile so the larger dim
+#       aligns with the long axis of the workload.
+#   "RANKING-OVERRIDE": pin a tile to suppress the post-hoc symmetric
+#       256x256 fallback below for shapes where the post-hoc dispatch
+#       is wrong (e.g. aspect_ratio < 4 with mid-aspect families).
 #
-# K-545 (parent S-002): hipBLASLt-derived shape overrides for residual gap shapes.
+# The post-hoc 256x256 fallback at the bottom of __init__ is the more
+# impactful structural change; the override table is reserved for
+# shapes where (a) the structural mismatch is unambiguous and (b) the
+# alternative tile is Triton-legal (pow2 BM/BN/BK — see
+# `is_triton_valid_block_tile`).
 #
-# Source of the override-mechanism rationale: K-543 iter1 §F6 prediction —
-# Origami's post-hoc 256x256 symmetric override at origami.py:236-242
-# suppresses the asymmetric tiles that hipBLASLt picks for skinny shapes.
-# Source of cohort: K-543 iter1 §F1 top-5 residual table from K-505 baseline
-# sweep (state/mc2/workspaces/K-543/output/iter1_broad_survey.md).
-#
-# *** EMPIRICAL OUTCOME (K-545 cohort_bench_with_override.csv vs
-# cohort_bench_baseline.csv vs cohort_bench_v2.csv on g09u31, MI300X) ***
-#
-# Across the 8 K-543 cohort shape×dtype rows, swapping Origami's pick for
-# the hipBLASLt-style asymmetric tile produced run-to-run perf deltas
-# inside the bench's noise floor (~±5pp). Two paired runs of the SAME
-# code on control shapes also drifted by 6-9pp on individual shapes,
-# confirming the noise level dominates the fix-vs-baseline signal at this
-# bench iteration count.
-#
-# Cohort findings (signed = mechanism is structurally correct, magnitude
-# = noise-bound):
-#   * 1024x8192x8192 (fp16+bf16): Origami baseline picks 256x128x64, the
-#     WRONG asymmetric direction (long axis is N, not M). Override forces
-#     128x256x64 to match the long axis. Structurally correct fix; perf
-#     signal in noise.
-#   * 8192x1024x8192 (fp16+bf16): Origami baseline ALREADY picks 256x128x64
-#     (the correct skinny-M direction). No override added — Origami's
-#     native pick is right.
-#   * 2048x4096x4096, 4096x2048x4096: Origami baseline picks 256x256x64
-#     (post-hoc override fires). Forcing 128x256x64 / 256x128x64 produced
-#     mixed deltas inside noise. NOT added to override table — gap is
-#     codegen-bound, not tile-bound.
-#
-# Conclusion: K-543 §F6 hypothesis (asymmetric-tile suppression is the
-# dominant cause of sub-band B residuals) is *partly* falsified. Origami
-# often picks the asymmetric tile natively, and even when forced the perf
-# delta is noise-bound. This is consistent with K-383 / K-543 §F7
-# codegen-bound finding for the residuals: the bottleneck is ds_read /
-# s_waitcnt scheduling and pointer-range/AGPR allocation in the
-# Triton-AMD codegen, NOT the tile choice. See lessons.md
-# "K-545 / S-002 — porting hipBLASLt tiles is noise-bound on MI300X".
-#
-# We retain only the structurally-justified override (1024x8192x8192
-# matching the long axis); the mechanism is left in place so future
-# K-543-style audits can add empirically-validated shape overrides without
-# code changes to the selector. The skinny-shape guard on the post-hoc
-# 256x256 fallback (below) is the more important structural fix.
-# Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to restore pre-K-545 behavior.
+# Set TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1 to disable.
 _HIPBLASLT_SHAPE_OVERRIDES = {
-    # === K-545 entries (preserved) ===
-    # 1024x8192x8192: structurally-justified — baseline 256x128x64 puts
-    # the larger tile dim on the SHORT axis. Override aligns the larger
-    # tile dim with the long N axis. Mechanism validated on g09u31 MI300X;
-    # perf delta inside noise floor (per K-545 cohort_bench_v2.csv).
-    (1024, 8192, 8192, "bf16"): (128, 256, 64),
-    (1024, 8192, 8192, "fp16"): (128, 256, 64),
-    # === K-590 finding (no non-pow2 entries) ===
-    # The K-579/K-581 dispatch design originally proposed seeding
-    # hipBLASLt's per-shape top-1 tiles for the K-543/K-567 residual
-    # cohort (e.g. 128x224 for 1024x8192x8192, 192x160 for
-    # 4096x2048x4096, 256x224 for 8192x8192x4096). All those candidate
-    # tiles use at least one non-power-of-2 dimension (160, 192, or
-    # 224). Triton's IR enforces pow2 tile dimensions for
-    # `tl.zeros((BLOCK_M, BLOCK_N))` in the accumulator allocation
-    # (`kernels/stages/gemm_context.py::init_accumulator`); they raise
-    # `ValueError: Shape element 1 must be a power of 2` at Triton
-    # compile time. The dispatch-side dispatch-headroom track is
-    # therefore **structurally blocked at the Triton-AMD compiler
-    # layer**, not at the LDS filter, until the upstream pow2
-    # constraint is lifted or `init_accumulator` learns to pad-and-mask.
-    #
-    # === K-590 / S-002 — pow2 entries from K-581 S1 (T1 + T2-b) ===
-    # The remaining lever for K-581's residual cohort is the entries
-    # below: each tile is a pow2 (128/256) flip of the asymmetric
-    # orientation that Origami's static cost model picks. Each entry
-    # is justified against hipBLASLt's algos top-1 by-perf data dumped
-    # in K-543 (`state/mc2/workspaces/K-543/output/algos_local/`):
-    #
-    #   T1 long-M skinny (M >> N) — flip Origami's 256x128 to 128x256
-    #   so the larger tile dim aligns with the long M axis. hb top-1
-    #   for 8192x1024x8192 {bf16,fp16} is 128x256x64 (864 / 871 TF).
-    #
-    #   T2-b RANKING-OVERRIDE — Origami's post-hoc 256x256 fallback
-    #   (origami.py L470-477) fires whenever aspect_ratio < 4 and one
-    #   Origami-picked dim is 256, suppressing the asymmetric tile
-    #   that hipBLASLt picks. For aspect_ratio=2 cohort rows (the
-    #   2048x4096x4096 / 4096x2048x4096 family) the post-hoc dispatch
-    #   is wrong; explicit override pins the tile so the post-hoc
-    #   never fires. hb top-1 in-pow2-range is 128x256x64 (799 / 790
-    #   TF) for the 2048x4096 family; the 4096x2048 family is the
-    #   transpose mirror.
-    #
-    # Predicted lift per K-581 §S1 (per-row +3-5pp on rows 1, 2, 5,
-    # 6, 7, 8 — MEDIUM confidence per the noise-floor caveats in
-    # K-545 PR description and K-573 §F5). The same-tile codegen gap
-    # (hb at the same tile is 2-3.6x faster than tritonblas — K-567
-    # §F2.2) caps total dispatch-side closure at ~10-15pp; the rest
-    # is codegen-bound and tracked in the codegen ticket family.
-    # Falsification gate (K-590 verify): regression > 3pp at any
-    # cohort row vs the K-545 baseline rolls back the offending entry.
-    (8192, 1024, 8192, "bf16"): (128, 256, 64),  # T1 long-M flip
-    (8192, 1024, 8192, "fp16"): (128, 256, 64),  # T1 long-M flip
-    (2048, 4096, 4096, "bf16"): (128, 256, 64),  # T2-b
-    (2048, 4096, 4096, "fp16"): (128, 256, 64),  # T2-b
-    (4096, 2048, 4096, "bf16"): (256, 128, 64),  # T2-b transpose mirror
-    (4096, 2048, 4096, "fp16"): (256, 128, 64),  # T2-b transpose mirror
-    # Other K-543 cohort shapes intentionally NOT overridden — see
-    # lessons.md "K-545 / S-002" entry for the falsification record,
-    # plus the K-590 finding above for the further-attempted dispatch
-    # entries that were blocked by Triton's pow2 constraint.
+    # 1024x8192x8192: TILE-ORIENTATION. Native Origami pick is
+    # 256x128x64, which puts the larger tile dim on the SHORT (M=1024)
+    # axis. Override aligns the larger dim with the long N axis.
+    # Mechanism validated on MI300X; per-shape perf delta inside the
+    # bench noise floor — shipped because the orientation argument is
+    # structural, not perf-tuned.
+    (1024, 8192, 8192, "bf16"): {"tile": (128, 256, 64), "bucket": "TILE-ORIENTATION"},
+    (1024, 8192, 8192, "fp16"): {"tile": (128, 256, 64), "bucket": "TILE-ORIENTATION"},
 }
-
-
-# K-590: single owner for the Triton-AMD pow2 tile-dim constraint.
-#
-# Triton's IR enforces power-of-2 shapes on every `tl.zeros((BLOCK_M,
-# BLOCK_N))` accumulator allocation; the constraint actually lives in
-# `kernels/stages/gemm_context.py::init_accumulator` (the
-# `tl.zeros((BLOCK_M, BLOCK_N), dtype=...)` call). A non-pow2 BLOCK_M
-# or BLOCK_N raises `ValueError: Shape element N must be a power of 2`
-# at first compile. The override-table lookup MUST mirror this
-# constraint before returning a tile to the dispatcher, otherwise the
-# compile error surfaces deep inside the Triton code path with no
-# pointer back to the override entry.
-#
-# This predicate is the single source of truth for "tile dim is
-# legal as a Triton accumulator BLOCK_*"; both the lookup-site guard
-# (`_hipblaslt_shape_override`) and the test suite import it. Do NOT
-# crash at import time on a bad table entry — the override table is
-# user-extensible per K-545 / S-002, and a bad entry should fail
-# *closed* (lookup returns None → native selector handles the shape)
-# rather than take down `import tritonblas` for every downstream
-# caller.
-def _is_pow2(n: int) -> bool:
-    return n > 0 and (n & (n - 1)) == 0
-
-
-def _is_triton_valid_block_tile(bm: int, bn: int, bk: int) -> bool:
-    """K-590: predicate matching the Triton-AMD `init_accumulator` pow2
-    constraint on `tl.zeros((BLOCK_M, BLOCK_N))`. Returns True iff a
-    `(BM, BN, BK)` triple can be safely passed to the Triton matmul
-    kernel; False means at least one dim is non-pow2 and the kernel
-    will fail at compile time. BK is included for symmetry — non-pow2
-    BK also fails Triton's accumulator-loop unrolling. Cross-ref:
-    `include/tritonblas/kernels/stages/gemm_context.py::init_accumulator`.
-    """
-    return _is_pow2(bm) and _is_pow2(bn) and _is_pow2(bk)
 
 
 def _hipblaslt_shape_override(
@@ -200,43 +66,44 @@ def _hipblaslt_shape_override(
     lds_cap: int,
     num_stages: int,
 ):
-    """Return (BM, BN, BK) override tile for shapes where hipBLASLt is known
-    to outperform Origami's selection by a wide margin, or None if no
-    override applies.
+    """Return ``(BM, BN, BK)`` override tile for shapes registered in
+    ``_HIPBLASLT_SHAPE_OVERRIDES``, or ``None`` if no override applies.
 
-    Falls back silently (returns None) when:
-      - shape is not in the override table,
-      - the override would exceed the LDS budget for current num_stages,
-      - the user disables overrides via TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1.
+    Falls back silently (returns ``None``) when:
 
-    K-545 / S-002 — see _HIPBLASLT_SHAPE_OVERRIDES docstring above.
+      * shape is not in the override table,
+      * the override would exceed the LDS budget for current num_stages,
+      * the override tile is not Triton-legal (non-pow2 BM/BN/BK — see
+        :func:`tritonblas.constraints.is_triton_valid_block_tile`),
+      * the user disables overrides via
+        ``TRITONBLAS_DISABLE_SHAPE_OVERRIDES=1``.
+
+    See the ``_HIPBLASLT_SHAPE_OVERRIDES`` docstring above.
     """
     if os.environ.get("TRITONBLAS_DISABLE_SHAPE_OVERRIDES", "0") == "1":
         return None
     # Only fp16 / bf16 covered today; the FP8 / FP4 paths use different
     # selectors and need their own override tables.
     if a_dtype_str not in ("fp16", "bf16", "f16", "bf16"):
-        # Normalize: matmul.py stores torch dtype mapped via dtype_to_str
-        # which returns "f16"/"bf16" — handle both common spellings.
         if a_dtype_str not in ("f16", "bf16"):
             return None
     # The override table is keyed by ("fp16","bf16") for human readability;
     # normalize the lookup key to match.
     key_dtype = "bf16" if "b" in a_dtype_str.lower() else "fp16"
     key = (m, n, k, key_dtype)
-    tile = _HIPBLASLT_SHAPE_OVERRIDES.get(key)
-    if tile is None:
+    entry = _HIPBLASLT_SHAPE_OVERRIDES.get(key)
+    if entry is None:
         return None
-    bm, bn, bk = tile
-    # K-590: fail-closed pow2 guard. If a future contributor adds an
-    # entry that hipBLASLt likes (e.g. (128, 224, 64)) but Triton's
+    bm, bn, bk = entry["tile"]
+    # Fail-closed pow2 guard. If a future contributor adds an entry that
+    # hipBLASLt likes (e.g. (128, 224, 64)) but Triton's
     # `init_accumulator` rejects, skip the override and let the native
     # selector handle the shape — do NOT raise from inside dispatch.
     if not _is_triton_valid_block_tile(bm, bn, bk):
         return None
     if not check_triton_lds_capacity(bm, bn, bk, bytes_a, bytes_b, lds_cap, num_stages):
         return None
-    return tile
+    return (bm, bn, bk)
 
 
 def estimate_triton_lds_bytes(
@@ -422,24 +289,21 @@ class OrigamiMatmulSelector:
         self._ACTIVE_CU = active_cus if active_cus is not None else self._N_CU
 
         # Create list of Origami config_t objects from defaults.
-        # NOTE (K-590, attempted but reverted): extending this menu to
-        # include {160, 192, 224} — the per-shape top-1 tile widths
-        # hipBLASLt picks for the K-567/K-543 residual cohorts —
-        # **fails at Triton compile time** with `ValueError: Shape
+        # NOTE: extending this menu to include {160, 192, 224} — the
+        # per-shape top-1 tile widths hipBLASLt picks for skinny shapes
+        # — fails at Triton compile time with `ValueError: Shape
         # element 1 must be a power of 2` from `tl.zeros((BLOCK_M,
         # BLOCK_N))` inside `init_accumulator()` of
         # `kernels/stages/gemm_context.py`. Triton's IR enforces pow2
         # tile dimensions for accumulator allocation, so any non-pow2
-        # entry here propagates a hard failure even when Origami /
-        # the LDS filter would otherwise accept it. This is the
-        # **structural ceiling** on the K-579/K-581 "extend the
-        # search space" dispatch track: closing it requires either
-        # (a) lifting the pow2 constraint upstream in Triton-AMD's
-        # accumulator codegen, or (b) padding non-pow2 tiles to the
-        # next pow2 inside tritonblas with masking. Neither is in
-        # scope for K-590; the dispatch track is therefore exhausted
-        # at the K-545 plateau. See PR description and K-567 iter3
-        # §6 ticket-partition for the codegen-track follow-on.
+        # entry here propagates a hard failure even when Origami / the
+        # LDS filter would otherwise accept it. Closing this requires
+        # either lifting the pow2 constraint upstream in Triton-AMD's
+        # accumulator codegen, or padding non-pow2 tiles to the next
+        # pow2 inside tritonblas with masking. Until then, the menu
+        # below MUST contain only pow2 dims; the post-init assertion
+        # at the bottom of this constructor enforces that invariant
+        # on the FINAL pick (in case future code paths mutate it).
         self._block_mn_range = [16, 32, 64, 128, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
         self._kernel_occupancy_range = [1]
@@ -484,12 +348,11 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # K-545: Apply hipBLASLt-derived shape override BEFORE the symmetric
-        # 256x256 fallback heuristic. This seeds the dispatcher with tiles
-        # that hipBLASLt picks for shapes where Origami's choice underperforms
-        # by >30 percentage points (per K-543 iter1 cohort table; F6 prediction
-        # that asymmetric tiles in `_block_mn_range` are suppressed by the
-        # post-hoc 256x256 override below).
+        # Apply hipBLASLt-derived shape override BEFORE the symmetric
+        # 256x256 fallback heuristic. This seeds the dispatcher with
+        # tiles for shapes where Origami's choice is structurally
+        # mis-oriented (e.g. larger tile dim on the SHORT axis of a
+        # skinny matrix). See `_HIPBLASLT_SHAPE_OVERRIDES` docstring.
         override = _hipblaslt_shape_override(
             self._m, self._n, self._k,
             self._a_dtype_str, self._b_dtype_str,
@@ -498,10 +361,10 @@ class OrigamiMatmulSelector:
         if override is not None:
             self._result.config.mt.m, self._result.config.mt.n, self._result.config.mt.k = override
         else:
-            # K-545: Heuristic to favor 256x256x64 tile when close, BUT skip
-            # for skinny shapes (M/N or N/M >= 4). Skinny shapes benefit from
-            # asymmetric tiles like 128x256x64 or 256x128x64 that hipBLASLt
-            # picks but Origami's symmetric override historically discarded.
+            # Heuristic to favor 256x256x64 tile when close, BUT skip for
+            # skinny shapes (M/N or N/M >= 4). Skinny shapes benefit from
+            # asymmetric tiles like 128x256x64 or 256x128x64 that the
+            # symmetric override would otherwise discard.
             aspect_ratio = max(self._m, self._n) / max(1, min(self._m, self._n))
             is_skinny = aspect_ratio >= 4
             if (not is_skinny and
@@ -511,6 +374,30 @@ class OrigamiMatmulSelector:
                 self._result.config.mt.m = 256
                 self._result.config.mt.n = 256
                 self._result.config.mt.k = 64
+
+        # Final fail-closed pow2 enforcement on the selector's pick. The
+        # config menu above is built from pow2 ranges, the override
+        # lookup is pow2-guarded, and the post-hoc 256x256 fallback only
+        # rewrites to pow2 dims; this assertion exists so that if a
+        # future code path (override extension, new heuristic, autotune
+        # path) mutates the final pick to a non-pow2 tile, the failure
+        # surfaces here at dispatch time with a clear message rather
+        # than as a `ValueError: Shape element N must be a power of 2`
+        # raised from inside `tl.zeros` deep in the Triton compiler.
+        # See `tritonblas.constraints.is_triton_valid_block_tile` for
+        # the constraint's single owner.
+        _bm = self._result.config.mt.m
+        _bn = self._result.config.mt.n
+        _bk = self._result.config.mt.k
+        if not _is_triton_valid_block_tile(_bm, _bn, _bk):
+            raise ValueError(
+                f"OrigamiMatmulSelector picked non-pow2 tile "
+                f"(BLOCK_M, BLOCK_N, BLOCK_K) = ({_bm}, {_bn}, {_bk}) for "
+                f"shape M={self._m}, N={self._n}, K={self._k}, "
+                f"dtype={self._a_dtype_str}. Triton's `init_accumulator` "
+                f"requires pow2 tile dims; see "
+                f"`tritonblas.constraints.is_triton_valid_block_tile`."
+            )
 
         if streamk:
             self._grid = self._compute_sk_grid()

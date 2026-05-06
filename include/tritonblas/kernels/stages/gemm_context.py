@@ -150,10 +150,14 @@ class GemmContext:
         Note:
             Triton's IR requires `tl.zeros` shape elements to be powers of 2.
             BLOCK_M / BLOCK_N originating from the dispatcher must therefore be
-            pow2; the `tritonblas.origami._is_triton_valid_block_tile` predicate
-            (used by `_hipblaslt_shape_override`) is the single owner of this
-            constraint on the dispatch side. See K-590 finding in `origami.py`
-            for the rationale and prior empirical validation.
+            pow2. The single owner of that constraint on the dispatch side is
+            `tritonblas.constraints.is_triton_valid_block_tile`; both the
+            override-table lookup (`_hipblaslt_shape_override`) and the
+            final-pick assertion in `OrigamiMatmulSelector.__init__` import
+            it from there. Any change to the upstream Triton-AMD accumulator
+            shape constraint MUST be reflected in
+            `tritonblas/constraints.py` so the dispatch-side predicate
+            cannot drift.
         """
         return tl.zeros((self.block_m, self.block_n), dtype=self.acc_dtype)
     

@@ -11,6 +11,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
+from .constraints import kpack_for_dtype
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -98,14 +99,12 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-590 / K-581 S2 (T5a) — `kpack=2` for fp16/bf16 only. K-383 §4.1
-    # measured +3-6pp same-tile lift on the K-545 cohort residual rows;
-    # the dtype gate keeps fp8/fp4 paths on the existing kpack=1 setting
-    # (gfx950 clamps kpack automatically per K-383 iter3 §1, so this
-    # patch is a no-op there). Cross-ref: K-581 implementation_plan §S2,
-    # K-383 iter4 §4.1 corrected diff (TWO sites, not one — see also
-    # streamk_matmul_lt below).
-    kpack = 2 if a.dtype in (torch.float16, torch.bfloat16) else 1
+    # Centralized kpack policy (see `tritonblas.constraints.kpack_for_dtype`).
+    # Passes the selected tile so the helper can apply the
+    # asymmetric-tile gate that captures the residual cohort win
+    # (256x128 / 128x256) without the symmetric-tile regression
+    # measured at 256x256x64 on 8192x8192x8192.
+    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -251,10 +250,10 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-590 / K-581 S2 (T5a) — see persistent_matmul_lt above for the
-    # rationale; this is the second of the two kpack sites K-383 §4.1
-    # called out (the streamk path).
-    kpack = 2 if a.dtype in (torch.float16, torch.bfloat16) else 1
+    # Centralized kpack policy (see `tritonblas.constraints.kpack_for_dtype`).
+    # Passes the selected tile so the helper can apply the
+    # asymmetric-tile gate; same rationale as `persistent_matmul_lt`.
+    kpack = kpack_for_dtype(a.dtype, BLK_M, BLK_N)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

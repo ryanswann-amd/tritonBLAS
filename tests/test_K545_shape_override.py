@@ -108,7 +108,8 @@ def test_override_registry_well_formed():
     `_block_mn_range x _block_k_range` search space."""
     valid_mn = {16, 32, 64, 128, 256}
     valid_k = {16, 32, 64, 128, 256, 512}
-    for key, (bm, bn, bk) in _HIPBLASLT_SHAPE_OVERRIDES.items():
+    for key, _entry in _HIPBLASLT_SHAPE_OVERRIDES.items():
+        bm, bn, bk = _entry["tile"] if isinstance(_entry, dict) else _entry
         m, n, k, dtype = key
         assert bm in valid_mn, f"{key} BM={bm} outside _block_mn_range"
         assert bn in valid_mn, f"{key} BN={bn} outside _block_mn_range"

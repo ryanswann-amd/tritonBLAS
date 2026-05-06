@@ -142,8 +142,9 @@ class ScheduleContext:
         pid_n = (tile_id % num_pid_in_group) // group_size_m
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-        return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n)
-    
+        return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n,
+                    self.ctx.even_m, self.ctx.even_n)
+
     @triton.jit
     def get_tile_from_coord(self, pid_m, pid_n):
         """
@@ -156,8 +157,9 @@ class ScheduleContext:
         Returns:
             Tile: Tile object with the given coordinates and ctx block sizes
         """
-        return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n)
-    
+        return Tile(pid_m, pid_n, self.ctx.block_m, self.ctx.block_n,
+                    self.ctx.even_m, self.ctx.even_n)
+
     @triton.jit
     def _tile_idx_to_coord(self, tile_id):
         """

@@ -52,6 +52,8 @@ def persistent_matmul(
     CACHE_MODIFIER_B: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    EVEN_M: tl.constexpr = False,
+    EVEN_N: tl.constexpr = False,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
 ):
@@ -97,6 +99,7 @@ def persistent_matmul(
         GROUP_SIZE_M, CHUNK_SIZE,
         CACHE_MODIFIER_A, CACHE_MODIFIER_B,
         acc_dtype, ALLOW_TF32, EVEN_K, QUANTIZED,
+        EVEN_M, EVEN_N,
     )
     
     # ════════════════════════════════════════════════════════════════════════

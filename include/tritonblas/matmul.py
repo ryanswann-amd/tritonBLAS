@@ -153,6 +153,14 @@ def persistent_matmul_lt(
     total_tiles = total_blocks_M * total_blocks_N
     total_programs = total_tiles
     even_k = K % BLK_K == 0
+    # When M and N are exactly divisible by BLOCK_M / BLOCK_N, the per-tile
+    # bounds mask + Barrett `% M`, `% N` in `Tile.layout()` are pure waste.
+    # Threading these constexpr flags through the modular ``persistent_matmul``
+    # kernel lets it skip the epilogue VALU tax.  The WS-persistent kernel
+    # (`ws_persistent_matmul`) is monolithic and uses its own mask path, so we
+    # intentionally do NOT pass these flags through that call site.
+    even_m = M % BLK_M == 0
+    even_n = N % BLK_N == 0
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -246,6 +254,8 @@ def persistent_matmul_lt(
             CHUNK_SIZE=chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,
+            EVEN_M=even_m,
+            EVEN_N=even_n,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,

@@ -46,23 +46,32 @@ class Tile:
     pid_n: tl.tensor  # Tile coordinate in N dimension
     block_m: tl.constexpr  # Block size M
     block_n: tl.constexpr  # Block size N
-    
+    even_m: tl.constexpr   # True iff row dim is divisible by block_m
+    even_n: tl.constexpr   # True iff col dim is divisible by block_n
+
     @triton.constexpr_function
-    def __init__(self, pid_m, pid_n, block_m, block_n):
+    def __init__(self, pid_m, pid_n, block_m, block_n, even_m=False, even_n=False):
         """
         Create a tile with runtime coordinates and compile-time sizes.
-        
+
         Args:
             pid_m: Tile coordinate in M dimension
             pid_n: Tile coordinate in N dimension
             block_m: Block size in M dimension (constexpr)
             block_n: Block size in N dimension (constexpr)
+            even_m: True iff the row dim later passed to ``layout()`` is
+                divisible by ``block_m``; enables the fast path that skips
+                the bounds mask and Barrett modulo (constexpr, default False)
+            even_n: True iff the col dim later passed to ``layout()`` is
+                divisible by ``block_n``; same fast-path gate (default False)
         """
         self.pid_m = pid_m
         self.pid_n = pid_n
         self.block_m = tl.constexpr(block_m)
         self.block_n = tl.constexpr(block_n)
-    
+        self.even_m = tl.constexpr(even_m)
+        self.even_n = tl.constexpr(even_n)
+
     @triton.jit
     def indices(self):
         """
@@ -95,20 +104,27 @@ class Tile:
         """
         rm, rn = self.indices()
         # ═══════════════════════════════════════════════════════════════════
-        # MASK COMPUTATION: Use raw indices BEFORE modulo wrapping
+        # FAST PATH: when both dims are exactly divisible by their block
+        # sizes, every `rm < M` / `rn < N` is True and `rm % M`, `rn % N`
+        # are identity ops. Skip both the bounds mask and the Barrett-style
+        # modulo at compile time to remove the per-tile epilogue VALU tax.
         # ═══════════════════════════════════════════════════════════════════
-        # The mask must be computed from the original indices to correctly
-        # identify out-of-bounds elements. After modulo, all indices would
-        # be < M and < N, making the mask useless.
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # INDEX WRAPPING: Apply modulo for pointer computation
-        # ═══════════════════════════════════════════════════════════════════
-        # The modulo + max_contiguous optimization helps with memory access
-        # patterns, but must come AFTER mask computation.
-        rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
-        rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
+        if self.even_m and self.even_n:
+            mask = tl.full((self.block_m, self.block_n), 1, tl.int1)
+            rm = tl.max_contiguous(tl.multiple_of(rm, self.block_m), self.block_m)
+            rn = tl.max_contiguous(tl.multiple_of(rn, self.block_n), self.block_n)
+        else:
+            # ═══════════════════════════════════════════════════════════════
+            # SLOW PATH: original behaviour for partially-aligned dims.
+            # The mask must be computed from raw indices BEFORE modulo so it
+            # correctly identifies out-of-bounds elements; after modulo every
+            # index would be < M and < N, making the mask useless.
+            # ═══════════════════════════════════════════════════════════════
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            # The modulo + max_contiguous optimization helps with memory
+            # access patterns, but must come AFTER mask computation.
+            rm = tl.max_contiguous(tl.multiple_of(rm % M, self.block_m), self.block_m)
+            rn = tl.max_contiguous(tl.multiple_of(rn % N, self.block_n), self.block_n)
         return rm, rn, mask
     
     @triton.jit

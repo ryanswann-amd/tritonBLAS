@@ -85,7 +85,10 @@ class GemmContext:
     allow_tf32: tl.constexpr
     even_k: tl.constexpr
     quantized: tl.constexpr
-    
+    # Per-output-dim divisibility (skip mask + modulo in epilogue when True).
+    even_m: tl.constexpr
+    even_n: tl.constexpr
+
     @triton.constexpr_function
     def __init__(
         self,
@@ -102,6 +105,8 @@ class GemmContext:
         allow_tf32=True,
         even_k=True,
         quantized=False,
+        even_m=False,
+        even_n=False,
     ):
         """
         Create a GEMM context with all configuration parameters.
@@ -120,6 +125,11 @@ class GemmContext:
             allow_tf32: Allow TF32 for matmul (default: True)
             even_k: Whether K is evenly divisible by BLOCK_K (default: True)
             quantized: Use int32 accumulation for quantized inputs (default: False)
+            even_m: Whether M is evenly divisible by BLOCK_M; when True, the
+                epilogue store skips the bounds mask + Barrett modulo
+                (default: False)
+            even_n: Whether N is evenly divisible by BLOCK_N; same fast path
+                gate as even_m (default: False)
         """
         self.block_m = tl.constexpr(block_m)
         self.block_n = tl.constexpr(block_n)
@@ -134,7 +144,9 @@ class GemmContext:
         self.allow_tf32 = tl.constexpr(allow_tf32)
         self.even_k = tl.constexpr(even_k)
         self.quantized = tl.constexpr(quantized)
-    
+        self.even_m = tl.constexpr(even_m)
+        self.even_n = tl.constexpr(even_n)
+
     @triton.jit
     def init_accumulator(self):
         """

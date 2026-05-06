@@ -397,9 +397,18 @@ class OrigamiMatmulSelector:
                     break
 
         # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
+        # workspace exceeds what the problem allows, fall back to no split.
+        #
+        # The original code dropped the workspace clause from the AND
+        # entirely, so any non-zero remainder unconditionally nullified
+        # branch-B's K-split for under-subscribed shapes (tiles<cu_count,
+        # e.g. 2048x2048, 3072x3072) and clamped branch-A grids back to
+        # ``tiles`` whenever ``tiles % sk_grid`` was non-zero.  Restore
+        # the workspace check so the heuristic choice is preserved when
+        # it fits.
         if tiles % sk_grid != 0:
-            sk_grid = tiles
+            if self._partial_tile_size(sk_grid) > max_workspace:
+                sk_grid = tiles
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count

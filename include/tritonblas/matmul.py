@@ -26,6 +26,66 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+def _maybe_promote_to_streamk(M: int, N: int, K: int, a_dtype, b_dtype, c_dtype,
+                                device, selector_persistent):
+    """Return a streamk-aware selector when (M,N,K) genuinely benefits from
+    routing through the Stream-K kernel, otherwise ``None``.
+
+    Two regimes are promoted (each empirically validated on MI300X):
+
+    1. **Tail-wave-bad** (``tiles > N_CU`` and the grid leaves a partial
+       last wave smaller than ~60% of the device).  The persistent kernel
+       runs ``ceil(tiles / N_CU)`` waves with the last one severely
+       under-utilised; Stream-K reorganises those tail tiles across all
+       CUs.  Examples on MI300X (N_CU=304):
+
+         * 2048x12288x12288 bf16 (384 tiles, 1.26 wave):  +33% kernel time
+         * 10240x10240x10240 bf16 (1600 tiles, 5.26 wave): +8% time
+         * 4352x5120x8192 bf16 (340 tiles, 1.12 wave):    +37% time
+
+    2. **Under-subscribed with real K work** (``tiles < N_CU`` and
+       ``_compute_sk_grid`` actually subdivides K, ``sk_grid > tiles``,
+       and ``iters_per_tile >= 32``).  The ``iters_per_tile`` floor
+       avoids small-K cases (e.g. 3072 cubed, K=3072) where the Stream-K
+       reduction overhead dominates.
+
+    Returns the constructed streamk selector (avoids building it twice
+    in the dispatch site).
+    """
+    bm = selector_persistent.block_m
+    bn = selector_persistent.block_n
+    bk = selector_persistent.block_k
+    tiles = ((M + bm - 1) // bm) * ((N + bn - 1) // bn)
+    n_cu = selector_persistent._hardware.N_CU
+
+    # Regime 1: tail-wave-bad
+    if tiles > n_cu:
+        last_wave = tiles % n_cu
+        if last_wave == 0 or last_wave >= int(n_cu * 0.6):
+            # Either exact multiple of N_CU (no tail waste) or the tail
+            # wave fills enough of the device that streamk reduction
+            # overhead would not pay back.
+            return None
+        return _make_matmul_selector(
+            M, N, K, a_dtype, b_dtype, c_dtype, device, streamk=True
+        )
+
+    # Regime 2: under-subscribed with real K work
+    if tiles < n_cu:
+        iters_per_tile = (K + bk - 1) // bk
+        if iters_per_tile < 32:
+            # Too little K work to amortise the streamk reduction.
+            return None
+        selector_sk = _make_matmul_selector(
+            M, N, K, a_dtype, b_dtype, c_dtype, device, streamk=True
+        )
+        if selector_sk.sk_grid > tiles:
+            return selector_sk
+
+    # Exactly fully subscribed (tiles == n_cu): persistent is a wash.
+    return None
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -405,6 +465,15 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote under-subscribed shapes to Stream-K when the
+    # K-split heuristic would actually fan out along K.
+    if not enable_streamk:
+        sk_sel = _maybe_promote_to_streamk(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device, selector
+        )
+        if sk_sel is not None:
+            enable_streamk = True
+            selector = sk_sel
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -462,6 +531,14 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote under-subscribed shapes to Stream-K.
+    if not enable_streamk:
+        sk_sel = _maybe_promote_to_streamk(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device, selector
+        )
+        if sk_sel is not None:
+            enable_streamk = True
+            selector = sk_sel
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -640,6 +717,14 @@ def _addmm(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote under-subscribed shapes to Stream-K.
+    if not enable_streamk:
+        sk_sel = _maybe_promote_to_streamk(
+            M, N, K, a.dtype, b.dtype, bias.dtype, a.device, selector
+        )
+        if sk_sel is not None:
+            enable_streamk = True
+            selector = sk_sel
     config = matmul_preamble(selector) if work_stealing else None
 
     # Allocate an output tensor
@@ -712,6 +797,14 @@ def _addmm_out(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote under-subscribed shapes to Stream-K.
+    if not enable_streamk:
+        sk_sel = _maybe_promote_to_streamk(
+            M, N, K, a.dtype, b.dtype, bias.dtype, a.device, selector
+        )
+        if sk_sel is not None:
+            enable_streamk = True
+            selector = sk_sel
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

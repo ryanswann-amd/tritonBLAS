@@ -12,6 +12,11 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .dispatch import (
+    should_use_small_m_path,
+    small_m_block_override,
+    small_m_grid,
+)
 
 
 
@@ -88,12 +93,6 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
@@ -101,6 +100,40 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ────────────────────────────────────────────────────────────────────
+    # Small-M dispatch: tall-skinny shapes (M ≤ 64) with too few tiles to
+    # saturate the CUs.  Origami picks tiny BLOCK_N (16/32) which (a) under-
+    # utilises the MFMA pipeline and (b) leaves >90% of CUs idle.  The
+    # persistent kernel already supports a grid-stride loop over output
+    # tiles (see ScheduleContext.persistent_tile_range); we just need to
+    # pick larger blocks and launch num_cus workgroups so that loop runs.
+    #
+    # Path is gated to non-quantized, non-bias, non-work-stealing, fp16/bf16
+    # GEMM so we don't perturb the existing hot paths.
+    # ────────────────────────────────────────────────────────────────────
+    num_cus = getattr(selector, "_N_CU", 0) or selector._hardware.N_CU
+    use_small_m = (
+        not work_stealing
+        and not quantized
+        and bias is None
+        and a.dtype in (torch.float16, torch.bfloat16)
+        and should_use_small_m_path(M, N, K, BLK_M, BLK_N, num_cus)
+    )
+    if use_small_m:
+        BLK_M, BLK_N, BLK_K, gsize_m, num_warps = small_m_block_override(
+            M, N, K, num_cus
+        )
+        import os
+        if os.environ.get("TRITONBLAS_DEBUG_SMALL_M"):
+            print(f"[small-m] M={M} N={N} K={K} -> BLK_M={BLK_M} BLK_N={BLK_N} "
+                  f"BLK_K={BLK_K} num_warps={num_warps}", flush=True)
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -158,7 +191,20 @@ def persistent_matmul_lt(
             kpack=kpack,
         )
     else:
-        grids = total_tiles
+        if use_small_m:
+            # Persistent grid-stride: launch min(total_tiles, num_cus) blocks.
+            # Setting NUM_SMS == grid makes the kernel's persistent loop stride
+            # by the grid size, so each block sweeps a contiguous tile slice.
+            grids, num_sms_kernel = small_m_grid(M, N, BLK_M, BLK_N, num_cus)
+            # Disable XCD swizzling on the small-M path: with only a handful of
+            # tiles per row the chiplet remap can map two blocks onto the same
+            # tile-id stream and leave others idle.
+            num_xcds_eff = 1
+            chunk_size = 1
+        else:
+            grids = total_tiles
+            num_sms_kernel = total_programs
+            num_xcds_eff = num_xcds
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
@@ -181,8 +227,8 @@ def persistent_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=total_programs,
-            NUM_XCDS=num_xcds,
+            NUM_SMS=num_sms_kernel,
+            NUM_XCDS=num_xcds_eff,
             CHUNK_SIZE=chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,

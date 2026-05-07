@@ -12,6 +12,12 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+# K-273: large-K square autotune cache. Gated by is_large_k_square()
+# (M>=1024 AND N>=1024 AND K>=8192) AND _safe_to_apply().
+try:
+    from . import large_k_square_autotune as _lks
+except ImportError:
+    _lks = None
 
 
 
@@ -38,7 +44,7 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=1024)  # K-273: cache selector to amortize cost
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -88,17 +94,32 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+
+    # K-273: large-K square autotune override (M>=1024 AND N>=1024 AND K>=8192).
+    # Out-of-cohort shapes return None and the Origami-derived defaults stand.
+    if _lks is not None:
+        _ovr = _lks.lookup(M, N, K, a.dtype)
+        if _ovr is not None:
+            BLK_M = _ovr["BLOCK_M"]
+            BLK_N = _ovr["BLOCK_N"]
+            BLK_K = _ovr["BLOCK_K"]
+            num_stages = _ovr["num_stages"]
+            num_warps = _ovr["num_warps"]
+            mfmaInstrSize = _ovr["matrix_instr_nonkdim"]
+            kpack = _ovr["kpack"]
+            waves_per_eu = _ovr["waves_per_eu"]
+            gsize_m = _ovr["GROUP_SIZE_M"]
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

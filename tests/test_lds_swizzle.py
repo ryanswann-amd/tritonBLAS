@@ -207,6 +207,70 @@ def test_k539_cohort_kpack_is_one(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "mode,K,cache_seed,expected_kpack,case",
+    [
+        # 1. mode=off short-circuits FIRST — wins over everything.
+        ("off",  512, None,            1, "mode=off  | K<gate          | empty cache  -> BASELINE"),
+        ("off",  2048, None,           1, "mode=off  | K>=gate         | empty cache  -> BASELINE"),
+        ("off",  2048, SWIZZLED_CONFIG, 1, "mode=off  | K>=gate         | cache=SWIZ   -> BASELINE (off wins)"),
+        # 2. K<gate short-circuits SECOND — wins over mode=on AND cache.
+        ("on",   512, None,            1, "mode=on   | K<gate          | empty cache  -> BASELINE (gate wins)"),
+        ("auto", 512, SWIZZLED_CONFIG, 1, "mode=auto | K<gate          | cache=SWIZ   -> BASELINE (gate wins)"),
+        ("on",   SMALL_K_GATE_THRESHOLD - 1, None, 1,
+                                          "mode=on   | K=gate-1        | empty cache  -> BASELINE (gate wins)"),
+        # 3. mode=on short-circuits THIRD — wins over cache (only at K>=gate).
+        ("on",   2048, None,            2, "mode=on   | K>=gate         | empty cache  -> SWIZZLED"),
+        ("on",   2048, BASELINE_CONFIG, 2, "mode=on   | K>=gate         | cache=BASE   -> SWIZZLED (on wins)"),
+        ("on",   SMALL_K_GATE_THRESHOLD, None, 2,
+                                          "mode=on   | K=gate          | empty cache  -> SWIZZLED"),
+        # 4. cache lookup runs LAST (auto mode, K>=gate, populated cache).
+        ("auto", 2048, SWIZZLED_CONFIG, 2, "mode=auto | K>=gate         | cache=SWIZ   -> SWIZZLED (cache hit)"),
+        ("auto", 2048, BASELINE_CONFIG, 1, "mode=auto | K>=gate         | cache=BASE   -> BASELINE (cache hit)"),
+        ("auto", 2048, None,            1, "mode=auto | K>=gate         | empty cache  -> BASELINE (safe default)"),
+    ],
+)
+def test_select_lds_config_ordering_invariant(
+    monkeypatch, tmp_path, mode, K, cache_seed, expected_kpack, case
+):
+    """Pin the four-step ordering invariant of ``select_lds_config``.
+
+    The decision tree MUST be evaluated in this exact order:
+
+        1. mode == "off"       -> BASELINE  (user opt-out wins absolutely)
+        2. K  <  SMALL_K_GATE  -> BASELINE  (small-K guard; pre-empts mode=on AND cache)
+        3. mode == "on"        -> SWIZZLED  (user force, only above threshold)
+        4. cache.get(key)      -> cached    (autotuned winner; otherwise BASELINE)
+
+    Reordering any step silently re-introduces the K-580 -27% K-539 cohort
+    regression. This parametrized test is the load-bearing CI gate that
+    enforces the invariant beyond the inline comment block in the source.
+    """
+    cache_path = tmp_path / "ordering.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", mode)
+    reset_cache_for_testing()
+
+    if cache_seed is not None:
+        # Seed the cache with the explicit (BASELINE | SWIZZLED) entry. The
+        # key MUST match what _cache_key would produce for the test shape.
+        cache = PersistentSwizzleCache(path=cache_path)
+        key = (
+            f"2048x2048x{K}|f16|f16|f16|"
+            f"128x128x64|ds|nows"
+        )
+        cache.set(key, cache_seed)
+        reset_cache_for_testing()
+
+    cfg = select_lds_config(
+        2048, 2048, K,
+        "f16", "f16", "f16",
+        128, 128, 64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg.kpack == expected_kpack, f"ordering invariant broken: {case}"
+
+
 def test_auto_mode_defaults_to_baseline_when_cache_empty():
     """auto is safe: with no cache entry it picks baseline (kpack=1).
 

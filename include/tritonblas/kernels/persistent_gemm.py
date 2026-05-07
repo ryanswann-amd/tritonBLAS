@@ -54,6 +54,7 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
+    LARGE_SQUARE_EPILOGUE: tl.constexpr = False,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -113,14 +114,25 @@ def persistent_matmul(
         # Get schedule aware output tile to be processed this loop iteration
         # ════════════════════════════════════════════════════
         out_tile = sched.get_tile_from_idx(tile_id)
-        
+
         # ════════════════════════════════════════════════════════════════════
         # COMPUTE GEMM: K-loop handled by GemmContext
         # ════════════════════════════════════════════════════════════════════
         acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
-        
+
         # ════════════════════════════════════════════════════════════════════
-        # STORE RESULT: Epilogue (scale, bias, convert) handled by OutputView
-        # Store Accumulator to output matrix C at pointers defined by out_tile
+        # STORE RESULT
         # ════════════════════════════════════════════════════════════════════
-        tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+        if LARGE_SQUARE_EPILOGUE:
+            # K-282 overlapped epilogue: the predicate guarantees no scale/bias,
+            # so we inline the downcast + masked store and skip the OutputView
+            # scale/bias dispatch.  On AMDGPU this lets the LSU drain the store
+            # concurrent with the next persistent-loop iteration's VMEM loads
+            # (the K-loop's num_stages=3 software pipeline issues them ahead of
+            # the dot), giving the store/MFMA overlap K-282 calls for.
+            result = acc.to(C.type.element_ty)
+            ptrs, mask = tensorC.tile_ptrs(out_tile)
+            tl.store(ptrs, result, mask=mask)
+        else:
+            # Default: full epilogue (scale, bias, convert) handled by OutputView
+            tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)

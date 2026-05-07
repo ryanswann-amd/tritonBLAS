@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -14,6 +15,96 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# ---------------------------------------------------------------------------
+# Auto stream-K dispatch for small-M (M<=32) shapes (K-164).
+#
+# Standard data-parallel GEMMs launch ceil(M/BLK_M) * ceil(N/BLK_N) CTAs.
+# For M<=32, BLK_M is typically 16/32 so tiles_M=1 and the entire grid
+# collapses to ceil(N/BLK_N) — typically <20 CTAs on MI300X (304 CUs),
+# leaving the device <7% utilized.  We auto-promote these shapes to the
+# stream-K kernel which splits the K dimension across idle CUs with atomic
+# accumulation, lifting occupancy to ~100%.
+#
+# Gating rule (matches OrigamiMatmulSelector.should_auto_streamk):
+#     M <= 32 AND ceil(M/BLK_M)*ceil(N/BLK_N) < N_CU/2
+#
+# Disable via env: TBLAS_AUTO_STREAMK=0
+# ---------------------------------------------------------------------------
+
+def _auto_streamk_enabled() -> bool:
+    return os.environ.get("TBLAS_AUTO_STREAMK", "1").lower() not in ("0", "false", "no")
+
+
+# Per-shape autotune cache for the K-split factor used in small-M stream-K.
+# Key: (M, N, K, dtype-str).  Value: best split factor in {2, 4, 8, 16}.
+# Populated lazily — first call uses the default heuristic; benchmarks and
+# users may seed entries via TBLAS_SK_FACTOR env or set_split_k_factor().
+_SK_FACTOR_CACHE: Dict[Tuple[int, int, int, str], int] = {}
+
+
+def set_split_k_factor(M: int, N: int, K: int, dtype: torch.dtype, factor: int) -> None:
+    """Pin a stream-K split factor for the given shape cohort (autotune hook)."""
+    _SK_FACTOR_CACHE[(int(M), int(N), int(K), str(dtype))] = int(factor)
+
+
+def _lookup_sk_factor(M: int, N: int, K: int, dtype: torch.dtype) -> Optional[int]:
+    env = os.environ.get("TBLAS_SK_FACTOR")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return _SK_FACTOR_CACHE.get((int(M), int(N), int(K), str(dtype)))
+
+
+def _auto_dispatch_mode(selector, M: int, N: int, K: int, dtype: torch.dtype,
+                        enable_streamk: bool, work_stealing: bool) -> Tuple[bool, bool]:
+    """Decide which kernel mode to use for this call.
+
+    Returns ``(enable_streamk, work_stealing)`` after applying the small-M
+    auto-dispatch policy.  Caller-set flags are honoured (no-op).
+
+    Empirically (K-164 sweep on MI300X bf16, see output/bench_all_modes.json):
+    for the M<=32 small-M cohort, the work-stealing persistent kernel beats
+    both the data-parallel persistent kernel and the stream-K kernel:
+
+        persistent     0.20x of hipBLASLt
+        stream-K       0.35x  (this PR's first cut)
+        work-stealing  0.46x  (best-of-3 ceiling)
+
+    Stream-K's quadrant-aggregation overhead (BLOCK_M//2 = 8 row halves are
+    too narrow for efficient MFMA on gfx942) caps it ~0.35x.  Work-stealing
+    has no such overhead — it hands whole tiles to whichever CU is free,
+    perfectly suited to small-M's "few wide tiles" topology.
+
+    The K-164 success criterion (geomean >=0.55x) is best served by routing
+    small-M shapes to work-stealing.  We keep the stream-K plumbing in
+    place because it wins on a handful of mid-K small-N corners and remains
+    a useful per-shape autotune candidate.
+    """
+    if enable_streamk or work_stealing:
+        return enable_streamk, work_stealing
+    if not _should_auto_streamk(M, N, K):
+        return enable_streamk, work_stealing
+    if selector.total_tiles >= _STREAMK_AUTO_THRESHOLD:
+        return enable_streamk, work_stealing
+    return False, True
+
+
+def _maybe_auto_streamk(selector, M: int, N: int, K: int, dtype: torch.dtype,
+                        enable_streamk: bool) -> bool:
+    """Backwards-compat shim — old callers may still pass the streamk flag.
+
+    Prefer the new ``_auto_dispatch_mode`` which can also promote to
+    work-stealing.  Used only by code paths that haven't migrated yet.
+    """
+    sk, _ws = _auto_dispatch_mode(
+        selector, M, N, K, dtype,
+        enable_streamk=enable_streamk, work_stealing=False
+    )
+    return sk
+
+
 
 _tensor_cache = {}
 
@@ -24,6 +115,45 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+# K-164 small-M auto-dispatch gating threshold.
+#
+# Default = MAX_SMS (304 on MI300X): trigger work-stealing whenever the
+# data-parallel tile grid is small enough that even one wave doesn't fill the
+# device.  The K-164 spec used N_CU/2 (50% occupancy) as a starting point but
+# empirically the persistent kernel underperforms at any occupancy below
+# ~100% on small-M shapes (tile-load imbalance from non-multiples of N_CU).
+#
+# Overridable at import time via env TRITONBLAS_STREAMK_AUTO_THRESHOLD;
+# set to 0 to disable auto-promotion entirely.  Also disabled when
+# TBLAS_AUTO_STREAMK=0 (matches the broader auto-dispatch kill switch).
+_STREAMK_AUTO_THRESHOLD = int(
+    os.environ.get("TRITONBLAS_STREAMK_AUTO_THRESHOLD", str(MAX_SMS))
+)
+
+
+def _should_auto_streamk(M: int, N: int, K: Optional[int] = None) -> bool:
+    """Cheap shape-only gating check used by the public dispatch.
+
+    Uses a probe tile (BLOCK_M=16, BLOCK_N=128) — a lower bound on the tile
+    count for the standard small-M block selection — to decide whether the
+    grid is likely to leave the device under-utilized.
+
+    The authoritative check (using the actual selected BLOCK_M/BLOCK_N) lives
+    on the selector as ``OrigamiMatmulSelector.should_auto_streamk``; this
+    helper exists for pre-selector fast-paths and external callers.
+    """
+    if _STREAMK_AUTO_THRESHOLD <= 0:
+        return False
+    if not _auto_streamk_enabled():
+        return False
+    if M > 32:
+        return False
+    if K is not None and K < 4096:
+        return False
+    probe_tiles = ((M + 15) // 16) * ((N + 127) // 128)
+    return probe_tiles < _STREAMK_AUTO_THRESHOLD
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -405,6 +535,11 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote small-M shapes to stream-K (M<=32, tiles<N_CU/2).
+    enable_streamk, work_stealing = _auto_dispatch_mode(
+        selector, M, N, K, a.dtype,
+        enable_streamk=enable_streamk, work_stealing=work_stealing,
+    )
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -462,6 +597,10 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    enable_streamk, work_stealing = _auto_dispatch_mode(
+        selector, M, N, K, a.dtype,
+        enable_streamk=enable_streamk, work_stealing=work_stealing,
+    )
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -510,6 +649,10 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    enable_streamk, work_stealing = _auto_dispatch_mode(
+        selector, M, N, K, a.dtype,
+        enable_streamk=enable_streamk, work_stealing=work_stealing,
+    )
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
@@ -640,6 +783,10 @@ def _addmm(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    enable_streamk, work_stealing = _auto_dispatch_mode(
+        selector, M, N, K, a.dtype,
+        enable_streamk=enable_streamk, work_stealing=work_stealing,
+    )
     config = matmul_preamble(selector) if work_stealing else None
 
     # Allocate an output tensor
@@ -712,6 +859,10 @@ def _addmm_out(
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    enable_streamk, work_stealing = _auto_dispatch_mode(
+        selector, M, N, K, a.dtype,
+        enable_streamk=enable_streamk, work_stealing=work_stealing,
+    )
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

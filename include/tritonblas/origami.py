@@ -348,7 +348,10 @@ class OrigamiMatmulSelector:
 
     def _compute_sk_grid(self):
         # Grid model constants for StreamK
-        split_factors = [8, 6, 4, 3, 2, 1]
+        # NOTE: extended split factors with {16, 12, 10} for small-M cohort —
+        # M<=32 shapes with N<=2048 produce <20 tiles, far below the 304 CUs
+        # on MI300X.  Higher split factors are needed to fill the device.
+        split_factors = [16, 12, 10, 8, 6, 4, 3, 2, 1]
         tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
         max_workspace = 128 * 1024 * 1024
 
@@ -360,6 +363,9 @@ class OrigamiMatmulSelector:
         tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
         sk_grid = tiles
         iters_per_tile = max(1, ceil(K / BLK_K))
+
+        # Caller-provided override (e.g., from autotune-cached split-K factor)
+        forced_factor = getattr(self, "_split_k_factor", None)
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
@@ -388,18 +394,55 @@ class OrigamiMatmulSelector:
 
         # Fewer tiles than CUs: split along k-dimension up to some factor
         elif tiles < cu_count:
+            # Small-M cohort (M<=32): tile count is dominated by ceil(N/BLK_N)
+            # and is far below cu_count. Relax the iters-per-CU floor so we can
+            # still split when K is moderate; the prior >=8 floor disqualified
+            # most small-M shapes (e.g. K=1024/BLK_K=64 = 16 iters, factor=8 gave
+            # only 2 iters/CU, blocked).  For small-M we accept iters/CU >= 2.
+            small_m = M <= 32
+            min_iters_per_cu = 2 if small_m else 8
+
+            # Try forced split factor first if provided (autotune cache).
+            if forced_factor is not None:
+                split_grid = tiles * int(forced_factor)
+                iters_per_cu = iters_per_tile // max(1, int(forced_factor))
+                if (
+                    split_grid <= cu_count
+                    and iters_per_cu >= 1
+                    and self._partial_tile_size(split_grid) <= max_workspace
+                ):
+                    sk_grid = split_grid
+                    if tiles % sk_grid != 0:
+                        sk_grid = tiles
+                    return sk_grid
+
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
 
-                if split_grid <= cu_count and iters_per_cu >= 8:
+                if (
+                    split_grid <= cu_count
+                    and iters_per_cu >= min_iters_per_cu
+                    and self._partial_tile_size(split_grid) <= max_workspace
+                ):
                     sk_grid = split_grid
                     break
 
         # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
-            sk_grid = tiles
+        # workspace exceeds what the problem allows, fall back to no split.
+        #
+        # K-164 fix: when split-K is in play sk_grid > tiles by design (one
+        # CTA per K-slice per tile), so the legacy ``tiles % sk_grid`` check
+        # would always be non-zero and erase the split.  The correct
+        # divisibility predicate is "sk_grid is an integer multiple of tiles"
+        # for split-K, or "tiles is an integer multiple of sk_grid" for the
+        # fractional super-tile case (sk_grid <= tiles).
+        if sk_grid > tiles:
+            if sk_grid % tiles != 0:
+                sk_grid = tiles
+        else:
+            if tiles % sk_grid != 0:
+                sk_grid = tiles
 
         if tiles >= cu_count:
             last_wave_remainder = tiles % cu_count
@@ -414,6 +457,62 @@ class OrigamiMatmulSelector:
             ):  # gfx942
                 sk_grid = 256 if cu_count == 304 else 64
         return sk_grid
+
+    @property
+    def total_tiles(self) -> int:
+        """Number of (BLOCK_M x BLOCK_N) output tiles for this problem."""
+        return ceil(self._m / self.block_m) * ceil(self._n / self.block_n)
+
+    @property
+    def should_auto_streamk(self) -> bool:
+        """True when the data-parallel grid leaves the device under-utilized.
+
+        Triggers stream-K auto-dispatch for small-M shapes (M<=32) where the
+        tile grid is below 50% of CU occupancy.  Threshold matches the K-164
+        spec: ``M*N/(BLOCK_M*BLOCK_N) < N_CU/2`` (152 of 304 on MI300X).
+
+        Additional K floor: stream-K splits the K dimension into per-CU
+        slices and each slice carries fixed-cost atomic-aggregation overhead
+        (lock spin + 4-quadrant partial accumulator).  Empirically that
+        overhead is only amortized once K >= 4096 — for smaller K the
+        persistent kernel beats stream-K even at low CU occupancy.  The
+        K-floor avoids regressing small-K shapes that were previously OK.
+        """
+        if self._m > 32:
+            return False
+        if self._k < 4096:
+            return False
+        return self.total_tiles < self._hardware.N_CU
+
+    def enable_streamk(self, split_k_factor: int = None):
+        """Toggle this selector to stream-K mode and recompute the SK grid.
+
+        Used by the auto-dispatch path so we don't have to rebuild the
+        OrigamiMatmulSelector from scratch (which re-runs heuristic search).
+
+        For small-M (M<=32) problems we additionally clamp BLOCK_M to the
+        smallest power-of-two that covers M (so 16 for M<=16, 32 for M<=32).
+        Without this clamp Origami's data-parallel heuristic happily picks
+        256x256 macro tiles even when M=16, wasting 240/256 (94%) of the
+        M-dimension MFMA throughput on padding.
+        """
+        self.streamk = True
+        if split_k_factor is not None:
+            self._split_k_factor = int(split_k_factor)
+        if self._m <= 32:
+            target_bm = 16 if self._m <= 16 else 32
+            cfg = self._result.config
+            if cfg.mt.m > target_bm:
+                cfg.mt.m = target_bm
+                # Cap BLOCK_N at 128 to keep tile count moderate; smaller N
+                # blocks mean more tiles, which spreads work to more CUs.
+                if cfg.mt.n > 128:
+                    cfg.mt.n = 128
+                # Ensure BLOCK_K stays sensible for the chosen tile.
+                if cfg.mt.k < 32:
+                    cfg.mt.k = 32
+        self._grid = self._compute_sk_grid()
+        return self._grid
 
     def _partial_tile_size(self, sk_grid: int) -> int:
         """

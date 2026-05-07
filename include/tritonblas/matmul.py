@@ -124,56 +124,36 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Small-M GEMMs (M <= 32) under-fill MI300X because the data-parallel tile
-# grid yields tiles < 2*N_CU (e.g. M=16, N=K=1024 -> 8 CTAs vs 304 CUs).
-# Origami's BK=32 default leaves the K-loop pipeline shallow; boosting BK to
-# 128 deepens the pipeline (more MFMA per iter, fewer global loads per tile)
-# inside the persistent kernel.  Stream-K routing was tried and regressed
-# (atomic + reduction overhead at low CTA count).  Larger-M shapes are
-# untouched.  TBLAS_DISABLE_SMALL_M_RETUNE=1 disables the retune for A/B testing.
-def _maybe_retune_small_m(selector, M, N, K) -> None:
-    if M > 32 or os.environ.get(
-            "TBLAS_DISABLE_SMALL_M_RETUNE", "").lower() in ("1", "true", "yes"):
-        return
-    BM, BN, BK = selector.block_m, selector.block_n, selector.block_k
-    tiles = ((M + BM - 1) // BM) * ((N + BN - 1) // BN)
-    if tiles >= 2 * selector._hardware.N_CU or K < 256 or BK >= 128:
-        return
-    target_bk = min(128, K)
-    try:
-        from .origami import check_triton_lds_capacity
-        if not check_triton_lds_capacity(
-                BM, BN, target_bk,
-                selector._a_dtype_bitsize / 8, selector._b_dtype_bitsize / 8,
-                selector._hardware.lds_capacity, selector._num_stages):
-            return
-    except Exception:
-        return
-    selector._result.config.mt.k = target_bk
-    _log.debug("small-M retune: M=%d N=%d K=%d BK %d -> %d", M, N, K, BK, target_bk)
-
-
 # K-157: dispatch predicate for launch-overhead-bound small-M shapes.
 #
 # For M <= 32 and a small standard tile grid (tiles < num_CUs), the persistent
 # kernel produces only a handful of CTAs (e.g. M=16, N=K=1024 with BM=16,
-# BN=128 yields 8 CTAs vs 304 CUs on MI300X = 2.6% occupancy).  The K-loop
-# pipeline deepening above (BK -> 128) recovers some throughput, but
-# tritonblas's Python+Triton dispatch + kernel launch path floors at ~90 us
-# while hipBLASLt's vendor-optimised launch path floors at ~30 us — a 3x gap
-# that no kernel-side change can close.
+# BN=128 yields 8 CTAs vs 304 CUs on MI300X = 2.6% occupancy).  Both
+# tritonblas and hipBLASLt are at 0% MFMA utilisation here — the gap is pure
+# host-side launch overhead (Triton's dispatch + kernel launch floors at
+# ~90 µs while hipBLASLt floors at ~30 µs).  No kernel-side change closes it.
 #
-# Stream-K routing was investigated and regressed:  on these shapes only
-# 16-32 of the 304 CUs can be productively used (factor=2 with iters_per_cu>=8
-# in selector._compute_sk_grid), and the atomic + partial-reduction overhead
-# of the streamk_gemm kernel exceeds the headroom from the ~24 idle CUs that
-# get work.  See K-157 PR description for the per-shape numbers.
+# Stream-K routing was investigated and regressed: on these shapes
+# selector._compute_sk_grid() can productively use only 16-32 of the 304 CUs,
+# and the atomic + partial-reduction overhead of streamk_gemm exceeds the
+# headroom from the ~24 idle CUs.  See K-157 PR description for per-shape
+# numbers and follow-up issue for the long-term Triton-launch-floor fix.
 #
-# Therefore for shapes that fall in the launch-overhead regime — small-M plus
-# a tile grid that fits in well under one wave of CUs — we delegate to
-# torch.matmul, which on ROCm dispatches to hipBLASLt.  The non-quantized
-# matmul/addmm entry points are eligible; quantized (a8w8 / fp4) and explicit
-# streamk / work_stealing requests stay on their existing path.
+# This is a workaround, not a systemic fix:  it routes around the launch
+# floor rather than addressing it.  The follow-up tracking issue should
+# investigate (a) trimming the Triton dispatch path (cuLaunchKernel argument
+# packing, autograd-op overhead) and (b) a CUDA-graph capture path for
+# repeated small-M decode calls.
+#
+# Predicate notes for autograd:  in `matmul(a, b)` with a:(M,K), b:(K,N),
+# the forward sees (M, N).  `_matmul_backwards` then issues
+#   grad_a = matmul(grad_output, bᵀ)  with shape (M, K)  -- same M, predicate
+#                                                          fires identically
+#   grad_b = matmul(aᵀ, grad_output)  with shape (K, N)  -- different M (=K)
+# So forward + grad_a route the same way, but grad_b is evaluated under its
+# own (K, N) shape and almost always lands on the Triton path (large M=K).
+# This is *intentional*: grad_b is large-M and Triton wins there; only the
+# launch-bound forward + grad_a get the hipBLASLt detour.
 #
 # TBLAS_DISABLE_SMALL_M_HBL_FALLBACK=1 disables the fallback for A/B testing.
 def _should_fallback_to_hbl(M: int, N: int, K: int, num_cus: int) -> bool:
@@ -182,13 +162,9 @@ def _should_fallback_to_hbl(M: int, N: int, K: int, num_cus: int) -> bool:
     if os.environ.get(
             "TBLAS_DISABLE_SMALL_M_HBL_FALLBACK", "").lower() in ("1", "true", "yes"):
         return False
-    # Use the same "tiles < 2*N_CU" under-utilisation predicate that gates the
-    # K-loop deepening retune, but with the smallest realistic block size
-    # Origami can pick (BM=BN=16) so that the predicate is tile-config-agnostic
-    # and identical on forward and backward passes.  N here corresponds to the
-    # B-matrix's column count for A @ B (forward) and to a transposed shape on
-    # the backward; the predicate is symmetric in (M,N) so both directions
-    # behave consistently for the autograd-registered path.
+    # "Tiles < 2*N_CU" under-utilisation gate, computed at the smallest
+    # realistic block size Origami can pick (BM=BN=16) so the gating decision
+    # does not depend on the heuristic's BM/BN choice.
     tiles = ((M + 15) // 16) * ((N + 15) // 16)
     return tiles < 2 * num_cus
 
@@ -213,7 +189,7 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    selector = OrigamiMatmulSelector(
+    return OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -225,9 +201,6 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
-    # Deepen K-loop pipeline for under-utilised small-M shapes.
-    _maybe_retune_small_m(selector, M, N, K)
-    return selector
 
 
 def _dispatch_persistent_kernel(

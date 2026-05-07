@@ -1,7 +1,7 @@
 import functools
 import random
 import time
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.library import triton_op, wrap_triton
@@ -10,7 +10,8 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .origami import OrigamiMatmulSelector, recommend_streamk as _recommend_streamk
+from .origami import OrigamiMatmulSelector
+from .dispatch_policy import EnableStreamKArg, resolve_enable_streamk
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -26,57 +27,20 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
-# Type alias: the public ``enable_streamk`` parameter accepts an
-# explicit boolean OR the literal string ``"auto"`` OR ``None`` (kept as
-# a backward-compatible alias for ``"auto"``).  Everything else raises
-# ``TypeError`` from :func:`_resolve_enable_streamk` so callers see the
-# error at dispatch time rather than as a silent True/False coercion.
-EnableStreamKArg = Union[bool, str, None]
-
-
 def _resolve_enable_streamk(
     enable_streamk: EnableStreamKArg,
     M: int,
     N: int,
     K: int,
 ) -> bool:
-    """Resolve the ``enable_streamk`` argument for the public ``matmul`` /
-    ``addmm`` entry points.
+    """Thin shim around :func:`tritonblas.dispatch_policy.resolve_enable_streamk`.
 
-    The public functions accept:
-
-      * ``True`` / ``False`` — explicit caller choice; bypasses the
-        heuristic.  Use this when a caller has already done its own
-        autotuning (the existing behaviour for any code path that
-        previously passed an explicit boolean).
-      * ``"auto"`` (string sentinel, the default) — consult
-        :func:`recommend_streamk` and auto-enable stream-K on shapes
-        whose data-parallel tile grid would leave a meaningful chunk
-        of CUs idle in the last wave.  This addresses the
-        "large rectangle" PRD residual shapes where last-wave
-        imbalance is the dominant performance loss.
-      * ``None`` — alias for ``"auto"``, retained so old callers that
-        passed a positional ``Optional[bool]`` from a wrapper continue
-        to opt in to the heuristic (which is what ``None`` meant under
-        the prior public default ``enable_streamk=False`` — it could
-        not be observed there because the parameter was never exposed
-        as ``None`` to the public).
-
-    Returns the resolved boolean to forward to the internal kernel
-    selection path.
-
-    Raises ``TypeError`` for any other value (e.g. ``0``, ``"true"``)
-    so a caller mistake surfaces immediately at dispatch instead of
-    silently flipping kernel selection.
+    The dispatch-policy module owns the contract and the per-shape
+    recommendation; this wrapper plugs in the live ``MAX_SMS`` for the
+    current device so the public ``matmul`` / ``addmm`` entry points can
+    keep their (M, N, K)-only call signature.
     """
-    if enable_streamk is True or enable_streamk is False:
-        return enable_streamk
-    if enable_streamk is None or enable_streamk == "auto":
-        return _recommend_streamk(M, N, K, MAX_SMS)
-    raise TypeError(
-        f"enable_streamk must be True, False, 'auto', or None; "
-        f"got {enable_streamk!r}"
-    )
+    return resolve_enable_streamk(enable_streamk, M, N, K, MAX_SMS)
 
 
 def _maybe_wrap(fn, probe_tensor):

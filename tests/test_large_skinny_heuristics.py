@@ -34,6 +34,7 @@ from tritonblas.origami import (
     LARGE_SKINNY_K_MIN,
     STREAMK_MIN_K,
     STREAMK_MAX_WAVES,
+    STREAMK_MIN_WAVES,
     STREAMK_LAST_WAVE_FRAC_MAX,
 )
 
@@ -101,14 +102,25 @@ class TestRecommendStreamK:
     N_CU = 304  # MI300X
 
     def test_imbalanced_last_wave_recommends(self):
-        """Stream-K wins on shapes with a small partial last wave."""
-        # 6144x4096x4096: tiles=24*16=384, waves=1.26, last_wave=80
-        # 80 << 0.6 * 304 = 182  ->  True  (validated +9% empirical)
-        assert recommend_streamk(6144, 4096, 4096, self.N_CU)
-
+        """Stream-K wins on shapes with a small partial last wave AND
+        enough total waves (``>= STREAMK_MIN_WAVES``) to amortise the
+        inter-WG reduction cost over the full kernel."""
         # 8192x8192x8192: tiles=32*32=1024, waves=3.37, last_wave=112
-        # 112 < 182  ->  True  (validated +5% empirical)
+        # 112 < 182  ->  True  (validated +3-4% empirical on fresh sweep)
         assert recommend_streamk(8192, 8192, 8192, self.N_CU)
+
+    def test_low_wave_count_does_not_recommend(self):
+        """``STREAMK_MIN_WAVES`` floor: shapes with fewer than 2 total
+        waves now correctly reject stream-K, even if the last partial
+        wave fraction would otherwise trigger.  Empirically motivated by
+        6144x4096x4096 fp16 (tiles=384, waves=1.26) where stream-K was
+        measured -4% vs persistent on MI300X — see
+        ``state/mc2/workspaces/<task>/output/bench_large_skinny.csv``.
+        """
+        # 6144x4096x4096: tiles=24*16=384, waves=1.26 < 2.0  ->  False
+        assert not recommend_streamk(6144, 4096, 4096, self.N_CU)
+        # 4096x6144x4096: same wave count by symmetry  ->  False
+        assert not recommend_streamk(4096, 6144, 4096, self.N_CU)
 
     def test_sub_wave_does_not_recommend(self):
         """Shapes with total_tiles < n_cu: K-split overhead beats the gain."""
@@ -148,6 +160,7 @@ class TestRecommendStreamK:
     def test_streamk_constants_documented(self):
         # Pinning thresholds so a downstream change is intentional, not silent.
         assert STREAMK_MIN_K == 1024
+        assert STREAMK_MIN_WAVES == 2.0
         assert STREAMK_MAX_WAVES == 4.5
         assert STREAMK_LAST_WAVE_FRAC_MAX == 0.6
 
@@ -275,3 +288,55 @@ class TestPublicDefaults:
                 f"{fn.__name__} default must be the explicit 'auto' "
                 f"sentinel, not None or False"
             )
+
+
+class TestDispatchPolicyConsolidation:
+    """Pin that the dispatch policy lives in
+    ``tritonblas.dispatch_policy`` and that the legacy import paths
+    (``tritonblas.origami``) re-export the same symbols.  This guards
+    the architectural decision to consolidate the heuristic into a
+    single module: a future regression that re-scatters the policy
+    across multiple modules will fail this test."""
+
+    def test_dispatch_policy_module_owns_resolver(self):
+        # The resolver must be importable from dispatch_policy directly
+        # — i.e. the canonical home of the public-API contract.
+        from tritonblas.dispatch_policy import (
+            EnableStreamKArg,
+            resolve_enable_streamk,
+            recommend_streamk as dp_recommend,
+            is_large_skinny_shape as dp_classify,
+        )
+        # Type alias must be exported.
+        assert EnableStreamKArg is not None
+        # Resolver is callable and respects the True/False/auto/None
+        # contract documented in the module docstring.
+        assert resolve_enable_streamk(True, 1024, 1024, 1024, 304) is True
+        assert resolve_enable_streamk(False, 8192, 8192, 8192, 304) is False
+        assert isinstance(
+            resolve_enable_streamk("auto", 8192, 8192, 8192, 304), bool
+        )
+        assert isinstance(
+            resolve_enable_streamk(None, 8192, 8192, 8192, 304), bool
+        )
+        with pytest.raises(TypeError):
+            resolve_enable_streamk("on", 1024, 1024, 1024, 304)
+
+    def test_origami_reexports_match_dispatch_policy(self):
+        # Anything imported from tritonblas.origami must be the same
+        # object as the canonical home in dispatch_policy.  This
+        # protects callers that already import from origami (the prior
+        # location) and pins that we don't accidentally end up with two
+        # divergent copies of the heuristic.
+        from tritonblas import dispatch_policy as dp
+        from tritonblas import origami as og
+
+        assert og.is_large_skinny_shape is dp.is_large_skinny_shape
+        assert og.recommend_streamk is dp.recommend_streamk
+        assert og.LARGE_SKINNY_LONG_DIM_MIN == dp.LARGE_SKINNY_LONG_DIM_MIN
+        assert og.LARGE_SKINNY_ASPECT_MIN == dp.LARGE_SKINNY_ASPECT_MIN
+        assert og.LARGE_SKINNY_K_MIN == dp.LARGE_SKINNY_K_MIN
+        assert og.STREAMK_MIN_K == dp.STREAMK_MIN_K
+        assert og.STREAMK_MIN_WAVES == dp.STREAMK_MIN_WAVES
+        assert og.STREAMK_MAX_WAVES == dp.STREAMK_MAX_WAVES
+        assert og.STREAMK_LAST_WAVE_FRAC_MAX == dp.STREAMK_LAST_WAVE_FRAC_MAX

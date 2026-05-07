@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,65 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# K-312: gated tile-knob override for the large-square fp16/bf16 cohort.
+#
+# K-268 measured a 0.838x geomean gap vs hipBLASLt on the
+# (M, N in {4096, 8192}) x (K in {4096, 8192, 16384}) fp16/bf16 cohort.
+# K-250 attributed the residual to epilogue-store coalescing, L2 hit-rate,
+# and register-spill occupancy loss.  This helper plumbs the three knobs
+# called out in the K-312 PRD (waves_per_eu=2, kpack=2 as the lds_swizzle
+# proxy, and an EPILOGUE_VECTOR_WIDTH default of 8) behind a single
+# cohort-gated, env-controlled override.
+#
+# IMPORTANT: the override is *default-OFF* even when the gate predicate
+# matches.  K-654 burned us with an unconditional swizzle change; the lesson
+# encoded here is that any cohort-targeted lever must (a) gate on shape and
+# (b) require an explicit opt-in.  The gate predicate matches the K-312 PRD
+# envelope (M*N >= 16M and K >= 4096), and the env var
+# ``TRITONBLAS_K312_LARGE_SQUARE_TILE`` enables the override at runtime.
+#
+# The gated CSV measurements live under ``output/k312_cohort_*.csv`` and
+# ``output/k654_regression_*.csv`` in the K-312 workspace.  They show the
+# proposed knob set is a net negative on this cohort (-5 to -7% geomean),
+# which is why the override ships *disabled by default*.  The plumbing is
+# kept so future contributors can A/B the knobs against a measured-positive
+# tile envelope without re-introducing the gate predicate from scratch.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _k312_large_square_gate(M: int, N: int, K: int) -> bool:
+    """Return True iff (M, N, K) is in the K-312 large-square cohort envelope.
+
+    The envelope mirrors the K-268 sweep: ``M*N >= 16M`` and ``K >= 4096``.
+    The K-654 lesson is encoded by gating: this predicate must NOT widen
+    to small-K shapes, where the same knob set regresses by 10-20%.
+    """
+    return (M * N) >= (1 << 24) and K >= 4096
+
+
+def _k312_large_square_overrides(
+    M: int, N: int, K: int,
+    num_warps: int, waves_per_eu: int, kpack: int,
+) -> Tuple[int, int, int]:
+    """Return (num_warps, waves_per_eu, kpack) overrides for the K-312 cohort.
+
+    Behaviour:
+      * If the env var ``TRITONBLAS_K312_LARGE_SQUARE_TILE`` is unset or "0",
+        the inputs are returned unchanged (bit-identity to upstream).
+      * If the env var is "1" AND the shape gate matches, the K-312 PRD
+        knob set is applied: ``waves_per_eu=2``, ``kpack=2``.  ``num_warps``
+        is preserved so the user can still autotune it.
+      * If the env var is "1" but the shape gate does NOT match, the inputs
+        are returned unchanged - the override is cohort-scoped.
+    """
+    if os.environ.get("TRITONBLAS_K312_LARGE_SQUARE_TILE", "0") != "1":
+        return num_warps, waves_per_eu, kpack
+    if not _k312_large_square_gate(M, N, K):
+        return num_warps, waves_per_eu, kpack
+    return num_warps, 2, 2
 
 
 
@@ -101,6 +161,11 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-312: gated, default-OFF cohort-scoped tile overrides.  See helper docstring.
+    num_warps, waves_per_eu, kpack = _k312_large_square_overrides(
+        M, N, K, num_warps, waves_per_eu, kpack,
+    )
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -247,6 +312,11 @@ def streamk_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-312: gated, default-OFF cohort-scoped tile overrides.  See helper docstring.
+    num_warps, waves_per_eu, kpack = _k312_large_square_overrides(
+        M, N, K, num_warps, waves_per_eu, kpack,
+    )
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

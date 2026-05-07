@@ -26,6 +26,30 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# Auto-promote the eager dispatch to Stream-K when the data-parallel tile grid is
+# under-occupied AND there is enough K-work to amortise Stream-K's atomic-reduction
+# tail (atomic_add of partial sums + spin-lock for the leader WG).
+#
+# Empirical break-even on MI300X (fp16 + bf16, 200-iteration medians via
+# cuda.Event with selector caching enabled, M in {8,16,32}, N in {512,1024,
+# 2048,4096}, K in {1024,4096,8192}):
+#   K=1024:  Stream-K @ N_CU is 1-2% slower across the cohort (within noise)
+#   K=4096:  Mixed -- 4 small wins (+2%) vs 5 larger regressions (-6 to -9%)
+#            -- net negative; not worth the complexity.
+#   K=8192:  14 wins of +6 to +10% on (M in {8,16,32}, N in {1024,2048})
+#            and (M=32, any N).  Two small regressions (-2 to -4%) on the
+#            (M<=16, N=512) corners which are excluded by N >= MIN_N below.
+#
+# So the gate is: tiles * FILL_DIVISOR < N_CU AND K >= MIN_K AND
+# (N >= MIN_N OR M >= MIN_M).  When triggered we force sk_grid = N_CU to
+# launch one WG per CU; this maximises the K-split that Origami's
+# iters_per_cu >= 8 heuristic would otherwise refuse to grow.
+_AUTO_STREAMK_FILL_DIVISOR = 2
+_AUTO_STREAMK_MIN_K = 8192
+_AUTO_STREAMK_MIN_N = 1024
+_AUTO_STREAMK_MIN_M = 32
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -36,9 +60,16 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# LRU-cache the analytical heuristic so repeated calls with the same problem
+# shape (M, N, K, dtypes, device, mode) reuse the previously-computed Origami
+# selector.  Each OrigamiMatmulSelector construction runs the analytical model
+# over ~150 candidate configs and an LDS-capacity filter; on MI300X this costs
+# ~200 us per build.  For skinny-M shapes the kernel itself is sub-200 us, so
+# without caching the heuristic completely dominates wall time.  The auto-
+# routing path (_auto_streamk_dispatch) below may build TWO selectors per
+# call (data-parallel + Stream-K candidate) -- caching makes that free
+# after the first call.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -51,7 +82,6 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
         M,
         N,
@@ -64,6 +94,73 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+
+
+def _auto_streamk_dispatch(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    device: torch.device,
+    num_stages: int = 2,
+):
+    """Auto-route under-occupied skinny shapes to Stream-K to recover CU occupancy.
+
+    For skinny shapes (e.g. M=16, N=2048, K=8192) the data-parallel tile grid
+    covers far fewer than N_CU tiles, leaving the rest of MI300X's 304 CUs
+    idle every wave.  The Stream-K kernel splits the K dimension across the
+    otherwise-idle CUs and atomically reduces partial sums into a single
+    output tile, which recovers the wasted parallelism.
+
+    Two-step gate (BOTH must hold) — see module-level constants for the
+    empirical thresholds (_probe.py for the underlying measurement):
+
+      1. total_tiles * _AUTO_STREAMK_FILL_DIVISOR < N_CU
+         The persistent dispatch leaves more than half the device idle.
+
+      2. K >= _AUTO_STREAMK_MIN_K
+         Each WG receives K / (N_CU / total_tiles) K-iters.  Below the
+         min-K threshold, that per-WG K work is too small to amortise the
+         atomic_add + spin-lock cost, and Stream-K is empirically slower
+         than the under-occupied persistent kernel.
+
+    When the gate fires we force sk_grid = N_CU so the runtime launches one
+    Stream-K WG per CU.  Origami's own _compute_sk_grid() requires
+    iters_per_cu >= 8 for any K-split, which is too conservative for the
+    cases that win here (e.g. iters_per_cu = 4 still recovers utilisation
+    when the alternative is wasting 90% of the device).
+
+    Returns:
+        (enable_streamk, selector, sk_grid_override) — caller passes
+        sk_grid_override into streamk_matmul_lt; None means "use Origami's
+        sk_grid as-is".
+    """
+    selector_dp = _make_matmul_selector(
+        M, N, K, a_dtype, b_dtype, out_dtype, device,
+        streamk=False, num_stages=num_stages,
+    )
+    BLK_M = selector_dp.block_m
+    BLK_N = selector_dp.block_n
+    total_tiles = triton.cdiv(M, BLK_M) * triton.cdiv(N, BLK_N)
+    num_cus = selector_dp._hardware.N_CU
+
+    if (total_tiles * _AUTO_STREAMK_FILL_DIVISOR < num_cus
+            and K >= _AUTO_STREAMK_MIN_K
+            and (N >= _AUTO_STREAMK_MIN_N or M >= _AUTO_STREAMK_MIN_M)):
+        selector_sk = _make_matmul_selector(
+            M, N, K, a_dtype, b_dtype, out_dtype, device,
+            streamk=True, num_stages=num_stages,
+        )
+        # If Origami already grew the grid via K-split, trust its choice;
+        # otherwise force one WG per CU (atomic-reduction has enough K-work
+        # to amortise once K >= _AUTO_STREAMK_MIN_K).
+        if selector_sk.sk_grid > total_tiles:
+            return True, selector_sk, None
+        return True, selector_sk, num_cus
+
+    return False, selector_dp, None
 
 
 def persistent_matmul_lt(
@@ -404,7 +501,19 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # Auto-promote skinny / under-occupied shapes to Stream-K when the user
+    # didn't explicitly request a kernel mode (default eager path).  Skip
+    # under torch.compile FakeTensor tracing -- streamk_matmul_lt slices
+    # module-level real tensors (_global_locks/P) which Dynamo refuses
+    # under FakeTensorMode (matches the pre-existing constraint that
+    # explicit enable_streamk=True also fails to compile).
+    if (not enable_streamk and not work_stealing and sk_grid is None
+            and not is_fake(a)):
+        enable_streamk, selector, sk_grid = _auto_streamk_dispatch(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device,
+        )
+    else:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -461,7 +570,13 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    if (not enable_streamk and not work_stealing and sk_grid is None
+            and not is_fake(a)):
+        enable_streamk, selector, sk_grid = _auto_streamk_dispatch(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device,
+        )
+    else:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -638,12 +753,19 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
-
     # Allocate an output tensor
     out = a.new_empty(M, N)
+
+    # Query Origami for solution (auto-route under-occupied shapes to Stream-K;
+    # skip under torch.compile FakeTensor tracing -- see _matmul above)
+    if (not enable_streamk and not work_stealing and sk_grid is None
+            and not is_fake(a)):
+        enable_streamk, selector, sk_grid = _auto_streamk_dispatch(
+            M, N, K, a.dtype, b.dtype, bias.dtype, a.device,
+        )
+    else:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -710,8 +832,15 @@ def _addmm_out(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    # Query Origami for solution (auto-route under-occupied shapes to Stream-K;
+    # skip under torch.compile FakeTensor tracing -- see _matmul above)
+    if (not enable_streamk and not work_stealing and sk_grid is None
+            and not is_fake(a)):
+        enable_streamk, selector, sk_grid = _auto_streamk_dispatch(
+            M, N, K, a.dtype, b.dtype, bias.dtype, a.device,
+        )
+    else:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

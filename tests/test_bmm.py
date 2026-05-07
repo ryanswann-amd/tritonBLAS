@@ -77,6 +77,140 @@ def test_bmm_out_argument():
 
 
 # ---------------------------------------------------------------------------
+# Adversarial / contract tests (reviewer feedback K-686 retry)
+# ---------------------------------------------------------------------------
+
+
+def test_bmm_batch_one():
+    """BATCH=1 must produce identical numerics to the unbatched path."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.manual_seed(0)
+    a = torch.randn(1, 256, 128, device="cuda", dtype=torch.float16)
+    b = torch.randn(1, 128, 256, device="cuda", dtype=torch.float16)
+    out_bmm = tritonblas.bmm(a, b)
+    out_ref = torch.bmm(a, b)
+    diff = (out_bmm.float() - out_ref.float()).abs().max().item()
+    assert diff < _ktol(torch.float16, 128)
+    # Also verify it's not silently squeezing the batch dim
+    assert out_bmm.shape == (1, 256, 256), f"expected (1,256,256), got {tuple(out_bmm.shape)}"
+
+
+def test_bmm_non_contiguous_a():
+    """Non-contiguous A (post-transpose, square) must produce the same
+    result as a contiguous-A call. The kernel reads strides explicitly
+    (``stride_am``, ``stride_ak``, ``stride_ab``) so this must work
+    without the caller having to ``.contiguous()``."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.manual_seed(0)
+    # Build a non-contig view by transposing (M, K) on a square block —
+    # contents differ from the source so we can compare to .contiguous().
+    a_t = torch.randn(2, 128, 128, device="cuda", dtype=torch.float16)
+    a = a_t.transpose(1, 2)  # (2, 128, 128) but stride_am < stride_ak
+    assert not a.is_contiguous(), "test setup: A should be non-contiguous"
+    b = torch.randn(2, 128, 64, device="cuda", dtype=torch.float16)
+    out_nc = tritonblas.bmm(a, b)
+    out_c = tritonblas.bmm(a.contiguous(), b)
+    diff = (out_nc.float() - out_c.float()).abs().max().item()
+    # Same kernel, same inputs (modulo layout) → must be bitwise-equal
+    # within FP rounding noise: use tighter tol than K-aware bound.
+    assert diff < 1e-3, f"non-contig vs contig disagree: {diff}"
+
+
+def test_bmm_non_contiguous_b():
+    """Same as above for B — exercises stride_bk and stride_bn."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.manual_seed(0)
+    a = torch.randn(2, 64, 128, device="cuda", dtype=torch.float16)
+    b_t = torch.randn(2, 256, 128, device="cuda", dtype=torch.float16)
+    b = b_t.transpose(1, 2)  # (2, 128, 256), non-contig
+    assert not b.is_contiguous()
+    out_nc = tritonblas.bmm(a, b)
+    out_c = tritonblas.bmm(a, b.contiguous())
+    diff = (out_nc.float() - out_c.float()).abs().max().item()
+    assert diff < 1e-3, f"non-contig B vs contig disagree: {diff}"
+
+
+@pytest.mark.parametrize("dtype,K", [
+    (torch.float16, 130),   # K not divisible by typical BLOCK_SIZE_K (64/128/256)
+    (torch.bfloat16, 257),  # forces EVEN_K=False tail-K mask path
+    (torch.float16, 33),    # very small odd K
+])
+def test_bmm_k_not_divisible_by_tile(dtype, K):
+    """Exercise the EVEN_K=False tail-K mask branch in the kernel."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    torch.manual_seed(0)
+    a = torch.randn(3, 128, K, device="cuda", dtype=dtype)
+    b = torch.randn(3, K, 128, device="cuda", dtype=dtype)
+    out = tritonblas.bmm(a, b)
+    ref = torch.bmm(a, b)
+    diff = (out.float() - ref.float()).abs().max().item()
+    assert diff < _ktol(dtype, K), (
+        f"tail-K mask broken for K={K} dtype={dtype}: err={diff}"
+    )
+
+
+def test_bmm_rejects_rank_2():
+    """``bmm`` should reject rank-2 inputs with a clear error, not crash."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(64, 64, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="rank-3"):
+        tritonblas.bmm(a, b)
+
+
+def test_bmm_rejects_batch_mismatch():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(3, 64, 64, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="batch"):
+        tritonblas.bmm(a, b)
+
+
+def test_bmm_rejects_inner_dim_mismatch():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(2, 32, 64, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="inner"):
+        tritonblas.bmm(a, b)
+
+
+def test_bmm_rejects_dtype_mismatch():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(2, 64, 64, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="dtype"):
+        tritonblas.bmm(a, b)
+
+
+def test_bmm_rejects_bad_out_shape():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    bad_out = torch.empty(2, 64, 32, device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="out shape"):
+        tritonblas.bmm(a, b, out=bad_out)
+
+
+def test_bmm_rejects_bad_out_dtype():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    a = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    b = torch.randn(2, 64, 64, device="cuda", dtype=torch.float16)
+    bad_out = torch.empty(2, 64, 64, device="cuda", dtype=torch.float32)
+    with pytest.raises(ValueError, match="out.dtype"):
+        tritonblas.bmm(a, b, out=bad_out)
+
+
+# ---------------------------------------------------------------------------
 # Performance gate — bmm must be substantially faster than the host-side
 # Python loop on the K-654 batched residual shapes. This asserts the
 # *structural* improvement the bmm entrypoint exists to deliver

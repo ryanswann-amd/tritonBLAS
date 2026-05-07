@@ -910,34 +910,107 @@ def bmm(
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """
-    Batched matrix multiply: ``out[b] = a[b] @ b[b]`` for b in [0, BATCH).
+    """Batched matrix multiply: ``out[i] = a[i] @ b[i]`` for ``i`` in
+    ``[0, BATCH)``.
+
+    Single-grid Triton dispatch over ``(BATCH * M_tiles * N_tiles)`` —
+    eliminates the per-batch host-loop launch overhead that previously
+    made small batched shapes (e.g. ``b=8, 1024^3`` bf16) ~14× slower
+    than hipBLASLt's batched path.  See the K-686 PR for the structural
+    rationale.
 
     Args:
-        a:   (BATCH, M, K) tensor
-        b:   (BATCH, K, N) tensor
-        out: optional (BATCH, M, N) output tensor.  Allocated if None.
+        a:   ``(BATCH, M, K)`` tensor on a CUDA/HIP device, fp16/bf16/fp32.
+        b:   ``(BATCH, K, N)`` tensor; must match ``a`` in batch dim,
+             dtype, and device.
+        out: optional ``(BATCH, M, N)`` output tensor.  If supplied it is
+             written in-place AND returned (so callers can chain).
+             Must match ``a``'s dtype + device; shape must be exactly
+             ``(BATCH, M, N)`` — no broadcast / no in-place reshape.
+             Allocated by ``a.new_empty(...)`` if ``None``.
+
+    Contract / preconditions (validated):
+        * ``a.dim() == b.dim() == 3``
+        * ``a.shape[0] == b.shape[0]`` (batch dims agree)
+        * ``a.shape[2] == b.shape[1]`` (inner reduction dims agree)
+        * ``a.dtype == b.dtype`` and ``a.device == b.device``
+        * ``a`` and ``b`` are CUDA tensors (Triton requirement)
+        * If supplied, ``out.shape == (BATCH, M, N)``,
+          ``out.dtype == a.dtype``, ``out.device == a.device``
+
+    Contiguity: the kernel reads strides explicitly (``stride_ab``,
+    ``stride_bb``, etc. — see ``batched_gemm.py``) and does NOT require
+    ``a`` or ``b`` to be contiguous along any specific axis.  Non-
+    contiguous tensors (e.g. produced by ``.transpose(1, 2)``) are
+    supported as long as the rank-3 shape contract above holds.  We do
+    NOT silently call ``.contiguous()`` — that would hide a 2× memcpy
+    cost from the caller.
+
+    K not divisible by ``BLOCK_SIZE_K``: handled internally by the
+    ``EVEN_K`` constexpr branch in the kernel (tail-K masked load).
+    No restriction on ``K`` is exposed at this API surface.
+
+    BATCH == 1: dispatched through the same kernel path (the persistent
+    grid degenerates to a single batch slice). Equivalent to
+    ``tritonblas.matmul(a[0], b[0])[None]`` but without the un/re-
+    squeeze. ``tritonblas.matmul`` itself routes rank-3 inputs here.
 
     Returns:
-        ``out`` with shape (BATCH, M, N) and dtype matching ``a``.
+        ``out`` (the supplied or freshly-allocated buffer) with shape
+        ``(BATCH, M, N)`` and ``dtype == a.dtype``.
 
-    Notes:
-        Dispatches a single Triton grid over (BATCH * M_tiles * N_tiles)
-        instead of looping host-side, eliminating per-batch launch overhead
-        that previously made small batched shapes (e.g. b=8, 1024^3)
-        ~14× slower than hipBLASLt.
+    Raises:
+        ValueError: any contract violation listed above.
     """
-    assert a.dim() == 3, f"bmm: a must be rank-3, got {a.dim()}"
-    assert b.dim() == 3, f"bmm: b must be rank-3, got {b.dim()}"
+    # Input-validation — explicit ValueError messages so callers get a
+    # readable diagnostic instead of a Triton crash deep in the launcher.
+    if a.dim() != 3 or b.dim() != 3:
+        raise ValueError(
+            f"bmm: rank-3 inputs required, got a.dim()={a.dim()} "
+            f"b.dim()={b.dim()}"
+        )
+    if a.shape[0] != b.shape[0]:
+        raise ValueError(
+            f"bmm: batch dims disagree a.shape[0]={a.shape[0]} != "
+            f"b.shape[0]={b.shape[0]}"
+        )
+    if a.shape[2] != b.shape[1]:
+        raise ValueError(
+            f"bmm: inner reduction dims disagree a.shape[2]={a.shape[2]} "
+            f"!= b.shape[1]={b.shape[1]}"
+        )
+    if a.dtype != b.dtype:
+        raise ValueError(
+            f"bmm: dtype mismatch a.dtype={a.dtype} != b.dtype={b.dtype}"
+        )
+    if a.device != b.device:
+        raise ValueError(
+            f"bmm: device mismatch a.device={a.device} != b.device={b.device}"
+        )
+    if not a.is_cuda:
+        raise ValueError(
+            f"bmm: CUDA/HIP tensor required, got a.device={a.device}"
+        )
+
     BATCH, M, K = a.shape
-    _, K2, N = b.shape
-    assert K == K2, f"bmm: inner dims disagree (a.K={K}, b.K={K2})"
-    assert a.shape[0] == b.shape[0], "bmm: batch dims disagree"
+    _, _, N = b.shape
 
     if out is None:
         out = a.new_empty(BATCH, M, N)
     else:
-        assert out.shape == (BATCH, M, N), f"bmm: out shape {tuple(out.shape)} != {(BATCH, M, N)}"
+        if tuple(out.shape) != (BATCH, M, N):
+            raise ValueError(
+                f"bmm: out shape {tuple(out.shape)} != expected "
+                f"{(BATCH, M, N)}"
+            )
+        if out.dtype != a.dtype:
+            raise ValueError(
+                f"bmm: out.dtype={out.dtype} != a.dtype={a.dtype}"
+            )
+        if out.device != a.device:
+            raise ValueError(
+                f"bmm: out.device={out.device} != a.device={a.device}"
+            )
 
     return _batched_matmul_launch(a, b, out)
 

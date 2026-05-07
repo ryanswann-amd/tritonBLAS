@@ -105,6 +105,25 @@ class OrigamiMatmulSelector:
     # Conservative cutoff at 1.5: snaps for asp in [1, 1.5], skips for asp >= 2.
     SYMMETRIC_SNAP_ASPECT_THRESHOLD = 1.5
 
+    @classmethod
+    def _aspect_allows_symmetric_snap(cls, m: int, n: int) -> bool:
+        """Return True if the problem aspect ratio is square enough that the
+        snap-to-256x256 heuristic should fire.
+
+        Defensive divisor `max(min(M,N), 1)` keeps a degenerate input (M=0 or
+        N=0) from raising ZeroDivisionError; in that case aspect = max(M,N)
+        which is large, so the snap correctly skips.
+
+        Extracted as a classmethod (not a free function or instance method) so
+        unit tests can exercise the *exact* gate the production __init__ uses
+        without instantiating a selector (which requires a live GPU + origami
+        solver).  Subclasses can also override the threshold via the class
+        attribute and the gate continues to use the override.
+        """
+        denom = max(min(m, n), 1)
+        aspect = max(m, n) / denom
+        return aspect <= cls.SYMMETRIC_SNAP_ASPECT_THRESHOLD
+
     def __init__(
         self,
         m: int,
@@ -252,8 +271,7 @@ class OrigamiMatmulSelector:
         # on the large-skinny cohort: more tiles in the longer problem dim
         # spread across the 304 CUs, and the smaller short-dim tile cuts the
         # number of "wasted" partial tiles at the boundary.
-        problem_aspect = max(self._m, self._n) / max(min(self._m, self._n), 1)
-        if (problem_aspect <= self.SYMMETRIC_SNAP_ASPECT_THRESHOLD and
+        if (self._aspect_allows_symmetric_snap(self._m, self._n) and
             check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):

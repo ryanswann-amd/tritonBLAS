@@ -812,6 +812,55 @@ def _batched_matmul_launch(
     BLK_K = selector.block_k
     gsize_m = selector.group_m
     num_xcds = selector.num_sms
+    num_sms_hw = selector._hardware.N_CU
+
+    # ----------------------------------------------------------------
+    # Batch-aware tile downsize (occupancy fix for small batched shapes)
+    # ----------------------------------------------------------------
+    # Origami's tile pick is M/N/K-driven and assumes BATCH=1.  For the
+    # one K-654 batched residual where Origami picked the largest
+    # (256x256) tile -- 1024^3 b=8 bf16 -- the pick leaves CUs idle:
+    #
+    #   * 1024^3 b=8 bf16 -> Origami picks 256x256 -> 4*4=16 tiles per
+    #     batch * 8 batches = 128 total tiles, but MI300X has 304 CUs.
+    #     ~58% of CUs sit idle.  Halving to 128x128 gives 8*8=64 tiles
+    #     per batch * 8 = 512 tiles, filling the grid.
+    #
+    # Empirical sweep on the four K-654 batched shapes showed the
+    # naive "halve until full" loop *regressed* two cases (1024^3 b=4
+    # and 512^3 b=8) where Origami had already picked an L2-friendly
+    # mid-sized tile (128x128 / 128x64) -- halving those further
+    # dropped MFMA throughput more than the occupancy gain bought.
+    #
+    # Conservative heuristic that won out:
+    #   * Only consider downsizing when BOTH BLK_M >= 256 AND BLK_N >= 256
+    #     (Origami picks large tiles only when the per-batch problem is
+    #     compute-bound, which is exactly where batching can amortise
+    #     launch overhead -- and where the tile is large enough that
+    #     halving once still leaves us in the MFMA-efficient 128+ band).
+    #   * Take a single halving step (do not iterate to grid_size==total).
+    #     Going further past 128 hits the MFMA throughput cliff.
+    #   * Floor at 128 (matches the falsified-elsewhere "tile-tuning
+    #     residual" floor; smaller tiles are already Origami's job).
+    #
+    # This does NOT contradict the K-580/K-612/K-646 falsification of
+    # "tile tuning closes batched residuals" -- those experiments tuned
+    # tiles for BATCH=1; the issue here is that the BATCH=1-optimal
+    # tile leaves CUs idle when there *are* multiple batches.
+    # Only downsize when underutilization is SEVERE (< half the CUs)
+    # AND the current tile is large enough that halving stays in the
+    # MFMA-efficient 128+ band.  Empirical sweep data:
+    #   2048^3 b=4 fp16  Origami(256x256) -> 256 tiles (84% util) -> SKIP
+    #   1024^3 b=8 bf16  Origami(256x256) -> 128 tiles (42% util) -> DOWNSIZE
+    #   1024^3 b=4 fp16  Origami(128x128) -> 256 tiles (84% util) -> SKIP
+    #    512^3 b=8 fp16  Origami(128x64)  -> 256 tiles (84% util) -> SKIP
+    # i.e. the heuristic only fires for the one shape (1024^3 b=8) that
+    # actually has a big occupancy hole.
+    if (BLK_M >= 256 and BLK_N >= 256 and
+            BATCH * triton.cdiv(M, BLK_M) * triton.cdiv(N, BLK_N)
+            < num_sms_hw // 2):
+        BLK_M = max(128, BLK_M // 2)
+        BLK_N = max(128, BLK_N // 2)
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -821,7 +870,6 @@ def _batched_matmul_launch(
 
     # Persistent grid: cap at the hardware CU count, but never exceed
     # total_tiles (avoids idle WGs when batch is tiny).
-    num_sms_hw = selector._hardware.N_CU
     grid_size = min(num_sms_hw, total_tiles)
     grids = (grid_size,)
 

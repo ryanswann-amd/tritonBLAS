@@ -38,7 +38,8 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# K-138/K-176/K-198: cache toggle dominates per-call overhead at small M; re-enable.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -95,7 +96,7 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +242,7 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

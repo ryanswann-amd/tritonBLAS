@@ -10,7 +10,7 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .origami import OrigamiMatmulSelector
+from .origami import OrigamiMatmulSelector, kpack_for_tile, KPACK2_TILE_AREA_THRESHOLD
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -21,6 +21,11 @@ current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
 MAX_BLOCK_SIZE = 65536
+
+# K-587 (Architect feedback): the kpack policy lives in origami.py next to
+# the override registry; this module re-exports it so existing callers /
+# tests can still reach the constant by its old name.
+_KPACK2_TILE_AREA_THRESHOLD = KPACK2_TILE_AREA_THRESHOLD
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
@@ -98,7 +103,12 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-587 / K-383 §F7 CG-2: adaptive kpack — policy lives in
+    # `origami.kpack_for_tile`; see `KPACK2_TILE_AREA_THRESHOLD` there for
+    # the empirical rationale.  Skinny / small tiles win +3 to +4 pp from
+    # `ds_read_b128` (vec=8); 256x256 regresses -7 to -9 pp from doubled
+    # LDS-load VGPR pressure crowding out the accumulator.
+    kpack = kpack_for_tile(BLK_M, BLK_N)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +254,12 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-587 / K-383 §F7 CG-2: adaptive kpack — policy lives in
+    # `origami.kpack_for_tile`; see `KPACK2_TILE_AREA_THRESHOLD` there for
+    # the empirical rationale.  Skinny / small tiles win +3 to +4 pp from
+    # `ds_read_b128` (vec=8); 256x256 regresses -7 to -9 pp from doubled
+    # LDS-load VGPR pressure crowding out the accumulator.
+    kpack = kpack_for_tile(BLK_M, BLK_N)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

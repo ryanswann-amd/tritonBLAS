@@ -67,6 +67,10 @@ SMALL_M_MIN_K = 4096
 # where Stream-K wins for M=32 in measurements).
 SMALL_M_LARGE_K = 8192
 SMALL_M_LARGE_N = 4096
+# Each CU should get at least this many Stream-K iterations after splitting,
+# otherwise the per-tile aggregation overhead dominates.  Empirical
+# break-even on MI300X for fp16/bf16 small-M is ~2 iters/CU.
+SMALL_M_MIN_ITERS_PER_CU = 2
 
 
 def _next_pow2(x: int) -> int:
@@ -131,10 +135,22 @@ def _should_route_small_m(M: int, N: int, K: int, selector) -> bool:
     # Use the *override* tile shape (not the origami pick) when judging fill
     # fraction — origami often picks BLOCK_N <= 64 for tiny M, which would
     # already pass the threshold but miss the bigger win from BLOCK_N=256.
-    BLK_M, BLK_N, _ = _small_m_block_shape(M, N, K, selector)
+    BLK_M, BLK_N, BLK_K = _small_m_block_shape(M, N, K, selector)
     total_tiles = ((M + BLK_M - 1) // BLK_M) * ((N + BLK_N - 1) // BLK_N)
     num_cu = selector._hardware.N_CU
-    return total_tiles < int(num_cu * SMALL_M_GRID_FILL_RATIO)
+    if total_tiles >= int(num_cu * SMALL_M_GRID_FILL_RATIO):
+        return False
+    # Require at least SMALL_M_MIN_ITERS_PER_CU K iterations per CU after
+    # Stream-K splitting.  Without this, shapes with tiny N (e.g. N=1024,
+    # BLK_N=256 → 4 N-tiles) end up with one K iter per CU, which is too
+    # little work per launch to overcome Stream-K's per-tile aggregation
+    # overhead.  Empirically the data-parallel persistent kernel wins
+    # below this threshold.
+    iters_per_tile = max(1, (K + BLK_K - 1) // BLK_K)
+    total_streamk_iters = total_tiles * iters_per_tile
+    if total_streamk_iters < num_cu * SMALL_M_MIN_ITERS_PER_CU:
+        return False
+    return True
 
 
 def _maybe_wrap(fn, probe_tensor):

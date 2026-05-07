@@ -392,10 +392,15 @@ def _selector_wants_streamk(selector, enable_streamk: bool) -> bool:
 
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
-    selector, config: MatmulConfig,
+    selector, config: Optional[MatmulConfig] = None,
     enable_streamk=False, work_stealing=False
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    # work_stealing requires a MatmulConfig (preallocated tile counters and
+    # locks). Silently disable it when no config was supplied to keep the
+    # zero-config call path valid for callers that just want a default GEMM.
+    if work_stealing and config is None:
+        work_stealing = False
 
     if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
@@ -404,10 +409,12 @@ def matmul_lt(
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
-    c: torch.Tensor, selector, config: MatmulConfig,
+    c: torch.Tensor, selector, config: Optional[MatmulConfig] = None,
     enable_streamk=False, work_stealing=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    if work_stealing and config is None:
+        work_stealing = False
 
     if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)

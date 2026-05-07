@@ -1,9 +1,112 @@
 from __future__ import annotations
 import itertools
+import os
 import torch
 import origami
 import math
 from math import ceil
+
+
+# Shape-aware MFMA instruction size selection.
+#
+# Triton's AMD backend `matrix_instr_nonkdim` arg picks the M/N dim of the MFMA
+# instruction family.  The two practical choices on gfx942/gfx950 for FP16/BF16/
+# FP8 are 16 (16x16x16/32) and 32 (32x32x8/16).  Both have matched per-lane
+# throughput, but trade off:
+#   - 16x16:  more MFMA insts per tile -> better issue-overlap with mem ops;
+#             smaller AGPR/VGPR footprint; better for memory-bound shapes.
+#   - 32x32:  fewer MFMA insts per tile (each 2x latency); better at hiding
+#             scheduling gaps for compute-bound, large-K, asymmetric shapes;
+#             larger accumulator footprint.
+#
+# Historical default in tritonblas was a hardcoded 16 (see matmul.py).
+# Compute-underutilized large-skinny shapes that survived the dispatch
+# heuristic fixes can be underutilized at the 16x16 instruction shape;
+# this module exposes 32 as an opt-in second instruction shape, gated by a
+# tile/shape-alignment predicate so that switching is always legal.
+
+_MFMA_OVERRIDE_ENV = "TRITONBLAS_MFMA_INSTR_SIZE"
+
+
+def _parse_mfma_override(value):
+    """Validate an mfma_instr_size override.  Accepts None / "" / 16 / 32."""
+    if value is None or value == "":
+        return None
+    try:
+        ival = int(value)
+    except (TypeError, ValueError):
+        return None
+    if ival in (16, 32):
+        return ival
+    return None
+
+
+def select_mfma_instr_size(
+    m: int,
+    n: int,
+    k: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    largest_input_bitsize: int,
+    arch_name: str,
+    override: int | None = None,
+) -> int:
+    """Choose `matrix_instr_nonkdim` (16 or 32) for a (problem, tile) pair.
+
+    Default behavior (override is None) returns 16, matching the historical
+    hardcoded value (matmul.py used `mfmaInstrSize = 16` for every kernel
+    launch).  The 32-MFMA path is *opt-in only* via:
+      * the explicit `mfma_instr_size=32` constructor arg on
+        OrigamiMatmulSelector, or
+      * the TRITONBLAS_MFMA_INSTR_SIZE=32 env var.
+
+    Why opt-in only -- a benchmark sweep on MI300X / gfx942 showed 32x32
+    MFMA regressing 5-10% on every large-skinny shape tested across both
+    the persistent and stream-K kernel paths, with no shape achieving
+    >=5% uplift.  Auto-promoting based on shape heuristics therefore
+    introduces regressions, so the predicate is intentionally
+    conservative: it never returns 32 unless the operator asked for it.
+
+    The plumbing is still useful for autotuner integration and future
+    architectures (gfx950 may behave differently); keeping the predicate
+    function signature stable so Origami can extend the search space.
+
+    Validation (the override / arch / tile / problem gates below) still
+    applies when an override is supplied: an invalid request silently
+    falls back to 16 to keep the kernel launches legal.
+    """
+    if override is None:
+        return 16  # default: legacy behavior, no auto-promotion
+
+    if override == 16:
+        return 16
+    if override != 32:
+        return 16  # unknown override -> safe default
+
+    # override == 32: validate that 32 is legal for this (problem, tile, dtype).
+    # Architecture / dtype gate.
+    if largest_input_bitsize > 16:
+        # FP32 path uses 16x16x4 family; 32x32x* not supported on Triton's
+        # AMD backend for FP32.
+        return 16
+    if arch_name not in ("gfx942", "gfx950"):
+        # gfx90a / older archs lack the 32x32x16 family used here.
+        return 16
+
+    # Tile alignment gate: matrix_instr_nonkdim=32 requires the M and N
+    # tile dims to be >= 32 and divisible by 32.  Otherwise Triton would
+    # reject the config or silently fall back; force 16 instead.
+    if block_m < 32 or block_n < 32:
+        return 16
+    if (block_m % 32) != 0 or (block_n % 32) != 0:
+        return 16
+
+    # Problem-dim sanity gate.
+    if m < 32 or n < 32:
+        return 16
+
+    return 32
 
 
 def estimate_triton_lds_bytes(
@@ -109,6 +212,7 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
+        mfma_instr_size: int | None = None,
     ):
         # Save tensor sizes
         self._m = m
@@ -116,6 +220,12 @@ class OrigamiMatmulSelector:
         self._k = k
         self.streamk = streamk
         self._num_stages = num_stages
+        # MFMA shape: explicit override (autotune sweeps), else env var, else
+        # let the shape-aware predicate decide once we know the picked tile.
+        env_override = _parse_mfma_override(os.environ.get(_MFMA_OVERRIDE_ENV))
+        self._mfma_instr_size_override = (
+            mfma_instr_size if mfma_instr_size is not None else env_override
+        )
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -341,6 +451,33 @@ class OrigamiMatmulSelector:
     @property
     def even_k(self):
         return self._k % self.block_k == 0
+
+    @property
+    def mfma_instr_size(self) -> int:
+        """`matrix_instr_nonkdim` (16 or 32) for the picked tile.
+
+        Returns the explicit override if one was supplied (constructor arg or
+        TRITONBLAS_MFMA_INSTR_SIZE env var); otherwise applies the shape-aware
+        predicate.  Cached on first access since selector state is immutable
+        after __init__.
+        """
+        cached = getattr(self, "_mfma_instr_size_cached", None)
+        if cached is not None:
+            return cached
+        largest_input_bitsize = max(self._a_dtype_bitsize, self._b_dtype_bitsize)
+        chosen = select_mfma_instr_size(
+            m=self._m,
+            n=self._n,
+            k=self._k,
+            block_m=self.block_m,
+            block_n=self.block_n,
+            block_k=self.block_k,
+            largest_input_bitsize=largest_input_bitsize,
+            arch_name=self._arch_name,
+            override=self._mfma_instr_size_override,
+        )
+        self._mfma_instr_size_cached = chosen
+        return chosen
 
     @property
     def sk_grid(self):

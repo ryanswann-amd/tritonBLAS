@@ -50,6 +50,7 @@ def _make_matmul_selector(
     mx_block_size=0,
     streamk=False,
     num_stages: int = 2,
+    mfma_instr_size: Optional[int] = None,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
@@ -63,6 +64,7 @@ def _make_matmul_selector(
         mx_block_size=mx_block_size,
         streamk=streamk,
         num_stages=num_stages,
+        mfma_instr_size=mfma_instr_size,
     )
 
 
@@ -97,7 +99,10 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
-    mfmaInstrSize = 16
+    # Dual MFMA shape support: the selector chooses 16 (16x16x*) or
+    # 32 (32x32x*) based on tile alignment + shape predicate (or override).
+    # Falls back to legacy 16 if the selector lacks the property.
+    mfmaInstrSize = getattr(selector, "mfma_instr_size", 16)
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -243,7 +248,8 @@ def streamk_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
-    mfmaInstrSize = 16
+    # Dual MFMA shape support -- see persistent_matmul_lt above.
+    mfmaInstrSize = getattr(selector, "mfma_instr_size", 16)
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

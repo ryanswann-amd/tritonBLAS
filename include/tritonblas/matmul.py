@@ -480,6 +480,29 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Rank-3+ inputs are routed through the true batched entrypoint, which
+    # processes the whole batch in a single Triton launch instead of the legacy
+    # one-launch-per-batch Python loop. This eliminates the Tcold per-call
+    # overhead that dominated the K-654 batched residuals (top-2: 2048**3 fp16
+    # batch ratio=0.30, 1024**3 bf16 batch ratio=0.07).
+    if a.ndim > 2 or b.ndim > 2:
+        # The batched path doesn't currently take the streamk / work-stealing
+        # toggles (they apply to a single rank-2 GEMM). Reject explicit
+        # opt-ins so we don't silently ignore them; bare calls fall through.
+        if enable_streamk:
+            raise ValueError(
+                "tritonblas.matmul(): enable_streamk is not supported for "
+                "rank-3+ batched inputs; call tritonblas.matmul on each batch "
+                "slice if streamk is required."
+            )
+        if work_stealing:
+            raise ValueError(
+                "tritonblas.matmul(): work_stealing is not supported for "
+                "rank-3+ batched inputs."
+            )
+        from .batched_matmul import batched_matmul as _batched_matmul
+        return _batched_matmul(a, b, out=out)
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

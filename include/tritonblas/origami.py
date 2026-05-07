@@ -103,20 +103,20 @@ def check_triton_lds_capacity(
 
 
 # Small-M cohort threshold: problems with M <= SMALL_M_THRESHOLD waste most of
-# the M-dim work in tiles with BM>=64 (e.g. M=16 with BM=64 fills only 25% of
-# the tile rows). For these shapes we restrict BM to the smallest power of two
-# that covers M (16 or 32) and bias BN toward 128/256/512 so the kernel still
-# has enough N work per tile to keep the matrix-instruction pipeline full. We
-# also auto-enable StreamK so the grid scales along K-dim and recovers the wave
+# the M-dim work in the analytic-selector default tiles (BM>=64 or BM=16 with
+# only one MFMA per tile). For these shapes we pin (BM, BN, BK) = (32, 64, 64)
+# and force StreamK so the grid scales along K-dim and recovers the wave
 # parallelism that pure data-parallel mode loses when total tiles << N_CU.
 SMALL_M_THRESHOLD = 32
 
-
-def _round_up_pow2(x: int) -> int:
-    """Smallest power of two >= max(x, 1)."""
-    if x <= 1:
-        return 1
-    return 1 << (x - 1).bit_length()
+# Pinned tile for the small-M cohort. Empirically (32, 64, 64) hits the gfx942
+# MFMA pipeline well: BM=32 schedules two stacked 16x16x16 bf16/fp16 MFMAs per
+# tile (BM=16 issues only one and stalls on global loads); BN=64 + BK=64 keeps
+# LDS at ~32KB (well under the gfx942 64KB cap) so two pipeline stages always
+# fit and the StreamK K-split factor has room to fan the grid back out across
+# N_CU. The masked-off M rows when M<32 are nearly free because (a) Triton
+# masks past-M loads and (b) HBM traffic is dominated by M-independent B.
+_SMALL_M_TILE = (32, 64, 64)
 
 
 class OrigamiMatmulSelector:
@@ -442,64 +442,36 @@ class OrigamiMatmulSelector:
         # scale by the number of partial‑tiles per WG
         return tile_size * sk_grid
 
-    # Tile candidates for the small-M cohort, ordered by empirical preference
-    # on gfx942 (MI300X / MI325X) for bf16/fp16 from a (BM,BN,BK) sweep across
-    # the K-654-style shape distribution. Each entry is (BM, BN, BK).
-    #
-    # Why BM=32 even when M<=16? On gfx942 the bf16/fp16 MFMA tile is 16x16x16,
-    # so BM=32 schedules two stacked MFMAs per output tile and keeps the matrix
-    # pipeline saturated; with BM=16 the kernel issues only one MFMA per tile
-    # and stalls on global loads. The "wasted" lower 16 rows have negligible
-    # cost because (a) the LDS A-buffer is sized to BM (Triton masks past-M
-    # loads) and (b) HBM traffic is dominated by B which is M-independent.
-    # Empirically 32x64x64 + StreamK hits 0.7-1.2x torch.matmul on M={16,32}
-    # N={4K..16K} K={2K..16K} bf16 shapes on MI325X, vs 0.13-0.45x for the
-    # analytic-selector default of 16x16x32 / 16x64x32.
-    #
-    # BN=64 + BK=64 (~32 KB LDS at ns=2) leaves the most headroom for the
-    # StreamK K-split: tiles_N = N/64 yields a healthy DP grid that StreamK
-    # multiplies up to ~N_CU. Larger BN (128/256) under-fills the DP grid and
-    # the larger BK (128) leaves less K-split factor when iters_per_tile is
-    # already small.
-    _SMALL_M_TILE_CANDIDATES = (
-        (32, 64, 64),
-        (32, 64, 128),
-        (32, 128, 64),
-        (16, 64, 64),
-        (16, 128, 64),
-        (16, 64, 128),
-    )
-
     def _apply_small_m_override(self, bytes_a, bytes_b, lds_cap):
         """Patch the selected config + streamk flag for the small-M cohort.
 
         For M <= SMALL_M_THRESHOLD, replace the analytic tile choice with the
-        first LDS-feasible entry from ``_SMALL_M_TILE_CANDIDATES`` and pin
-        ``self.streamk`` so the kernel router (matmul.py) opts into the
-        StreamK path. The method is a no-op for M > SMALL_M_THRESHOLD, so
-        M >= 64 shapes are completely unaffected.
+        pinned ``_SMALL_M_TILE`` and force ``self.streamk`` on so the kernel
+        router (matmul.py) opts into the StreamK path and ``_compute_sk_grid``
+        fans the DP grid back out across N_CU. No-op for M > SMALL_M_THRESHOLD,
+        so M >= 64 shapes are algorithmically untouched.
+
+        The bytes_a/bytes_b/lds_cap args are kept (and asserted) so a future
+        change that picks a larger tile won't silently exceed LDS — but for
+        the currently pinned ``(32, 64, 64)`` bf16/fp16 tile the LDS check
+        is trivially true on any supported hardware (gfx90a/gfx942/gfx950 all
+        have >=64KB LDS, and a 2-stage 32x64x64 bf16 tile is ~32KB).
         """
         if not self._small_m:
             return
 
-        chosen = None
-        for bm, bn, bk in self._SMALL_M_TILE_CANDIDATES:
-            if check_triton_lds_capacity(
-                bm, bn, bk, bytes_a, bytes_b, lds_cap, self._num_stages
-            ):
-                chosen = (bm, bn, bk)
-                break
-        if chosen is None:
-            # All curated tiles exceed LDS — should not happen on supported
-            # hardware (>=64KB LDS) for these tiny tiles. Bail out instead of
-            # silently regressing the analytic pick.
-            return
+        bm, bn, bk = _SMALL_M_TILE
+        assert check_triton_lds_capacity(
+            bm, bn, bk, bytes_a, bytes_b, lds_cap, self._num_stages
+        ), (
+            f"Small-M tile {_SMALL_M_TILE} exceeds LDS cap {lds_cap} for "
+            f"bytes_a={bytes_a} bytes_b={bytes_b} num_stages={self._num_stages}"
+        )
 
-        bm, bn, bk = chosen
         self._result.config.mt.m = bm
         self._result.config.mt.n = bn
         self._result.config.mt.k = bk
-        self._small_m_override_tile = chosen
+        self._small_m_override_tile = _SMALL_M_TILE
 
         # Pin StreamK on so the dispatch layer routes to streamk_matmul_lt
         # and _compute_sk_grid() multiplies the DP grid (which is at most

@@ -297,3 +297,84 @@ class TestSelectorIntegration:
         # the "use your own default" None.
         assert sel.block_m > 0 and sel.block_n > 0 and sel.block_k > 0
         assert sel.num_warps is None
+
+
+# ---------------------------------------------------------------------------
+# End-to-end numerical correctness with the override active
+# ---------------------------------------------------------------------------
+
+
+@_requires_gfx942
+class TestEndToEndCorrectness:
+    """``tritonblas.matmul`` must produce numerically correct output on
+    every shipped K-199 cohort hit.
+
+    The override mutates BLK_M/BLK_N/BLK_K/num_warps/num_stages of the
+    persistent kernel. A future table edit (or a kernel-side change to how
+    those knobs are consumed) could silently produce wrong numerics — these
+    tests guard against that by comparing the wrapper's output against
+    ``torch.matmul`` on every (M, N, K, dtype) the table actually serves.
+
+    Tolerances (atol/rtol) match the bf16/fp16 envelope used elsewhere in
+    this repo (see ``tests/test_matmul_correctness.py``,
+    ``tests/test_matmul.py`` — bf16 and fp16 matmul tests use 1e-1 / 1e-1).
+    """
+
+    # Map dtype-string-as-stored-in-the-table -> torch dtype + tolerance.
+    _DTYPE_MAP = {
+        "bf16": (torch.bfloat16, 1e-1, 1e-1),
+        "fp16": (torch.float16, 1e-1, 1e-1),
+        "fp32": (torch.float32, 1e-3, 1e-3),
+    }
+
+    @pytest.mark.parametrize(
+        "key", list(_K199_OVERRIDES.keys()), ids=lambda k: f"{k[0]}x{k[1]}x{k[2]}_{k[3]}"
+    )
+    def test_matmul_output_matches_torch_with_override(self, key):
+        """For every shipped (M, N, K, dtype), tritonblas.matmul must match
+        torch.matmul within the bf16/fp16 envelope. The override is on by
+        default; this asserts it does not silently produce wrong numerics."""
+        import tritonblas
+
+        M, N, K, dtype_str = key
+        torch_dtype, atol, rtol = self._DTYPE_MAP[dtype_str]
+
+        # Sanity: the lookup must serve this entry, otherwise the test would
+        # be measuring the analytical fallback rather than the override.
+        assert lookup_k199_override(M, N, K, dtype_str, "gfx942") is not None, (
+            f"shipped table entry {key} did not satisfy the lookup gates "
+            "— the correctness assertion would be exercising the wrong "
+            "code path"
+        )
+
+        torch.manual_seed(0)
+        a = torch.randn(M, K, device="cuda", dtype=torch_dtype)
+        b = torch.randn(K, N, device="cuda", dtype=torch_dtype)
+
+        out = tritonblas.matmul(a, b)
+        ref = torch.matmul(a, b)
+
+        torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
+
+    @pytest.mark.parametrize(
+        "key", list(_K199_OVERRIDES.keys()), ids=lambda k: f"{k[0]}x{k[1]}x{k[2]}_{k[3]}"
+    )
+    def test_kill_switch_off_path_also_correct(self, key, monkeypatch):
+        """Kill-switch ON (override bypassed) must also produce correct
+        numerics — guards the rollback path from going subtly wrong if a
+        future refactor entangles the override with kernel correctness."""
+        import tritonblas
+
+        monkeypatch.setenv("TRITONBLAS_DISABLE_K199_OVERRIDES", "1")
+
+        M, N, K, dtype_str = key
+        torch_dtype, atol, rtol = self._DTYPE_MAP[dtype_str]
+
+        torch.manual_seed(0)
+        a = torch.randn(M, K, device="cuda", dtype=torch_dtype)
+        b = torch.randn(K, N, device="cuda", dtype=torch_dtype)
+
+        out = tritonblas.matmul(a, b)
+        ref = torch.matmul(a, b)
+
+        torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)

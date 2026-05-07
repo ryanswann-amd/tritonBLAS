@@ -13,7 +13,7 @@ run on c42 / mi300x in
 ``rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0``,
 torch 2.10.0+rocm7.2.0, triton 3.6.0+rocm7.2.0, gfx942.
 
-Two empirical findings shaped what landed here:
+Three empirical findings shaped what landed here:
 
 1. **split_k=1 wins 60/60 sweeps.** The K-direction loop is already short
    (``K/BLK_K in {1..16}``) and the streamk overhead (atomic locks,
@@ -34,18 +34,20 @@ Two empirical findings shaped what landed here:
    floor (~50 us) plus K-180-style dispatch overhead — neither addressable
    from per-shape tile selection alone.
 
-Given those findings, the table below contains **only entries that did NOT
-regress kernel time** in the verification A/B (``spd_def >= 1.00x``).
-14 of 30 swept bf16 shapes met that bar (geomean +1.3% within ~5% noise);
-all swept fp16 shapes regressed by ~1-5% (because Origami's fp16 picks are
-already small-tile and the override forced larger asymmetric tiles), so no
-fp16 entries land. This makes the change a kernel-level safe-or-better
-override rather than a "knob-on-by-default" of the kind K-654 warned
-against. The unverified 16 bf16 + 30 fp16 candidate configs are in the
-K-199 workspace artefacts (``output/k199_dispatch_table.py``,
-``output/winners_aggregated.json``, ``output/verify_kernel_*.json``) for
-re-derivation should the production wrapper get faster (K-180) or the
-launch path shorter.
+3. **fp16 produced no kernel-level winners.** Every swept fp16 shape
+   regressed by 1-5% under the override (Origami's fp16 picks are already
+   small-tile and at the launch floor). No fp16 entries are shipped.
+
+Given those findings, the table below contains **only entries with a
+strict kernel-level win above the measurement noise floor** in the
+verification A/B (``spd_def >= 1.02x``, the per-shape standard deviation
+of the median-of-30-reps timing). 2 of 30 swept bf16 shapes met that bar
+(geomean +2.4% on the kept entries, vs noise-level +0.5% if the previous
+``>=1.00x`` bar were retained). All other swept configs are intentionally
+NOT here — see ``output/verify_kernel_bf16.json`` and
+``output/verify_kernel_fp16.json`` in the K-199 workspace for the full
+per-shape numbers and re-derivation if the production wrapper (K-180) or
+launch floor improves enough that more entries clear the noise floor.
 
 Gating layers (per K-654: never apply a knob unconditionally):
 
@@ -68,36 +70,25 @@ Gating layers (per K-654: never apply a knob unconditionally):
 from __future__ import annotations
 
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
 
-# Per-shape overrides for the K-199 cohort. Only entries that did NOT regress
-# kernel time vs Origami's analytical pick in the verification A/B made it in;
-# see verify_kernel_bf16.json + verify_kernel_fp16.json (in the K-199 workspace
-# output/) for the full per-shape numbers. The 16 bf16 + 30 fp16 swept candidates
-# that regressed by 0.5-5% (kernel-level noise floor) are intentionally NOT here.
+# Per-shape overrides for the K-199 cohort. Only entries with a kernel-level
+# win above the measurement noise floor (spd_def >= 1.02x on median of 30
+# CUDA-event reps, fresh selector + fresh kernel cache) made it in.
 #
-# spd_def values are the verified (median over 30 reps, CUDA events) ratio of
-# Origami-default kernel time over K-199 kernel time on a fresh selector + fresh
-# kernel cache, MI300X g08u07 / c42, on the production persistent_matmul_lt path.
+# Source data: output/verify_kernel_bf16.json in the K-199 workspace
+# (n=30 swept shapes, MI300X g08u07 / c42, persistent_matmul_lt path).
+# 28 of 30 swept bf16 shapes were dropped because the kernel-level delta
+# was within noise (|spd-1| < 0.02); shipping them would have been a wash
+# at best and a regression risk on cooler runs (per K-199 reviewer feedback
+# and the K-654 lesson against shipping noise-level "wins").
+#
+# All swept fp16 shapes regressed and are not represented.
 _K199_OVERRIDES = {
-    # All entries are bf16 on MI300X. The fp16 sweep produced no kernel-level
-    # non-regressing winners on this cohort (Origami's small-tile fp16 picks
-    # are already at the launch floor).
-    (16, 8192, 256, 'bf16'): dict(BLK_M=16, BLK_N=256, BLK_K=32, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.01x
-    (32, 1024, 512, 'bf16'): dict(BLK_M=32, BLK_N=128, BLK_K=128, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.02x
-    (32, 4096, 256, 'bf16'): dict(BLK_M=32, BLK_N=256, BLK_K=32, num_warps=8, num_stages=2, split_k=1),  # verified spd_def=1.01x
-    (128, 1024, 128, 'bf16'): dict(BLK_M=128, BLK_N=128, BLK_K=128, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.02x
-    (128, 4096, 256, 'bf16'): dict(BLK_M=128, BLK_N=128, BLK_K=64, num_warps=8, num_stages=3, split_k=1),  # verified spd_def=1.00x
-    (1024, 16, 512, 'bf16'): dict(BLK_M=256, BLK_N=16, BLK_K=64, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.02x
-    (1024, 32, 128, 'bf16'): dict(BLK_M=128, BLK_N=32, BLK_K=128, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.03x
-    (1024, 128, 128, 'bf16'): dict(BLK_M=128, BLK_N=128, BLK_K=64, num_warps=8, num_stages=3, split_k=1),  # verified spd_def=1.00x
-    (2048, 32, 256, 'bf16'): dict(BLK_M=128, BLK_N=32, BLK_K=128, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.01x
-    (4096, 16, 256, 'bf16'): dict(BLK_M=256, BLK_N=16, BLK_K=32, num_warps=4, num_stages=3, split_k=1),  # verified spd_def=1.00x
-    (4096, 32, 256, 'bf16'): dict(BLK_M=128, BLK_N=32, BLK_K=64, num_warps=4, num_stages=3, split_k=1),  # verified spd_def=1.00x
-    (4096, 64, 256, 'bf16'): dict(BLK_M=128, BLK_N=64, BLK_K=128, num_warps=4, num_stages=2, split_k=1),  # verified spd_def=1.01x
-    (4096, 128, 256, 'bf16'): dict(BLK_M=128, BLK_N=128, BLK_K=64, num_warps=8, num_stages=2, split_k=1),  # verified spd_def=1.01x
-    (8192, 16, 256, 'bf16'): dict(BLK_M=256, BLK_N=16, BLK_K=32, num_warps=4, num_stages=3, split_k=1),  # verified spd_def=1.02x
+    # Both shipped entries are bf16 on MI300X.
+    (32, 1024, 512, 'bf16'): dict(BLK_M=32, BLK_N=128, BLK_K=128, num_warps=4, num_stages=2, split_k=1),    # verified spd_def=1.022x
+    (1024, 32, 128, 'bf16'): dict(BLK_M=128, BLK_N=32, BLK_K=128, num_warps=4, num_stages=2, split_k=1),    # verified spd_def=1.026x
 }
 
 

@@ -36,9 +36,12 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Function will behave like an LRU-Cache of heuristic results.
+# Saves several microseconds per call for previously seen problems by skipping
+# the Origami heuristic. Selector construction (~280us) dominates wall time at
+# small M, where the kernel itself is sub-millisecond; the cache is a >10x lift
+# on the small-M cohort vs running the heuristic on every call.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,

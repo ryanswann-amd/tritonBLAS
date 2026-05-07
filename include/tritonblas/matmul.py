@@ -825,15 +825,36 @@ def _batched_matmul_launch(
     grid_size = min(num_sms_hw, total_tiles)
     grids = (grid_size,)
 
-    # Chunk size used by chiplet_transform_chunked (mirrors the
-    # single-shot kernel: gsize_m * gsize_m, clamped against per-XCD
-    # budget).  ``selector.num_sms`` returns 0 on architectures where
-    # Origami did not populate the XCC mapping; fall back to the
-    # hardware-reported XCD count.  Disable the chiplet remap when the
-    # problem is too small to give each XCD multiple chunks
-    # (empirically: with ``total_tiles < 2 * grid_size``, the remap
-    # over-serialises the small batched shapes — k654-r2 regressed
-    # from 0.20 to 0.13 with the remap on; gating restores 0.20).
+    # ----------------------------------------------------------------
+    # Chiplet-aware tile remap (XCD chunk_size invariant)
+    # ----------------------------------------------------------------
+    # MI300X has 8 XCDs per GPU. ``chiplet_transform_chunked`` reorders
+    # the persistent tile-id space so every consecutive run of
+    # CHUNK_SIZE tiles lands on the SAME XCD — keeping each XCD's L2
+    # warm for adjacent tiles, then advancing chunk-by-chunk. The
+    # invariant we maintain here:
+    #
+    #    CHUNK_SIZE = min(GROUP_SIZE_M^2, grid_size // NUM_XCDS)
+    #
+    #   * GROUP_SIZE_M^2 is the same area used by the single-shot
+    #     persistent_matmul (matmul.py:107 — ``chunk_size = gsize_m *
+    #     gsize_m``); it gives each XCD a square L2-friendly footprint.
+    #   * ``grid_size // NUM_XCDS`` is the per-XCD budget — never give
+    #     an XCD more tiles than it has workgroups, otherwise the remap
+    #     wraps and over-serialises.
+    #   * matrix_instr_nonkdim=16 is hard-coded across the matmul
+    #     family (matmul.py:101, fp4_matmul, persistent_matmul_lt)
+    #     because the MI300X MFMA mfma_16x16x16 lane geometry assumes
+    #     a 16-lane K segment; changing this breaks the kpack=1
+    #     A/B-load contract and silently corrupts tail-K masking.
+    #
+    # ``selector.num_sms`` returns 0 on architectures where Origami did
+    # not populate the XCC mapping; fall back to the hardware-reported
+    # XCD count. Disable the chiplet remap when the problem is too
+    # small to give each XCD multiple chunks (empirically: with
+    # ``total_tiles < 2 * grid_size``, the remap over-serialises the
+    # small batched shapes — k654-r2 regressed from 0.20 to 0.13 with
+    # the remap on; gating restores 0.20).
     hw_xcds = max(1, getattr(selector._hardware, "NUM_XCD", 1))
     if num_xcds is None or num_xcds < 1:
         num_xcds = hw_xcds

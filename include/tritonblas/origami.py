@@ -5,6 +5,8 @@ import origami
 import math
 from math import ceil
 
+from .k199_skinny_dispatch import lookup_k199_override
+
 
 def estimate_triton_lds_bytes(
     block_m: int,
@@ -241,6 +243,34 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-199: per-shape override for medium-K skinny cohort on gfx942.
+        # Look up an exact (M, N, K, dtype) match in the swept dispatch table;
+        # if hit, override the analytical tile + record num_warps/num_stages so
+        # matmul.py can read them via the selector. Other cohorts unaffected.
+        # Only applied for non-streamk path: the swept winners are all split_k=1
+        # (persistent), so streamk dispatch is left intact.
+        self._k199_override = None
+        if not streamk:
+            self._k199_override = lookup_k199_override(
+                self._m, self._n, self._k, self._a_dtype_str, self._arch_name,
+            )
+            if self._k199_override is not None:
+                ovr = self._k199_override
+                # Guard: only apply if the override tile fits in LDS at its
+                # requested num_stages. If not, fall back to the analytical
+                # selection so we never crash on out-of-LDS configs.
+                if check_triton_lds_capacity(
+                    ovr["BLK_M"], ovr["BLK_N"], ovr["BLK_K"],
+                    bytes_a, bytes_b, lds_cap, ovr["num_stages"],
+                ):
+                    self._result.config.mt.m = ovr["BLK_M"]
+                    self._result.config.mt.n = ovr["BLK_N"]
+                    self._result.config.mt.k = ovr["BLK_K"]
+                    # num_stages is consumed via the selector property below.
+                    self._num_stages = ovr["num_stages"]
+                else:
+                    self._k199_override = None  # signal no override actually applied
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -333,6 +363,17 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def num_warps(self):
+        """Per-shape num_warps override from the K-199 dispatch table.
+
+        Returns the override value when this shape hits the K-199 table;
+        otherwise returns None so callers can use their default (8).
+        """
+        if self._k199_override is not None:
+            return self._k199_override["num_warps"]
+        return None
 
     @property
     def waves_per_eu(self):

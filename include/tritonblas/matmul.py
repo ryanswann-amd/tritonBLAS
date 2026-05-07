@@ -95,7 +95,9 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # K-199: selector.num_warps returns a per-shape override for the medium-K
+    # skinny cohort, or None for everything else. Default stays at 8.
+    num_warps = getattr(selector, "num_warps", None) or 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

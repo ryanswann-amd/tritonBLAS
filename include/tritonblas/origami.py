@@ -59,6 +59,23 @@ def check_triton_lds_capacity(
     return usage <= lds_capacity
 
 
+# Small-M cohort threshold: problems with M <= SMALL_M_THRESHOLD waste most of
+# the M-dim work in the analytic-selector default tiles (BM>=64 or BM=16 with
+# only one MFMA per tile). For these shapes we pin (BM, BN, BK) = (32, 64, 64)
+# and force StreamK so the grid scales along K-dim and recovers the wave
+# parallelism that pure data-parallel mode loses when total tiles << N_CU.
+SMALL_M_THRESHOLD = 32
+
+# Pinned tile for the small-M cohort. Empirically (32, 64, 64) hits the gfx942
+# MFMA pipeline well: BM=32 schedules two stacked 16x16x16 bf16/fp16 MFMAs per
+# tile (BM=16 issues only one and stalls on global loads); BN=64 + BK=64 keeps
+# LDS at ~32KB (well under the gfx942 64KB cap) so two pipeline stages always
+# fit and the StreamK K-split factor has room to fan the grid back out across
+# N_CU. The masked-off M rows when M<32 are nearly free because (a) Triton
+# masks past-M loads and (b) HBM traffic is dominated by M-independent B.
+_SMALL_M_TILE = (32, 64, 64)
+
+
 class OrigamiMatmulSelector:
     @staticmethod
     def estimate_triton_lds(
@@ -114,7 +131,15 @@ class OrigamiMatmulSelector:
         self._m = m
         self._n = n
         self._k = k
-        self.streamk = streamk
+        # Small-M cohort: skinny-M GEMMs where the tile selector would otherwise
+        # pick BM>=64 and waste most of the M-dim work. We force StreamK so the
+        # grid can split along K when the data-parallel grid (M_tiles * N_tiles)
+        # is much smaller than N_CU. The kernel-routing layer (matmul.py) reads
+        # `selector.streamk` to decide which kernel to launch, even if the
+        # caller passed enable_streamk=False — `self.streamk` is the OR of the
+        # caller's request and the cohort gate, set once at construction.
+        self._small_m = m <= SMALL_M_THRESHOLD
+        self.streamk = streamk or self._small_m
         self._num_stages = num_stages
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
@@ -233,15 +258,24 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # Heuristic to favor 256x256x64 tile when close~. Skip for the small-M
+        # cohort: any BM=256 promotion would waste >90% of the M-dim threads
+        # for M in {16, 32}.
+        if (not self._small_m and
+            check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
-        if streamk:
+        # Small-M cohort post-process: replace the analytic tile choice with
+        # the curated wide-N tile and pin StreamK. Must run before
+        # _compute_sk_grid so the grid is sized to the overridden tile.
+        self._small_m_override_tile = None
+        self._apply_small_m_override(bytes_a, bytes_b, lds_cap)
+
+        if self.streamk:
             self._grid = self._compute_sk_grid()
         else:
             self._grid = self._hardware.N_CU
@@ -345,6 +379,49 @@ class OrigamiMatmulSelector:
     @property
     def sk_grid(self):
         return self._grid
+
+    @property
+    def is_small_m(self):
+        """True if this selector falls into the small-M (M <= SMALL_M_THRESHOLD)
+        cohort. Exposed for tests and for the dispatch layer's explicit guard."""
+        return bool(self._small_m)
+
+    def _apply_small_m_override(self, bytes_a, bytes_b, lds_cap):
+        """Patch the selected config + streamk flag for the small-M cohort.
+
+        For M <= SMALL_M_THRESHOLD, replace the analytic tile choice with the
+        pinned ``_SMALL_M_TILE`` and force ``self.streamk`` on so the kernel
+        router (matmul.py) opts into the StreamK path and ``_compute_sk_grid``
+        fans the DP grid back out across N_CU. No-op for M > SMALL_M_THRESHOLD,
+        so M >= 64 shapes are algorithmically untouched.
+
+        The bytes_a/bytes_b/lds_cap args are kept (and asserted) so a future
+        change that picks a larger tile won't silently exceed LDS — but for
+        the currently pinned ``(32, 64, 64)`` bf16/fp16 tile the LDS check
+        is trivially true on any supported hardware (gfx90a/gfx942/gfx950 all
+        have >=64KB LDS, and a 2-stage 32x64x64 bf16 tile is ~32KB).
+        """
+        if not self._small_m:
+            return
+
+        bm, bn, bk = _SMALL_M_TILE
+        assert check_triton_lds_capacity(
+            bm, bn, bk, bytes_a, bytes_b, lds_cap, self._num_stages
+        ), (
+            f"Small-M tile {_SMALL_M_TILE} exceeds LDS cap {lds_cap} for "
+            f"bytes_a={bytes_a} bytes_b={bytes_b} num_stages={self._num_stages}"
+        )
+
+        self._result.config.mt.m = bm
+        self._result.config.mt.n = bn
+        self._result.config.mt.k = bk
+        self._small_m_override_tile = _SMALL_M_TILE
+
+        # Pin StreamK on so the dispatch layer routes to streamk_matmul_lt
+        # and _compute_sk_grid() multiplies the DP grid (which is at most
+        # ceil(N/BN) tiles for M_tiles=1) by an integer K-split factor that
+        # fans the work back out across N_CU.
+        self.streamk = True
 
     def _compute_sk_grid(self):
         # Grid model constants for StreamK

@@ -368,23 +368,25 @@ def streamk_matmul_lt(
 def _selector_wants_streamk(selector, enable_streamk: bool) -> bool:
     """Return True when the dispatch should route to streamk_matmul_lt.
 
-    Two — and only two — paths can promote a call onto the StreamK kernel:
+    Two — and only two — signals can promote a call onto the StreamK kernel:
 
       1. The caller passed ``enable_streamk=True`` (legacy behaviour).
-      2. The selector belongs to the small-M cohort (``selector.is_small_m``)
-         and exposes ``use_streamk=True``. The cohort gate is pinned at
-         ``__init__`` from M alone; it cannot be flipped post-construction
-         by mutating ``selector.streamk``.
+      2. The selector exposes ``use_streamk=True``. ``use_streamk`` is a
+         **read-only property** on ``OrigamiMatmulSelector`` derived from
+         two construction-time invariants: ``_user_streamk`` (the caller
+         passed ``streamk=True`` to the selector) or ``_small_m`` (the
+         small-M cohort gate, set from M alone in ``__init__``). It does
+         **not** derive from the writable ``selector.streamk`` attribute,
+         so a downstream mutation of ``selector.streamk`` cannot silently
+         promote an arbitrary problem onto the StreamK kernel.
 
-    The explicit ``is_small_m`` check is the invariant that prevents this
-    helper from silently re-routing arbitrary M >= 64 problems if some
-    other code path ever sets ``selector.streamk = True`` for a non-cohort
-    reason.
+    The invariant guarding the K-154 change is therefore at the property
+    boundary in ``OrigamiMatmulSelector.use_streamk``, not here — this
+    helper deliberately stays narrow so callers using duck-typed selectors
+    (e.g. tests) only need to expose ``use_streamk``.
     """
     if enable_streamk:
         return True
-    if not getattr(selector, "is_small_m", False):
-        return False
     return bool(getattr(selector, "use_streamk", False))
 
 

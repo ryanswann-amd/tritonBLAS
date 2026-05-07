@@ -548,18 +548,21 @@ def test_cached_kpack2_preserved_for_in_envelope_shape_on_mode(monkeypatch, tmp_
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
     reset_cache_for_testing()
 
-    # Mainline-benefit shape: K=2048, BK=64 → 32 iters; tiles = 8*8 = 64;
-    # M=N=2048 ≥ min_mn — fully inside the envelope.
+    # Mainline-benefit shape: K=2048, BK=64 → 32 iters; M=4096, N=2048
+    # → tiles = 16*8 = 128 (== tiles_max, admitted); M*N = 8M >
+    # min_problem_area (=2048²); M, N ≥ min_mn — fully inside envelope.
+    # (Was 2048×2048×2048 pre-K-707, which sits exactly on the
+    # ``M*N <= 2048*2048`` floor and is rejected by ``small_k_guard``.)
     cache = PersistentSwizzleCache(path=cache_path)
     key = (
-        "2048x2048x2048|f16|f16|f16|"
+        "4096x2048x2048|f16|f16|f16|"
         "256x256x64|ds|nows"
     )
     cache.set(key, SWIZZLED_CONFIG)
     reset_cache_for_testing()
 
     cfg = select_lds_config(
-        2048, 2048, 2048,
+        4096, 2048, 2048,
         "f16", "f16", "f16",
         256, 256, 64,
         streamk=False, work_stealing=False,

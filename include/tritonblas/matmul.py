@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,11 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .dispatch import (
+    should_use_small_m_path,
+    small_m_block_override,
+    small_m_grid,
+)
 
 
 
@@ -88,12 +94,6 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
@@ -101,6 +101,42 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ────────────────────────────────────────────────────────────────────
+    # Small-M dispatch: tall-skinny shapes (M <= SMALL_M_THRESHOLD) where
+    # Origami's default tiling leaves CUs idle.  We widen BLOCK_N (up to
+    # 256) and launch one workgroup per CU; the existing persistent loop
+    # in ScheduleContext.persistent_tile_range walks the (N, K) sub-tiles
+    # internally with stride == num_sms == grid.
+    #
+    # Path is gated to non-quantised, non-bias, non-work-stealing fp16/bf16
+    # GEMM so we don't perturb existing hot paths.  Set
+    # TRITONBLAS_DEBUG_SMALL_M=1 to log every override decision.
+    # ────────────────────────────────────────────────────────────────────
+    num_cus = getattr(selector, "_N_CU", 0) or selector._hardware.N_CU
+    use_small_m = (
+        not work_stealing
+        and not quantized
+        and bias is None
+        and a.dtype in (torch.float16, torch.bfloat16)
+        and should_use_small_m_path(M, N, K, BLK_M, BLK_N, num_cus)
+    )
+    if use_small_m:
+        BLK_M, BLK_N, BLK_K, gsize_m, num_warps = small_m_block_override(
+            M, N, K, num_cus
+        )
+        if os.environ.get("TRITONBLAS_DEBUG_SMALL_M"):
+            print(
+                f"[small-m] M={M} N={N} K={K} -> BLK_M={BLK_M} BLK_N={BLK_N} "
+                f"BLK_K={BLK_K} num_warps={num_warps}",
+                flush=True,
+            )
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -158,7 +194,24 @@ def persistent_matmul_lt(
             kpack=kpack,
         )
     else:
-        grids = total_tiles
+        if use_small_m:
+            # Persistent CTA: launch min(total_tiles, num_cus) blocks and pin
+            # NUM_SMS == grid so the kernel's persistent_tile_range stride
+            # matches the launch.  Each block sweeps a contiguous slice of
+            # tile IDs (one program per CU), iterating internally over (N, K)
+            # sub-tiles via the grid-stride loop.
+            grids, num_sms_kernel = small_m_grid(M, N, BLK_M, BLK_N, num_cus)
+            # XCD swizzling: with only a handful of N-tiles the chiplet
+            # remap in chiplet_transform_chunked can collide multiple blocks
+            # onto the same tile-id stream, leaving CUs idle.  Disable it
+            # for the small-M path.
+            num_xcds_eff = 1
+            chunk_size_eff = 1
+        else:
+            grids = total_tiles
+            num_sms_kernel = total_programs
+            num_xcds_eff = num_xcds
+            chunk_size_eff = chunk_size
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
@@ -181,9 +234,9 @@ def persistent_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=total_programs,
-            NUM_XCDS=num_xcds,
-            CHUNK_SIZE=chunk_size,
+            NUM_SMS=num_sms_kernel,
+            NUM_XCDS=num_xcds_eff,
+            CHUNK_SIZE=chunk_size_eff,
             BIAS=bias is not None,
             EVEN_K=even_k,
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,

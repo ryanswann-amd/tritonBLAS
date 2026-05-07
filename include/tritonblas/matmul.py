@@ -12,6 +12,13 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .dispatch import (
+    should_use_small_m_path,
+    should_use_split_k_path,
+    small_m_block_override,
+    small_m_grid,
+    split_k_block_override,
+)
 
 
 
@@ -66,6 +73,74 @@ def _make_matmul_selector(
     )
 
 
+def _streamk_with_override(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    M: int,
+    N: int,
+    K: int,
+    num_cus: int,
+) -> torch.Tensor:
+    """Invoke the Stream-K kernel directly with a small-M split-K override.
+
+    Used for the structurally CU-starved corner (M<=16, N<=2048, K>=8192)
+    where even the persistent grid-stride path can't recover the >75% of
+    CUs left idle by the small output-tile count.  See
+    ``tritonblas.dispatch.split_k_block_override`` for the recipe.
+
+    Bypasses the OrigamiMatmulSelector for the streamk variant (which is
+    expensive to construct on every call) by reusing the persistent
+    selector for hardware metadata and overriding the block dims +
+    sk_grid here.
+    """
+    BLK_M, BLK_N, BLK_K, gsize_m, num_warps, sk_grid = split_k_block_override(
+        M, N, K, num_cus
+    )
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    even_k = K % BLK_K == 0
+
+    grids = sk_grid
+    block_size = BLK_M * BLK_N
+    num_xcds = 8
+    chunk_size = max(1, min(gsize_m * gsize_m, grids // num_xcds))
+
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+
+    streamk_tiles = total_tiles % grids if grids > 0 else 0
+
+    _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
+        a, b, c,
+        None, None, None,
+        P, locks,
+        M, N, K,
+        a.stride(0), b.stride(1), c.stride(0), c.stride(1), None,
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=grids, NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        STREAMK_TILES=streamk_tiles,
+        BIAS=False, EVEN_K=even_k,
+        CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
+        QUANTIZED=False,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=2, num_warps=num_warps,
+        waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+    )
+    return c
+
+
 def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -88,12 +163,6 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
@@ -101,6 +170,45 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ────────────────────────────────────────────────────────────────────
+    # Small-M dispatch: tall-skinny shapes (M ≤ 64) with too few tiles to
+    # saturate the CUs.  Origami picks tiny BLOCK_N (16/32) which (a) under-
+    # utilises the MFMA pipeline and (b) leaves >90% of CUs idle.  The
+    # persistent kernel already supports a grid-stride loop over output
+    # tiles (see ScheduleContext.persistent_tile_range); we just need to
+    # pick larger blocks and launch num_cus workgroups so that loop runs.
+    #
+    # Path is gated to non-quantized, non-bias, non-work-stealing, fp16/bf16
+    # GEMM so we don't perturb the existing hot paths.
+    # ────────────────────────────────────────────────────────────────────
+    num_cus = getattr(selector, "_N_CU", 0) or selector._hardware.N_CU
+    small_m_eligible = (
+        not work_stealing
+        and not quantized
+        and bias is None
+        and a.dtype in (torch.float16, torch.bfloat16)
+        and should_use_small_m_path(M, N, K, BLK_M, BLK_N, num_cus)
+    )
+    use_split_k = small_m_eligible and should_use_split_k_path(M, N, K, num_cus)
+    use_small_m = small_m_eligible and not use_split_k
+
+    if use_split_k:
+        # Structurally CU-starved corner (M<=16, N<=2048, K>=8192): even at
+        # the smallest legal MFMA tile the persistent grid leaves >75% of
+        # CUs idle.  Route through Stream-K so K shards across CUs.
+        return _streamk_with_override(a, b, c, selector, M, N, K, num_cus)
+
+    if use_small_m:
+        BLK_M, BLK_N, BLK_K, gsize_m, num_warps = small_m_block_override(
+            M, N, K, num_cus
+        )
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -158,7 +266,20 @@ def persistent_matmul_lt(
             kpack=kpack,
         )
     else:
-        grids = total_tiles
+        if use_small_m:
+            # Persistent grid-stride: launch min(total_tiles, num_cus) blocks.
+            # Setting NUM_SMS == grid makes the kernel's persistent loop stride
+            # by the grid size, so each block sweeps a contiguous tile slice.
+            grids, num_sms_kernel = small_m_grid(M, N, BLK_M, BLK_N, num_cus)
+            # Keep CDNA3 chiplet swizzle (NUM_XCDS=8) — the autotune sweep
+            # picked num_xcds=8 with group_m=4 as the winner.  chunk_size is
+            # the gsize_m**2 area used by the chiplet remap.
+            num_xcds_eff = 8 if num_xcds <= 1 else num_xcds
+            chunk_size = max(1, min(gsize_m * gsize_m, grids // max(num_xcds_eff, 1)))
+        else:
+            grids = total_tiles
+            num_sms_kernel = total_programs
+            num_xcds_eff = num_xcds
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
@@ -181,8 +302,8 @@ def persistent_matmul_lt(
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=total_programs,
-            NUM_XCDS=num_xcds,
+            NUM_SMS=num_sms_kernel,
+            NUM_XCDS=num_xcds_eff,
             CHUNK_SIZE=chunk_size,
             BIAS=bias is not None,
             EVEN_K=even_k,

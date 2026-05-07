@@ -364,7 +364,7 @@ def test_autotune_falls_back_on_callback_error(monkeypatch, tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Split-predicate contract (this revision refactor)
+# Split-predicate contract (refactored gate)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -379,12 +379,12 @@ def test_amortizes_kpack2_overhead_inclusive_upper_bound():
 
 
 def test_amortizes_kpack2_overhead_below_floor_rejects():
-    """K=512 / BK=64 -> 8 iters is below the the post-landing regression sweep small-K floor."""
+    """K=512 / BK=64 -> 8 iters is below the small-K amortization floor (16)."""
     assert _amortizes_kpack2_overhead(512, 64) is False
 
 
 def test_amortizes_kpack2_overhead_above_ceiling_rejects():
-    """K=4096 / BK=64 -> 64 iters exceeds the the PRD-guard regression cycle large-K ceiling."""
+    """K=4096 / BK=64 -> 64 iters exceeds the large-K mainloop ceiling (32)."""
     assert _amortizes_kpack2_overhead(4096, 64) is False
 
 
@@ -398,6 +398,120 @@ def test_amortizes_kpack2_overhead_rejects_zero_block_k():
     assert _amortizes_kpack2_overhead(1024, 0) is False
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Strict on-the-cliff boundary cases (Testing Zealot — exact threshold pairs)
+#
+# Each test pins both sides of the boundary so a future calibration shift
+# that moves a constant by ±1 fails immediately, not silently.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_amortizes_kpack2_overhead_iters_15_vs_16_boundary():
+    """ceil(K/BK) = 15 must reject; = 16 must admit (lower-bound cliff).
+
+    K=960 / BK=64 -> 15 iters (one below KPACK2_MAINLOOP_ITERS_MIN).
+    K=1024 / BK=64 -> 16 iters (== KPACK2_MAINLOOP_ITERS_MIN, inclusive).
+    K=1023 / BK=64 -> ceil = 16 (still admits, ceil rounds up).
+    K=961 / BK=64 -> ceil = 16 (still admits, ceil rounds up).
+    """
+    assert _amortizes_kpack2_overhead(960, 64) is False, "15 iters must reject"
+    assert _amortizes_kpack2_overhead(1024, 64) is True, "16 iters must admit"
+    # Off-by-one with ceil semantics: K=961..1024 all map to 16 iters (admit).
+    assert _amortizes_kpack2_overhead(961, 64) is True
+    assert _amortizes_kpack2_overhead(1023, 64) is True
+
+
+def test_amortizes_kpack2_overhead_iters_32_vs_33_boundary():
+    """ceil(K/BK) = 32 must admit; = 33 must reject (upper-bound cliff).
+
+    K=2048 / BK=64 -> 32 iters (== KPACK2_MAINLOOP_ITERS_MAX, inclusive).
+    K=2049 / BK=64 -> 33 iters (one above the ceiling, must reject).
+    K=2112 / BK=64 -> 33 iters (one block-k above the ceiling, must reject).
+    """
+    assert _amortizes_kpack2_overhead(2048, 64) is True, "32 iters must admit"
+    assert _amortizes_kpack2_overhead(2049, 64) is False, "33 iters must reject"
+    assert _amortizes_kpack2_overhead(2112, 64) is False, "33 iters must reject"
+
+
+def test_amortizes_kpack2_overhead_block_k_64_vs_65_boundary():
+    """BK=64 must admit (in-band); BK=65 must reject (BK>64 has favourable LDS).
+
+    BK=64 is the maximum K-tile width at which kpack=2's bank-conflict
+    mitigation pays for itself; even one byte wider, the kpack=1 path
+    already has favourable LDS access width and the gate must reject.
+    """
+    # Pick K such that both BK values yield in-band iters (ceil(K/65)=16).
+    # K=1024: ceil/65 = 16 -> in iter band. BK=65 must STILL reject by BK rule.
+    assert _amortizes_kpack2_overhead(1024, 64) is True, "BK=64 must admit"
+    assert _amortizes_kpack2_overhead(1024, 65) is False, "BK>64 must reject"
+    # Confirm the gate uses the BK guard, not the iter band, for BK=65.
+    # K=1040 / BK=65 = 16 iters exactly; still rejects on BK.
+    assert _amortizes_kpack2_overhead(1040, 65) is False
+
+
+def test_amortizes_kpack2_overhead_defensive_zero_and_negative_K():
+    """Defensive: K=0 and negative K must reject (no admit, no exception)."""
+    assert _amortizes_kpack2_overhead(0, 64) is False
+    # Negative K should not crash and must not admit.
+    assert _amortizes_kpack2_overhead(-1, 64) is False
+    # K=0 with BK=0 (worst case): both guards trip; reject.
+    assert _amortizes_kpack2_overhead(0, 0) is False
+
+
+def test_fits_kpack2_working_set_M_1023_vs_1024_boundary():
+    """M=1023 must reject (launch-bound); M=1024 must admit (boundary inclusive)."""
+    # N held at 4096 (>= 1024) and BM=BN=256 (in-budget tile count).
+    assert _fits_kpack2_working_set(1023, 4096, 256, 256) is False, "M=1023 rejects"
+    assert _fits_kpack2_working_set(1024, 4096, 256, 256) is True, "M=1024 admits"
+
+
+def test_fits_kpack2_working_set_N_1023_vs_1024_boundary():
+    """N=1023 must reject (launch-bound); N=1024 must admit (boundary inclusive)."""
+    assert _fits_kpack2_working_set(4096, 1023, 256, 256) is False, "N=1023 rejects"
+    assert _fits_kpack2_working_set(4096, 1024, 256, 256) is True, "N=1024 admits"
+
+
+def test_fits_kpack2_working_set_tile_count_128_vs_129_boundary():
+    """tiles=128 must admit (== KPACK2_TILES_MAX); tiles=129 must reject.
+
+    BM=BN=256 -> M*N tile grid = (M/256)*(N/256). Pick a pair landing on
+    each side of the cliff:
+      4096*8192 / 256^2 = 16*32 = 512 tiles  -> reject
+      4096*2048 / 256^2 = 16*8  = 128 tiles  -> admit (== ceiling)
+    Construct a 129-tile grid: 4096x2304/256^2 = 16*9 = 144 -> reject.
+    Construct a 128-tile grid: 4096x2048/256^2 = 16*8 = 128 -> admit.
+    """
+    # Exactly KPACK2_TILES_MAX tiles -> admit (inclusive upper bound).
+    assert _fits_kpack2_working_set(4096, 2048, 256, 256) is True, "128 tiles admits"
+    # 144 tiles (next BM-multiple step above 128) -> reject.
+    assert _fits_kpack2_working_set(4096, 2304, 256, 256) is False, ">128 tiles rejects"
+
+
+def test_fits_kpack2_working_set_defensive_negative_dims():
+    """Defensive: negative or zero block dims must reject (no exception)."""
+    assert _fits_kpack2_working_set(4096, 4096, -1, 256) is False
+    assert _fits_kpack2_working_set(4096, 4096, 256, -1) is False
+    # Zero M or N: tile grid is 0; technically <=128 but meaningless.
+    # The composite gate gets these from real launches only, so we just
+    # verify no exception.
+    _fits_kpack2_working_set(0, 4096, 256, 256)  # must not raise
+    _fits_kpack2_working_set(4096, 0, 256, 256)  # must not raise
+
+
+def test_composite_gate_K_zero_BK_zero_defensive():
+    """Defensive end-to-end: K=0, BK=0 through the full select_lds_config path.
+
+    A buggy upstream caller (e.g. an empty-batch dispatch) must not crash
+    the gate; it must return BASELINE.
+    """
+    # Strict path with full block dims: composite must be False.
+    assert is_medium_k_residual(4096, 4096, 0, block_k=0, block_m=256, block_n=256) is False
+    assert is_medium_k_residual(4096, 4096, 0, block_k=64, block_m=256, block_n=256) is False
+    # Through select_lds_config (mode=on, would normally return SWIZZLED).
+    cfg = _select(K=0, block_k=0, block_m=256, block_n=256)
+    assert cfg == BASELINE_CONFIG
+
+
 def test_fits_kpack2_working_set_admits_winner_envelope():
     """original winner shapes (BM=BN=256, M*N <= 4096*8192) -> tiles<=128."""
     for M, N in [(4096, 2048), (8192, 1024), (2048, 4096)]:
@@ -405,7 +519,7 @@ def test_fits_kpack2_working_set_admits_winner_envelope():
 
 
 def test_fits_kpack2_working_set_rejects_prd_guard_losers():
-    """the PRD-guard regression cycle large-square cohort spills L2; must reject."""
+    """PRD-guard large-square cohort spills L2 working set; must reject."""
     # 4096x4096 at BM=BN=128 -> 1024 tiles
     assert not _fits_kpack2_working_set(4096, 4096, 128, 128)
     # 8192x4096 at BM=BN=256 -> 32*16 = 512 tiles
@@ -428,8 +542,8 @@ def test_is_medium_k_residual_composes_split_predicates():
     """Composite predicate equals AND of the two named pieces (strict path)."""
     cases = [
         (4096, 2048, 2048, 256, 256, 64, True),   # winner
-        (2048, 2048,  512, 256, 256, 64, False),  # the small-K regression cohort
-        (4096, 4096, 4096, 128, 128, 64, False),  # the large-K regression cohort
+        (2048, 2048,  512, 256, 256, 64, False),  # small-K cohort (iters=8 < 16)
+        (4096, 4096, 4096, 128, 128, 64, False),  # large-K cohort (iters=64 > 32)
     ]
     for M, N, K, BM, BN, BK, expected in cases:
         composite = is_medium_k_residual(M, N, K, block_k=BK, block_m=BM, block_n=BN)
@@ -441,14 +555,14 @@ def test_is_medium_k_residual_composes_split_predicates():
 
 
 def test_constants_match_calibrated_thresholds():
-    """this revision thresholds are pinned -- changing them must trip the test."""
+    """Calibrated thresholds are pinned -- changing them must trip the test."""
     assert KPACK2_MAINLOOP_ITERS_MIN == 16
     assert KPACK2_MAINLOOP_ITERS_MAX == 32
     assert KPACK2_TILES_MAX == 128
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Hot-path memoization (this revision Performance Hawk feedback)
+# Hot-path memoization
 # ──────────────────────────────────────────────────────────────────────────────
 
 

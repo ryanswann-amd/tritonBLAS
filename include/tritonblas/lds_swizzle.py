@@ -142,7 +142,8 @@ def _fits_kpack2_working_set(M: int, N: int, block_m: int, block_n: int) -> bool
     The PRD-guard cohort (8K/16K-square at BM=BN=256 -> 256-1024 tiles)
     regressed because the wider kpack=2 LDS path inflates the per-CU
     operand-tile working set and spills L2 (TCC miss frac +36..+62%). The
-    the original winner cohort sits at <=128 tiles; that boundary is the calibration.
+    original winner cohort sits at <=128 tiles; that boundary is the
+    calibration.
 
     Also rejects launch-bound tail shapes (M < 1024 or N < 1024) where the
     grid is too small for the kpack=2 prologue overhead to amortize, even if
@@ -189,13 +190,13 @@ def is_medium_k_residual(
 
     Calibrated against three disjoint shape sources:
 
-    * The original the original winner cohort (medium-K, in-envelope).
-    * The the PRD-guard regression cycle PRD-guard regression cohort (large-K, large-tile-count).
-    * The the post-landing regression sweep small-K regression cohort (low mainloop iters).
+    * The original winner cohort (medium-K, in-envelope).
+    * The PRD-guard regression cohort (large-K, large-tile-count).
+    * The post-landing small-K regression cohort (low mainloop iters).
 
     Block dims are optional only for legacy callers that predate the
     composite gate (such callers fall back to the K-band approximation
-    `256 <= K <= 2048` and skip the working-set check). All in-tree call
+    ``256 <= K <= 2048`` and skip the working-set check). All in-tree call
     sites (``select_lds_config``) pass full block dims and therefore get
     the strict composite check; legacy advisory callers are intentionally
     permissive because the load-bearing enforcement happens at
@@ -206,8 +207,9 @@ def is_medium_k_residual(
         return _kpack2_admissible(M, N, K, block_m, block_n, block_k)
 
     # Legacy/advisory path: block dims missing -> approximate with the
-    # K-band the original landing PR shipped with. select_lds_config never takes this
-    # path, so the missing tile-count guard cannot leak into codegen.
+    # original K-band shipped in the initial landing. select_lds_config
+    # never takes this path, so the missing tile-count guard cannot leak
+    # into codegen.
     if not (256 <= K <= 2048):
         return False
     if M < 1024 or N < 1024:
@@ -407,13 +409,14 @@ def select_lds_config(
     def _enforce_envelope(config: LDSSwizzleConfig) -> LDSSwizzleConfig:
         """Drop any non-baseline config to BASELINE when the shape is out of envelope.
 
-        This is the load-bearing enforcement of the this revision contract:
-        kpack=2 is *never* returned for out-of-envelope shapes, regardless
-        of how the caller arrived at the candidate (mode=on override, cache
-        hit, or autotune winner). Three earlier ticket cycles (the static analysis pass / the PRD-guard regression cycle
-        / the post-landing regression sweep) traced regressions to "predicate present, predicate
-        ignored" on one of these three paths -- factoring them into a single
-        helper prevents the same bug from recurring.
+        Load-bearing enforcement of the gate contract: kpack=2 is *never*
+        returned for out-of-envelope shapes, regardless of how the caller
+        arrived at the candidate (mode=on override, cache hit, or autotune
+        winner). Three earlier regression cycles (static analysis, PRD-guard
+        large-square cohort, post-landing small-K cohort) all traced
+        regressions to "predicate present, predicate ignored" on one of
+        these three paths -- factoring them into a single helper prevents
+        the same bug class from recurring.
         """
         if config.kpack == BASELINE_CONFIG.kpack:
             return config

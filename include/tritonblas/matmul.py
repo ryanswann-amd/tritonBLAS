@@ -95,6 +95,21 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
+    # MFMA inner-loop tuning anchor (gfx942 / Triton 3.6.0+rocm7.2.0 / bf16
+    # 1024x8192x8192, tile=256x256x64). A 39-config Triton-frontend sweep
+    # {num_warps in [4,8] x waves_per_eu in [0..4] x num_stages in [1,2,3]
+    # x kpack in [1,2] x mfmaInstrSize in [16,32]} plus the env pragmas
+    # TRITON_HIP_{GLOBAL,LOCAL}_PREFETCH and TRITON_HIP_USE_BLOCK_PINGPONG
+    # confirms (num_warps=8, waves_per_eu=0, num_stages=2, kpack=1,
+    # mfmaInstrSize=16) is the local optimum. Dropping num_warps to 4 on
+    # large macro tiles (>=256x256) — what hipBLASLt's Tensile picks (WG_4)
+    # — costs +67% kernel cycles (rocprofv3 kernel-trace median 360.4 us
+    # -> 603.6 us). AMDGCN dump shows nw=4 doubles VGPR usage 256 -> 512
+    # (gfx942 hard cap), generates 12x more VGPR scratch spills (3 -> 36)
+    # and 2.4x more total AMDGCN code (4.5K -> 11.1K lines), so the backend
+    # cannot schedule MFMAs back-to-back. Closing the residual gap to
+    # hipBLASLt needs upstream Triton-AMD codegen work (ds_read
+    # interleaving, s_waitcnt placement), not a frontend knob change.
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
@@ -241,6 +256,11 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
+    # See persistent_matmul_lt() above for the MFMA-inner-loop tuning anchor.
+    # The streamk path inherits the same knob defaults by parallel
+    # construction; the persistent-path sweep on gfx942 / Triton
+    # 3.6.0+rocm7.2.0 is the empirical reference. Re-sweep before lowering
+    # num_warps on large (>=256x256) macro tiles.
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16

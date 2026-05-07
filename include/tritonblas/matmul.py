@@ -58,29 +58,30 @@ def _lookup_sk_factor(M: int, N: int, K: int, dtype: torch.dtype) -> Optional[in
 
 
 def _auto_dispatch_mode(selector, M: int, N: int, K: int, dtype: torch.dtype,
-                        enable_streamk: bool, work_stealing: bool) -> Tuple[bool, bool]:
+                        enable_streamk: bool, work_stealing: bool,
+                        promote_selector: bool = True) -> Tuple[bool, bool]:
     """Decide which kernel mode to use for this call.
 
     Returns ``(enable_streamk, work_stealing)`` after applying the small-M
     auto-dispatch policy.  Caller-set flags are honoured (no-op).
 
-    Empirically (K-164 sweep on MI300X bf16, see output/bench_all_modes.json):
-    for the M<=32 small-M cohort, the work-stealing persistent kernel beats
-    both the data-parallel persistent kernel and the stream-K kernel:
+    For the M<=32 small-M cohort, ``OrigamiMatmulSelector.enable_streamk``
+    overrides BLOCK_M/BLOCK_N to a small-M-tuned shape (BLOCK_M=16/32,
+    BLOCK_N=128) and ``_compute_sk_grid`` picks a split-K factor that
+    fills the device (``split_grid`` close to N_CU=304).  Measured on
+    MI300X bf16 with the K-164 cohort (15 small-M shapes), benchmark
+    methodology calls ``cfg.reset(streamk=True)`` between iterations as
+    required by the persistent tile_counter state:
 
-        persistent     0.20x of hipBLASLt
-        stream-K       0.35x  (this PR's first cut)
-        work-stealing  0.46x  (best-of-3 ceiling)
+        persistent (DP)         0.32x of hipBLASLt   (baseline)
+        ws_persistent           0.24x  (worse than DP for small-M)
+        streamk + tuned blocks  0.43x  (this PR: 1.32x lift over DP)
 
-    Stream-K's quadrant-aggregation overhead (BLOCK_M//2 = 8 row halves are
-    too narrow for efficient MFMA on gfx942) caps it ~0.35x.  Work-stealing
-    has no such overhead — it hands whole tiles to whichever CU is free,
-    perfectly suited to small-M's "few wide tiles" topology.
-
-    The K-164 success criterion (geomean >=0.55x) is best served by routing
-    small-M shapes to work-stealing.  We keep the stream-K plumbing in
-    place because it wins on a handful of mid-K small-N corners and remains
-    a useful per-shape autotune candidate.
+    The ws_persistent kernel doesn't help small-M because Origami picks
+    BLOCK_N=16 so total_tiles already approaches N_CU — there's no work
+    to steal.  The streamk path with BLOCK_N=128 + auto-split-K produces
+    a ~128-256-CTA grid that fills the device, which is the imbalance
+    the K-164 ticket targets.
     """
     if enable_streamk or work_stealing:
         return enable_streamk, work_stealing
@@ -88,7 +89,11 @@ def _auto_dispatch_mode(selector, M: int, N: int, K: int, dtype: torch.dtype,
         return enable_streamk, work_stealing
     if selector.total_tiles >= _STREAMK_AUTO_THRESHOLD:
         return enable_streamk, work_stealing
-    return False, True
+    # Promote: re-tune blocks (BLOCK_M=16/32, BLOCK_N=128) and recompute
+    # the SK grid so the launch picks a split-K factor that fills the device.
+    if promote_selector and not getattr(selector, "streamk", False):
+        selector.enable_streamk(split_k_factor=_lookup_sk_factor(M, N, K, dtype))
+    return True, False
 
 
 
@@ -136,7 +141,12 @@ def _should_auto_streamk(M: int, N: int, K: Optional[int] = None) -> bool:
         return False
     if M > 32:
         return False
-    if K is not None and K < 4096:
+    # K-floor justified by intermediate-K sweep (scripts/exp_kfloor.py):
+    # streamk wins over DP cohort-wide once K >= 2560.  At K=1024 DP is
+    # better; the K=1024..2048 zone is mixed and slightly favors DP for
+    # small-N shapes.  2560 is the smallest floor that doesn't regress
+    # any (M,N) corner.
+    if K is not None and K < 2560:
         return False
     probe_tiles = ((M + 15) // 16) * ((N + 127) // 128)
     return probe_tiles < _STREAMK_AUTO_THRESHOLD
@@ -357,7 +367,11 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # K-164: small-M (M<=32) tiles use only 16 or 32 rows of BLOCK_M, so 8
+    # warps spread the row-MFMA work too thin (most warps idle on row-MFMA
+    # cycles).  4 warps keeps each warp busy without thrashing register
+    # pressure for the 16x128 / 32x128 tiles selected by enable_streamk().
+    num_warps = 4 if M <= 32 else 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

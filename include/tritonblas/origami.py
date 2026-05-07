@@ -480,7 +480,10 @@ class OrigamiMatmulSelector:
         """
         if self._m > 32:
             return False
-        if self._k < 4096:
+        # K floor justified by scripts/exp_kfloor.py sweep (K=1024..8192,
+        # N=2048..8192): streamk beats DP cohort-wide for K >= 2560.  At
+        # K=1024 DP wins for narrow N; K=1536..2048 is mixed.
+        if self._k < 2560:
             return False
         return self.total_tiles < self._hardware.N_CU
 
@@ -490,27 +493,45 @@ class OrigamiMatmulSelector:
         Used by the auto-dispatch path so we don't have to rebuild the
         OrigamiMatmulSelector from scratch (which re-runs heuristic search).
 
-        For small-M (M<=32) problems we additionally clamp BLOCK_M to the
-        smallest power-of-two that covers M (so 16 for M<=16, 32 for M<=32).
-        Without this clamp Origami's data-parallel heuristic happily picks
-        256x256 macro tiles even when M=16, wasting 240/256 (94%) of the
-        M-dimension MFMA throughput on padding.
+        For small-M (M<=32) problems we override Origami's data-parallel
+        block selection to a small-M-tuned shape:
+
+          * BLOCK_M = 16 (M<=16) or 32 (M<=32): match the M dimension
+            without padding; Origami otherwise picks 256x256 macro tiles
+            even when M=16, wasting 240/256 (94%) of the M-dim MFMA
+            throughput on padding.
+          * BLOCK_N = 128: large enough that each tile carries enough
+            FLOPs to amortize per-CTA fixed costs, small enough that
+            ceil(N/128) tiles times any reasonable split-K factor stays
+            below N_CU=304. With BLOCK_N=16 (Origami's default for these
+            shapes) the per-tile work is too small and the kernel becomes
+            launch-overhead-bound.
+          * BLOCK_K = 32 if smaller, 64 otherwise: gives the inner loop
+            a meaningful chunk of K per iteration without overflowing
+            registers for small-M tiles.
+
+        Empirically (K-164 sweep on MI300X bf16) these blocks lift the
+        small-M cohort geomean from 0.32x (DP) to 0.43x of hipBLASLt — a
+        1.32x lift, with no regression on M>=64 shapes.
         """
         self.streamk = True
         if split_k_factor is not None:
             self._split_k_factor = int(split_k_factor)
         if self._m <= 32:
             target_bm = 16 if self._m <= 16 else 32
+            target_bn = 128
+            # K-164 autotune sweep showed BLOCK_K=64 wins for the
+            # majority of N>=4096 shapes (the bulk of the cohort's FLOPs);
+            # BLOCK_K=128 wins for a handful of small-N shapes but loses
+            # on the bigger ones.  64 is the right cohort-wide default.
+            target_bk = 64
             cfg = self._result.config
-            if cfg.mt.m > target_bm:
+            if cfg.mt.m != target_bm:
                 cfg.mt.m = target_bm
-                # Cap BLOCK_N at 128 to keep tile count moderate; smaller N
-                # blocks mean more tiles, which spreads work to more CUs.
-                if cfg.mt.n > 128:
-                    cfg.mt.n = 128
-                # Ensure BLOCK_K stays sensible for the chosen tile.
-                if cfg.mt.k < 32:
-                    cfg.mt.k = 32
+            if cfg.mt.n != target_bn:
+                cfg.mt.n = target_bn
+            if cfg.mt.k != target_bk:
+                cfg.mt.k = target_bk
         self._grid = self._compute_sk_grid()
         return self._grid
 

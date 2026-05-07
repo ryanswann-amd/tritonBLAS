@@ -91,20 +91,6 @@ def _auto_dispatch_mode(selector, M: int, N: int, K: int, dtype: torch.dtype,
     return False, True
 
 
-def _maybe_auto_streamk(selector, M: int, N: int, K: int, dtype: torch.dtype,
-                        enable_streamk: bool) -> bool:
-    """Backwards-compat shim — old callers may still pass the streamk flag.
-
-    Prefer the new ``_auto_dispatch_mode`` which can also promote to
-    work-stealing.  Used only by code paths that haven't migrated yet.
-    """
-    sk, _ws = _auto_dispatch_mode(
-        selector, M, N, K, dtype,
-        enable_streamk=enable_streamk, work_stealing=False
-    )
-    return sk
-
-
 
 _tensor_cache = {}
 

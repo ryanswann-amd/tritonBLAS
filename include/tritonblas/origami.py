@@ -234,9 +234,14 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
+        # Skip the bump if either problem dimension is much smaller than the
+        # target tile dim — promoting BLK_M to 256 when M=16 means the kernel
+        # wastes >90% of its MFMA work on masked-out rows, which destroys
+        # small-M throughput.  Same logic for N.
         if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
+             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256)) and
+            self._m >= 256 and self._n >= 256):
             self._result.config.mt.m = 256
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
@@ -347,8 +352,13 @@ class OrigamiMatmulSelector:
         return self._grid
 
     def _compute_sk_grid(self):
-        # Grid model constants for StreamK
-        split_factors = [8, 6, 4, 3, 2, 1]
+        # Grid model constants for StreamK.
+        # Small-M shapes (tiles << CUs) need aggressive K-dimension splitting to
+        # fill the device.  Allow split factor up to 16 so that 8-tile shapes
+        # can target ~128 PEs (≈42% of 304 CUs), and 4-tile shapes can target
+        # ~64 PEs.  Larger split factors come first so the loop picks the most
+        # aggressive split that still satisfies the iters_per_cu floor.
+        split_factors = [16, 8, 6, 4, 3, 2, 1]
         tile_fractions = [0.0, 1.0 / 2.0, 1.0 / 8.0, 1.0 / 5.0, 1.0 / 4.0, 1.0 / 3.0]
         max_workspace = 128 * 1024 * 1024
 
@@ -360,6 +370,16 @@ class OrigamiMatmulSelector:
         tiles = ceil(M / BLK_M) * ceil(N / BLK_N)
         sk_grid = tiles
         iters_per_tile = max(1, ceil(K / BLK_K))
+
+        # Per-CU K-iter floor.  Default 8 keeps load/MFMA pipelining healthy on
+        # well-occupied shapes; for small-M we relax to 4 so the device can be
+        # filled even when iters_per_tile is modest (e.g. K=2048, BLK_K=64 →
+        # iters_per_tile=32; factor=16 needs the floor at 2 to engage, factor=8
+        # needs 4).  Empirically validated on MI300X for the M<=32 cohort.
+        small_m_underfill = (
+            ceil(M / BLK_M) * ceil(N / BLK_N) * 2 <= cu_count and M <= 32
+        )
+        iters_per_cu_floor = 2 if small_m_underfill else 8
 
         # More tiles than CUs: try fractional splits to distribute work
         if tiles > cu_count:
@@ -386,19 +406,31 @@ class OrigamiMatmulSelector:
                     sk_grid = frac_grid
                     break
 
-        # Fewer tiles than CUs: split along k-dimension up to some factor
+        # Fewer tiles than CUs: split along k-dimension up to some factor.
+        # split_factors is in descending order so the first satisfied candidate
+        # is the most aggressive split, maximizing CU occupancy.
         elif tiles < cu_count:
             for factor in split_factors:
                 split_grid = tiles * factor
                 iters_per_cu = iters_per_tile // factor
 
-                if split_grid <= cu_count and iters_per_cu >= 8:
+                if split_grid <= cu_count and iters_per_cu >= iters_per_cu_floor:
                     sk_grid = split_grid
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # Final check: drop the chosen grid only when it leaves an *unbalanced*
+        # remainder.
+        #
+        # Two regimes share this guard:
+        #   1. Data-parallel/fractional-grid (sk_grid <= tiles): require
+        #      tiles % sk_grid == 0 so each PE owns the same number of tiles.
+        #   2. Split-K (sk_grid > tiles, always = tiles * integer factor):
+        #      sk_grid is by construction a multiple of tiles, so the workload
+        #      divides evenly.  The original check `tiles % sk_grid != 0` was
+        #      *always* true here (since sk_grid > tiles), erroneously reverting
+        #      every split-K choice back to sk_grid = tiles and silently killing
+        #      occupancy on small-M shapes.
+        if sk_grid <= tiles and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

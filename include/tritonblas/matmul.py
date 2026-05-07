@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -24,6 +25,72 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+# Auto-streamk dispatch threshold for the small-M cohort.
+#
+# When the data-parallel grid (M*N tiles) covers fewer than this many CUs, the
+# device sits underutilized — small-M shapes (e.g. M=16, N=2048 with BLK=16x128
+# launch only 16 CTAs on 304 CUs, ~5% occupancy).  Stream-K splits the
+# K-dimension across the idle CUs with atomic accumulation, restoring
+# occupancy.
+#
+# Empirical note (K-164, MI300X, bf16):
+#   The current Triton stream-K kernel adds enough fixed-cost overhead
+#   (P-buffer init, lock spinning, quadrant aggregation) that for the
+#   M<=32 / bf16 cohort the persistent kernel with only `total_tiles` CTAs
+#   is competitive.  Auto-dispatch is therefore *off by default* and
+#   exposed as opt-in via env var, so kernel improvements (smaller-tile
+#   stream-K, fp8 paths, persistent-with-prefetch) can flip it on without
+#   touching the dispatch code.
+#
+# Env vars:
+#   TRITONBLAS_AUTO_STREAMK=1            -> enable the heuristic
+#   TRITONBLAS_STREAMK_AUTO_THRESHOLD=N  -> tile-count threshold (default 152
+#                                           on MI300X; 50% of MAX_SMS)
+def _read_streamk_threshold() -> int:
+    raw = os.environ.get("TRITONBLAS_STREAMK_AUTO_THRESHOLD")
+    if raw is None:
+        return MAX_SMS // 2
+    try:
+        return int(raw)
+    except ValueError:
+        return MAX_SMS // 2
+
+
+def _read_auto_streamk_enabled() -> bool:
+    raw = os.environ.get("TRITONBLAS_AUTO_STREAMK", "0")
+    return raw not in ("", "0", "false", "False", "FALSE", "no", "off")
+
+
+_STREAMK_AUTO_THRESHOLD = _read_streamk_threshold()
+_AUTO_STREAMK_ENABLED = _read_auto_streamk_enabled()
+
+
+def _should_auto_streamk(M: int, N: int) -> bool:
+    """Heuristic: enable Stream-K when the M*N tile grid leaves the device
+    significantly underutilized.
+
+    We probe with the smallest plausible block sizes (BLK_M=16, BLK_N=128) so
+    the heuristic is a *lower bound* on tile count — if even the smallest
+    sensible tiling fails to fill the device, the chosen block sizes (which
+    will be at least as large) will fail too.  This avoids a chicken-and-egg
+    dependency on the Origami selector before the dispatch decision.
+    """
+    if not _AUTO_STREAMK_ENABLED or _STREAMK_AUTO_THRESHOLD <= 0:
+        return False
+    if M > 32:
+        # Conservative gate: only auto-dispatch for the small-M cohort where
+        # the persistent kernel cannot fill the device regardless of tile
+        # choice.  M>=64 shapes have enough M-tile multiplicity that the
+        # existing heuristic+work-stealing path is competitive.
+        return False
+    # Probe with the smallest tile we'd ever pick.  ceil(M/16)*ceil(N/128)
+    # is an *upper bound* on grid coverage (smaller tile → more tiles); if
+    # this maxes out below the threshold, larger tiles will be even worse.
+    probe_tiles = ((M + 15) // 16) * ((N + 127) // 128)
+    return probe_tiles < _STREAMK_AUTO_THRESHOLD
+
+
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -480,6 +547,14 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Auto-dispatch to Stream-K when the data-parallel grid would leave the
+    # device underutilized.  Only triggers when the caller did not explicitly
+    # request a kernel mode (enable_streamk=False, work_stealing=False) so we
+    # don't override deliberate choices in tests/benchmarks.
+    if (not enable_streamk and not work_stealing
+            and _should_auto_streamk(a.shape[0], b.shape[1])):
+        enable_streamk = True
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
@@ -508,6 +583,11 @@ def matmul_a8w8(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # See matmul() for rationale on auto-dispatch to Stream-K.
+    if (not enable_streamk and not work_stealing
+            and _should_auto_streamk(M, N)):
+        enable_streamk = True
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -733,6 +813,11 @@ def addmm(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # See matmul() for rationale on auto-dispatch to Stream-K.
+    if (not enable_streamk and not work_stealing
+            and _should_auto_streamk(a.shape[0], b.shape[1])):
+        enable_streamk = True
+
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
         return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing)

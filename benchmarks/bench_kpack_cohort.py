@@ -1,4 +1,4 @@
-"""Benchmark the K-539 small-K cohort with kpack gating.
+"""Benchmark the small-K cohort with kpack gating.
 
 For each (M,N,K) and each kpack request in {1, 2}, we measure
 ``persistent_matmul_lt`` end-to-end latency on MI300X.  The gate guarantees
@@ -74,7 +74,7 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     args = ap.parse_args()
 
-    # K-539 small-K cohort: M,N in {512..2048}, K=512.
+    # Small-K cohort: M,N in {512..2048}, K=512.
     # We also include K in {768, 1024, 1536, 2048} so the boundary
     # the task asked us to confirm (1024) is visible in the data.
     mn_sweep = [512, 1024, 1536, 2048]

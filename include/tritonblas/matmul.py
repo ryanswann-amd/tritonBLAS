@@ -96,7 +96,12 @@ def persistent_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    waves_per_eu = 0
+    # K-243: square-ish large-K cohort (K>=8192, min(M,N)>=512) prefers
+    # waves_per_eu=2.  Empirically +0.7% geomean across the gated 54-shape
+    # cohort on MI300X (gfx942), zero regression on K-198 small-M and K-205
+    # skinny-N cohorts (both fail the gate by definition).  Default 0 lets
+    # the compiler pick for ungated shapes.
+    waves_per_eu = 2 if (K >= 8192 and min(M, N) >= 512) else 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
@@ -242,7 +247,9 @@ def streamk_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    waves_per_eu = 0
+    # K-243: mirror the persistent path's gated waves_per_eu lift
+    # (K>=8192 ∧ min(M,N)>=512).  See persistent_matmul_lt for cohort data.
+    waves_per_eu = 2 if (K >= 8192 and min(M, N) >= 512) else 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None

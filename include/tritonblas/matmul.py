@@ -14,6 +14,50 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# ---------------------------------------------------------------------------
+# Compute-bound bf16 NN cohort predicate (experimental scaffolding).
+# ---------------------------------------------------------------------------
+# Pure helper that classifies an (M, N, K, a, b) call site as belonging to
+# the large compute-bound bf16 NN cohort (M >= 1024, N >= 8192, K >= 8192).
+#
+# This predicate is intentionally NOT wired into persistent_matmul_lt or
+# streamk_matmul_lt. An empirical sweep on MI300X (gfx942) of (kpack,
+# num_warps, waves_per_eu, mfmaInstrSize, num_stages) on shapes inside the
+# cohort showed that no combination beats the current default
+# (kpack=1, num_warps=8, waves_per_eu=0, mfmaInstrSize=16, num_stages=2):
+# the previously hypothesized kpack=2 + num_warps=4 setting regresses by
+# ~28% wall-clock on (1024,8192,8192), (2048,8192,8192), (4096,8192,8192).
+# The function and its tests are retained as a stable, documented hook for
+# future investigations that may find a different optimal knob set for this
+# shape regime; landing it without exercising it keeps the cohort
+# definition reviewable in isolation from any kernel-side change.
+_COMPUTE_BOUND_BF16_NN_MIN_M = 1024
+_COMPUTE_BOUND_BF16_NN_MIN_N = 8192
+_COMPUTE_BOUND_BF16_NN_MIN_K = 8192
+
+
+def _is_compute_bound_bf16_nn_cohort(M, N, K, a, b):
+    """Return True iff (M, N, K, a, b) is in the large compute-bound bf16 NN
+    cohort (M >= 1024, N >= 8192, K >= 8192, both operands bfloat16, NN
+    layout = both row-major so stride(1) == 1 on both).
+
+    Pure function; no side effects; safe to call from a hot path.
+    """
+    if (
+        M < _COMPUTE_BOUND_BF16_NN_MIN_M
+        or N < _COMPUTE_BOUND_BF16_NN_MIN_N
+        or K < _COMPUTE_BOUND_BF16_NN_MIN_K
+    ):
+        return False
+    if a.dtype is not torch.bfloat16 or b.dtype is not torch.bfloat16:
+        return False
+    # NN layout: a:[M,K] row-major and b:[K,N] row-major both have
+    # stride(1) == 1 on the inner non-contraction axis. Transposed operands
+    # (NT / TN) place stride(1) on the contraction axis so this check fails.
+    if a.stride(1) != 1 or b.stride(1) != 1:
+        return False
+    return True
+
 
 _tensor_cache = {}
 

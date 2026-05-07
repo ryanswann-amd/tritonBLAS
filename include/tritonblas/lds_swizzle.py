@@ -306,18 +306,39 @@ def select_lds_config(
     """
     mode = get_mode()
 
+    # ─── ORDERING INVARIANT (do NOT reorder these four checks) ────────────
+    # The four early-return checks below MUST be evaluated in exactly this
+    # order. Reordering any of them silently re-introduces the K-580 small-K
+    # regression (-27% on K=512 cohort) that this gate exists to prevent:
+    #
+    #   1. mode == "off"        → BASELINE     (user opt-out wins absolutely)
+    #   2. K < SMALL_K_GATE     → BASELINE     (small-K guard; see #3 below)
+    #   3. mode == "on"         → SWIZZLED     (user force, K>=threshold only)
+    #   4. cache.get(key)       → cached       (autotuned winner)
+    #
+    # Why #2 must run BEFORE #3: a forced ``mode=on`` (microbenchmark or
+    # downstream tool) must not be allowed to push K<1024 shapes into the
+    # regressing kpack=2 path. The guard short-circuits BEFORE the mode=on
+    # override so the small-K cohort is protected even under explicit force.
+    #
+    # Why #2 must run BEFORE #4: a stale cache entry written before this
+    # gate existed (e.g. by a prior `mode=autotune` run) could otherwise
+    # override the gate and re-demote a small-K shape. Running #2 first
+    # makes the gate cache-invalidation-free.
+    #
+    # Why #2 must run AFTER #1: ``mode=off`` is the user's explicit opt-out
+    # and is a strict superset of the gate's behavior — checking it first
+    # is a micro-optimization that also keeps the off-path zero-overhead.
+    # ──────────────────────────────────────────────────────────────────────
+
     if mode == "off":
         return BASELINE_CONFIG
 
-    # Small-K guard (applies to every mode except explicit "off"):
-    # below the threshold the K-loop is too short to amortize the wider
-    # LDS-load VGPR pressure, and the swizzled config regresses by
-    # 5-30% (worst on the K=512, M,N=512..2048 small-K cohort). The
-    # guard runs BEFORE the cache lookup and the "on" override so a
-    # stale cache entry or a forced "on" can never demote a small-K
-    # shape — preserving the baseline (kpack=1) is always correctness-
-    # preserving and recovers the small-K cohort.
     if K < SMALL_K_GATE_THRESHOLD:
+        # Below the threshold the K-loop is too short to amortize the wider
+        # LDS-load VGPR pressure: kpack=2 regresses small-K shapes by 5-30%
+        # (worst case -27% on the K=512, M,N=512..2048 K-539 cohort).
+        # See SMALL_K_GATE_THRESHOLD definition for the empirical evidence.
         return BASELINE_CONFIG
 
     if mode == "on":

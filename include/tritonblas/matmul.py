@@ -9,6 +9,10 @@ import triton
 
 from .kernels import persistent_matmul, streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.small_m_splitk_gemm import (
+    is_small_m_eligible,
+    small_m_splitk_matmul_lt,
+)
 from .origami import OrigamiMatmulSelector
 
 _tensor_cache = {}
@@ -279,6 +283,12 @@ def _matmul(
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
+    # Small-M fast path: persistent split-K kernel that oversubscribes the grid
+    # to recover CU occupancy when the (M, N) tile count is far below N_CU.
+    if is_small_m_eligible(M, a.dtype, b.dtype, out.dtype, bool(enable_streamk),
+                           quantized=False, bias=False):
+        return small_m_splitk_matmul_lt(a, b, out)
+
     # Query Origami for solution — fall back to torch.mm for unsupported archs
     try:
         selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -345,6 +355,12 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    # Small-M fast path (see kernels/small_m_splitk_gemm.py).
+    if is_small_m_eligible(M, a.dtype, b.dtype, out.dtype, bool(enable_streamk),
+                           quantized=False, bias=False):
+        small_m_splitk_matmul_lt(a, b, out)
+        return None
+
     # Query Origami for solution — fall back to torch.mm for unsupported archs
     try:
         selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -371,6 +387,25 @@ def matmul(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None
 ) -> Optional[torch.Tensor]:
+    # Small-M fast path skips the triton_op wrapper to keep per-call Python
+    # overhead near zero. The wrapper costs ~50us per call which dominates
+    # latency at small M where each call is only a handful of microseconds of
+    # GPU work.  Autograd is not needed for inference-style small-M shapes;
+    # if the user asks for it (any input requires_grad), we still go through
+    # the wrapped path below.
+    if (
+        not enable_streamk
+        and (out is None or not (a.requires_grad or b.requires_grad or out.requires_grad))
+        and not (a.requires_grad or b.requires_grad)
+        and is_small_m_eligible(a.shape[0], a.dtype, b.dtype,
+                                (out.dtype if out is not None else a.dtype),
+                                False, quantized=False, bias=False)
+    ):
+        if out is None:
+            out = a.new_empty(a.shape[0], b.shape[1])
+        small_m_splitk_matmul_lt(a, b, out)
+        return out
+
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid)

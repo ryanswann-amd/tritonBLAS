@@ -24,13 +24,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
 from tritonblas.lds_swizzle import (  # noqa: E402
     BASELINE_CONFIG,
     SWIZZLED_CONFIG,
+    KPACK2_MAINLOOP_ITERS_MAX,
+    KPACK2_MAINLOOP_ITERS_MIN,
+    KPACK2_TILES_MAX,
     LDSSwizzleConfig,
     PersistentSwizzleCache,
+    _amortizes_kpack2_overhead,
+    _fits_kpack2_working_set,
     get_mode,
     is_medium_k_residual,
     reset_cache_for_testing,
     select_lds_config,
 )
+from tritonblas import lds_swizzle as _ls  # noqa: E402  (for cache-info introspection)
 
 
 @pytest.fixture(autouse=True)
@@ -355,3 +361,115 @@ def test_autotune_falls_back_on_callback_error(monkeypatch, tmp_path):
         autotune_fn=boom,
     )
     assert cfg == BASELINE_CONFIG
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Split-predicate contract (this revision refactor)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_amortizes_kpack2_overhead_inclusive_lower_bound():
+    """K=1024 / BK=64 -> 16 iters lands exactly at the floor and admits."""
+    assert _amortizes_kpack2_overhead(1024, 64) is True
+
+
+def test_amortizes_kpack2_overhead_inclusive_upper_bound():
+    """K=2048 / BK=64 -> 32 iters lands exactly at the ceiling and admits."""
+    assert _amortizes_kpack2_overhead(2048, 64) is True
+
+
+def test_amortizes_kpack2_overhead_below_floor_rejects():
+    """K=512 / BK=64 -> 8 iters is below the the post-landing regression sweep small-K floor."""
+    assert _amortizes_kpack2_overhead(512, 64) is False
+
+
+def test_amortizes_kpack2_overhead_above_ceiling_rejects():
+    """K=4096 / BK=64 -> 64 iters exceeds the the PRD-guard regression cycle large-K ceiling."""
+    assert _amortizes_kpack2_overhead(4096, 64) is False
+
+
+def test_amortizes_kpack2_overhead_rejects_wide_block_k():
+    """BK > 64 has favourable LDS access width already; no kpack=2 win."""
+    assert _amortizes_kpack2_overhead(1024, 128) is False
+
+
+def test_amortizes_kpack2_overhead_rejects_zero_block_k():
+    """Defensive: BK=0 must not divide by zero -- it must reject."""
+    assert _amortizes_kpack2_overhead(1024, 0) is False
+
+
+def test_fits_kpack2_working_set_admits_winner_envelope():
+    """original winner shapes (BM=BN=256, M*N <= 4096*8192) -> tiles<=128."""
+    for M, N in [(4096, 2048), (8192, 1024), (2048, 4096)]:
+        assert _fits_kpack2_working_set(M, N, 256, 256), (M, N)
+
+
+def test_fits_kpack2_working_set_rejects_prd_guard_losers():
+    """the PRD-guard regression cycle large-square cohort spills L2; must reject."""
+    # 4096x4096 at BM=BN=128 -> 1024 tiles
+    assert not _fits_kpack2_working_set(4096, 4096, 128, 128)
+    # 8192x4096 at BM=BN=256 -> 32*16 = 512 tiles
+    assert not _fits_kpack2_working_set(8192, 4096, 256, 256)
+
+
+def test_fits_kpack2_working_set_rejects_launch_bound_tail_shapes():
+    """M < 1024 or N < 1024 always rejects -- launch-overhead-dominated."""
+    assert not _fits_kpack2_working_set(512, 4096, 256, 256)
+    assert not _fits_kpack2_working_set(4096, 512, 256, 256)
+
+
+def test_fits_kpack2_working_set_rejects_zero_block_dims():
+    """Defensive: BM=0 or BN=0 must reject (no divide-by-zero, no admit)."""
+    assert not _fits_kpack2_working_set(4096, 4096, 0, 256)
+    assert not _fits_kpack2_working_set(4096, 4096, 256, 0)
+
+
+def test_is_medium_k_residual_composes_split_predicates():
+    """Composite predicate equals AND of the two named pieces (strict path)."""
+    cases = [
+        (4096, 2048, 2048, 256, 256, 64, True),   # winner
+        (2048, 2048,  512, 256, 256, 64, False),  # the small-K regression cohort
+        (4096, 4096, 4096, 128, 128, 64, False),  # the large-K regression cohort
+    ]
+    for M, N, K, BM, BN, BK, expected in cases:
+        composite = is_medium_k_residual(M, N, K, block_k=BK, block_m=BM, block_n=BN)
+        named = (
+            _amortizes_kpack2_overhead(K, BK)
+            and _fits_kpack2_working_set(M, N, BM, BN)
+        )
+        assert composite == named == expected, (M, N, K, BM, BN, BK)
+
+
+def test_constants_match_calibrated_thresholds():
+    """this revision thresholds are pinned -- changing them must trip the test."""
+    assert KPACK2_MAINLOOP_ITERS_MIN == 16
+    assert KPACK2_MAINLOOP_ITERS_MAX == 32
+    assert KPACK2_TILES_MAX == 128
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hot-path memoization (this revision Performance Hawk feedback)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_envelope_predicate_is_memoized():
+    """Identical-shape calls must not re-walk the predicate (lru_cache hit)."""
+    _ls._kpack2_admissible.cache_clear()
+    args = (4096, 2048, 2048, 256, 256, 64)
+    _ls._kpack2_admissible(*args)
+    info = _ls._kpack2_admissible.cache_info()
+    misses_after_first = info.misses
+    _ls._kpack2_admissible(*args)
+    _ls._kpack2_admissible(*args)
+    info2 = _ls._kpack2_admissible.cache_info()
+    # Two repeated calls must come from the cache (hits++), not re-evaluate.
+    assert info2.hits >= 2
+    assert info2.misses == misses_after_first
+
+
+def test_reset_cache_for_testing_evicts_lru():
+    """Test isolation: reset_cache_for_testing() must clear the predicate LRU."""
+    _ls._kpack2_admissible(1024, 1024, 1024, 128, 128, 64)
+    assert _ls._kpack2_admissible.cache_info().currsize >= 1
+    reset_cache_for_testing()
+    assert _ls._kpack2_admissible.cache_info().currsize == 0

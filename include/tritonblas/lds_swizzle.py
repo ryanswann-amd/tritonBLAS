@@ -40,6 +40,7 @@ backwards-compatible.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import threading
@@ -107,6 +108,70 @@ KPACK2_MAINLOOP_ITERS_MIN = 16
 KPACK2_TILES_MAX = 128
 
 
+def _amortizes_kpack2_overhead(K: int, block_k: int) -> bool:
+    """Return True iff mainloop_iters = ceil(K/BK) lands in the amortization band.
+
+    The small-K regression cohort (M,N in {512,1024,2048}, K=512, BK=64 -> 8 iters)
+    regressed -27..-28% vs the kpack=1 baseline because the per-launch fixed
+    cost of the kpack=2 codegen prologue + autotune-cache lookup dominates
+    the (small) bank-conflict win when the mainloop runs <16 iters.
+
+    The large-K regression cohort (4096-16384 square at BK=64 -> 64-256 iters)
+    regressed -2.9..-11% vs the kpack=1 baseline because the per-LDS-issue
+    dependency chain starves the MFMA pipeline (per_lds_wait +54..+96%,
+    mfma_active_frac -10..-18%) once the mainloop exceeds 32 iters.
+
+    Boundaries are inclusive on both sides: K=1024 / BK=64 = 16 iters admits;
+    K=2048 / BK=64 = 32 iters admits; K=512 / BK=64 = 8 iters and
+    K=4096 / BK=64 = 64 iters reject.
+    """
+    if block_k <= 0:
+        return False
+    if block_k > 64:
+        # Larger BK tiles already have favorable LDS access widths -- the
+        # bank-conflict win kpack=2 chases doesn't exist at this BK, so the
+        # overhead is pure cost.
+        return False
+    iters = (K + block_k - 1) // block_k
+    return KPACK2_MAINLOOP_ITERS_MIN <= iters <= KPACK2_MAINLOOP_ITERS_MAX
+
+
+def _fits_kpack2_working_set(M: int, N: int, block_m: int, block_n: int) -> bool:
+    """Return True iff the launch's tile count keeps the L2 working set in budget.
+
+    The PRD-guard cohort (8K/16K-square at BM=BN=256 -> 256-1024 tiles)
+    regressed because the wider kpack=2 LDS path inflates the per-CU
+    operand-tile working set and spills L2 (TCC miss frac +36..+62%). The
+    the original winner cohort sits at <=128 tiles; that boundary is the calibration.
+
+    Also rejects launch-bound tail shapes (M < 1024 or N < 1024) where the
+    grid is too small for the kpack=2 prologue overhead to amortize, even if
+    the K dimension would otherwise pass _amortizes_kpack2_overhead().
+    """
+    if block_m <= 0 or block_n <= 0:
+        return False
+    if M < 1024 or N < 1024:
+        return False
+    tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
+    return tiles <= KPACK2_TILES_MAX
+
+
+@functools.lru_cache(maxsize=4096)
+def _kpack2_admissible(M: int, N: int, K: int,
+                       block_m: int, block_n: int, block_k: int) -> bool:
+    """Memoized envelope check -- composed from the two named predicates.
+
+    Hot path: invoked from select_lds_config() on every kernel launch.
+    The LRU cache keeps this O(1) per shape after first call (a few
+    hundred ns of dict lookup vs ~33us kernel runtime on the small-K
+    cohort, where launch-overhead Python tax was a real concern).
+    """
+    return (
+        _amortizes_kpack2_overhead(K, block_k)
+        and _fits_kpack2_working_set(M, N, block_m, block_n)
+    )
+
+
 def is_medium_k_residual(
     M: int,
     N: int,
@@ -115,55 +180,41 @@ def is_medium_k_residual(
     block_m: Optional[int] = None,
     block_n: Optional[int] = None,
 ) -> bool:
-    """Return True if the shape sits in the medium-K residual band.
+    """Composite envelope predicate: K admissibility AND working-set fit.
 
-    Two-sided gate calibrated against three disjoint shape sources (the
-    original kpack=2 winner cohort, large-square PRD-guard losers, and a
-    small-K regression cohort uncovered post-landing):
+    Public stable name retained for backwards compatibility with existing
+    autotune call sites and unit tests. Internally this is the composition
+    of :func:`_amortizes_kpack2_overhead` and :func:`_fits_kpack2_working_set`,
+    routed through a memoizing wrapper for hot-path performance.
 
-    * **Lower K bound**: ``mainloop_iters = ceil(K/BK) >= 16`` — reject
-      the small-K cohort (M,N ∈ {512,1024,2048}, K=512) where the kpack=2
-      codegen + cache-lookup overhead dominates over the (small)
-      bank-conflict win. Empirically observed -27..-28% regression vs the
-      kpack=1 baseline before this guard.
-    * **Upper K bound**: ``mainloop_iters <= 32`` — reject large-K shapes
-      whose per-LDS-issue dependency chain starves the MFMA pipeline
-      (rocprof: ``per_lds_wait`` +54..+96%, ``mfma_active_frac`` -10..-18%
-      at kpack=2 with ``SQ_LDS_BANK_CONFLICT == 0`` at the baseline -> pure
-      overhead, no offsetting benefit).
-    * **Tile-count upper bound**: ``(M//BM) * (N//BN) <= 128`` — reject
-      high-occupancy launches whose L2 working-set spills under the wider
-      LDS path (TCC miss frac +36..+62% on 8K/16K-square shapes).
-    * **Original lower bound**: ``M, N >= 1024`` and ``block_k <= 64`` are
-      kept to exclude launch-bound tail shapes and naturally-wide-LDS
-      tiles respectively.
+    Calibrated against three disjoint shape sources:
 
-    All four conditions must hold. Block dims default to None for legacy
-    callers; when unknown the tile-count check is skipped (consult the
-    cache-side autotune as the load-bearing safety in that path).
+    * The original the original winner cohort (medium-K, in-envelope).
+    * The the PRD-guard regression cycle PRD-guard regression cohort (large-K, large-tile-count).
+    * The the post-landing regression sweep small-K regression cohort (low mainloop iters).
+
+    Block dims are optional only for legacy callers that predate the
+    composite gate (such callers fall back to the K-band approximation
+    `256 <= K <= 2048` and skip the working-set check). All in-tree call
+    sites (``select_lds_config``) pass full block dims and therefore get
+    the strict composite check; legacy advisory callers are intentionally
+    permissive because the load-bearing enforcement happens at
+    :func:`select_lds_config`, not here.
     """
+    # Strict path: full block dims supplied -> route through the composite gate.
+    if block_k is not None and block_m is not None and block_n is not None:
+        return _kpack2_admissible(M, N, K, block_m, block_n, block_k)
+
+    # Legacy/advisory path: block dims missing -> approximate with the
+    # K-band the original landing PR shipped with. select_lds_config never takes this
+    # path, so the missing tile-count guard cannot leak into codegen.
     if not (256 <= K <= 2048):
         return False
     if M < 1024 or N < 1024:
         return False
-    if block_k is not None and block_k > 64:
-        # Larger block_k tiles already have favorable LDS access widths.
-        return False
-
-    # Amortization-floor guard (lower bound on mainloop iters).
     if block_k is not None:
-        mainloop_iters = (K + block_k - 1) // block_k
-        if mainloop_iters < KPACK2_MAINLOOP_ITERS_MIN:
+        if not _amortizes_kpack2_overhead(K, block_k):
             return False
-        if mainloop_iters > KPACK2_MAINLOOP_ITERS_MAX:
-            return False
-
-    # Tile-count upper bound -- only enforceable when block dims are known.
-    if block_m is not None and block_n is not None and block_m > 0 and block_n > 0:
-        tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
-        if tiles > KPACK2_TILES_MAX:
-            return False
-
     return True
 
 
@@ -253,10 +304,16 @@ def get_cache() -> PersistentSwizzleCache:
 
 
 def reset_cache_for_testing() -> None:
-    """Used by unit tests to drop the singleton without touching the JSON file."""
+    """Used by unit tests to drop the singleton without touching the JSON file.
+
+    Also evicts the in-process LRU cache that memoizes the envelope predicate
+    -- some tests parametrize across many shapes and would otherwise see
+    stale answers from a previous test's cohort.
+    """
     global _CACHE_INSTANCE
     with _CACHE_LOCK:
         _CACHE_INSTANCE = None
+    _kpack2_admissible.cache_clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -341,20 +398,29 @@ def select_lds_config(
     if mode == "off":
         return BASELINE_CONFIG
 
-    # Structural guard: kpack=2 may only be returned for shapes that pass the
-    # calibrated medium-K residual gate. This is enforced **regardless of mode
-    # or cache state** because the original landed contract regressed
-    # 5 large-square shapes under forced mode=on and 53/61 shapes in a follow-up
-    # sweep that included a small-K cohort regressing -27..-28%. The fix must
-    # live at the codegen layer, not behind the mode flag, because downstream
-    # consumers do force mode=on. The block-aware predicate is only enforceable
-    # when block dims are known; all in-tree call sites supply them.
-    in_envelope = is_medium_k_residual(
-        M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
-    )
+    # Single envelope decision -- O(1) after first call per shape via lru_cache.
+    # All three downstream branches (mode=on, mode=autotune, cache hit) consult
+    # this one boolean, replacing three separate envelope checks that had
+    # drifted apart in earlier revisions.
+    in_envelope = _kpack2_admissible(M, N, K, block_m, block_n, block_k)
+
+    def _enforce_envelope(config: LDSSwizzleConfig) -> LDSSwizzleConfig:
+        """Drop any non-baseline config to BASELINE when the shape is out of envelope.
+
+        This is the load-bearing enforcement of the this revision contract:
+        kpack=2 is *never* returned for out-of-envelope shapes, regardless
+        of how the caller arrived at the candidate (mode=on override, cache
+        hit, or autotune winner). Three earlier ticket cycles (the static analysis pass / the PRD-guard regression cycle
+        / the post-landing regression sweep) traced regressions to "predicate present, predicate
+        ignored" on one of these three paths -- factoring them into a single
+        helper prevents the same bug from recurring.
+        """
+        if config.kpack == BASELINE_CONFIG.kpack:
+            return config
+        return config if in_envelope else BASELINE_CONFIG
 
     if mode == "on":
-        return SWIZZLED_CONFIG if in_envelope else BASELINE_CONFIG
+        return _enforce_envelope(SWIZZLED_CONFIG)
 
     cache = get_cache()
     key = _cache_key(
@@ -376,22 +442,19 @@ def select_lds_config(
             timings = None
         else:
             timings.sort(key=lambda t: t[0])
-            winner = timings[0][1]
+            winner = _enforce_envelope(timings[0][1])
             cache.set(key, winner)
             return winner
 
     # auto mode (and autotune fall-through): cache -> baseline.
     # auto is intentionally safe -- it never picks a non-baseline config without
-    # an empirical timing in the cache. Cache hits are still gated by the
-    # envelope: a stale kpack=2 entry on an out-of-envelope shape is dropped to
-    # baseline rather than served, preventing silent regressions when cohort
-    # definitions tighten between releases.
+    # an empirical timing in the cache. Cache hits are also routed through
+    # _enforce_envelope so a stale kpack=2 entry on an out-of-envelope shape
+    # is silently downgraded rather than served, preventing regressions when
+    # cohort definitions tighten between releases.
     cached = cache.get(key)
     if cached is not None:
-        if cached.kpack == BASELINE_CONFIG.kpack or in_envelope:
-            return cached
-        # Cached non-baseline config but shape is out of envelope → baseline.
-        return BASELINE_CONFIG
+        return _enforce_envelope(cached)
 
     return BASELINE_CONFIG
 
@@ -401,6 +464,11 @@ __all__ = [
     "BASELINE_CONFIG",
     "SWIZZLED_CONFIG",
     "PersistentSwizzleCache",
+    "KPACK2_MAINLOOP_ITERS_MIN",
+    "KPACK2_MAINLOOP_ITERS_MAX",
+    "KPACK2_TILES_MAX",
+    "_amortizes_kpack2_overhead",
+    "_fits_kpack2_working_set",
     "get_cache",
     "get_mode",
     "is_medium_k_residual",

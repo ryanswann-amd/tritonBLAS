@@ -778,6 +778,59 @@ def _bmm_selector_cached(M, N, K, a_dtype, b_dtype, c_dtype, device_index, batch
     )
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Batched-matmul per-shape config lookup (gfx942 / MI300X)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# For shapes where Origami's BATCH=1-driven heuristic produces a tile/
+# launcher config that under-utilises the persistent grid OR misses a
+# better kpack/waves_per_eu combination, we keep an empirically-derived
+# lookup keyed by ``(BATCH, M, N, K, dtype)``.
+#
+# Each entry maps to a tuple
+#   (BLK_M, BLK_N, BLK_K, GROUP_M, num_warps, num_stages,
+#    kpack, waves_per_eu)
+# matching the kwargs expected by the ``batched_matmul`` Triton kernel.
+#
+# Provenance: K-686 iter-2 autotune sweep on MI300X (gfx942), node
+# ``g09u25``, ROCm 7.2 / Triton 3.6, container
+# ``rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0``.
+# Each entry beats the Origami-driven default by ≥0.05 ratio vs hipBLASLt
+# (``torch.bmm``) on the K-654 batched residual cohort.  See
+# ``state/mc2/workspaces/K-686/output/tune_v5_*.csv`` for the underlying
+# 480-config sweep.
+#
+# Adding new shapes: run ``scripts/tune_bmm.py --shapes <tag>``; if the
+# best config beats the Origami-driven number by ≥0.05, add the row here
+# with a one-line provenance comment.  Shapes NOT in the lookup fall
+# back to the Origami-driven path (which handles all rank-2 inputs and
+# is still the right choice for compute-bound batched shapes whose
+# Origami pick already saturates the CUs).
+_BMM_SHAPE_LOOKUP = {
+    # (BATCH, M, N, K, dtype): (BLK_M, BLK_N, BLK_K, GROUP_M, num_warps,
+    #                           num_stages, kpack, waves_per_eu)
+    # K-686 PRD top-2 + companion batched shapes.
+    (4, 2048, 2048, 2048, torch.float16):
+        (256, 256, 64, 8, 8, 2, 2, 0),  # ratio 0.805 (vs Origami 0.636)
+    (8, 1024, 1024, 1024, torch.bfloat16):
+        (256, 128, 64, 8, 8, 2, 1, 2),  # ratio 0.785 (vs Origami 0.529)
+    (4, 1024, 1024, 1024, torch.float16):
+        (128, 128, 64, 4, 8, 2, 2, 2),  # ratio 0.788 (vs Origami 0.529)
+    (8,  512,  512,  512, torch.float16):
+        (64,  64,  64, 4, 4, 2, 2, 2),  # ratio 0.874 (vs Origami 0.492)
+}
+
+
+def _bmm_lookup_config(BATCH, M, N, K, dtype):
+    """Return a per-shape launcher config or None if not in the table.
+
+    Pure dict lookup — no Origami call, no LRU cache; the dict itself
+    is the cache.  Returns ``None`` for shapes not in the table so the
+    caller falls back to the Origami-driven path.
+    """
+    return _BMM_SHAPE_LOOKUP.get((BATCH, M, N, K, dtype))
+
+
 def _batched_matmul_launch(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -800,9 +853,64 @@ def _batched_matmul_launch(
     BATCH, M, K = a.shape
     _, _, N = b.shape
 
-    # Origami picks the per-shape tile config; batch GEMM reuses the same
-    # tile across all batch entries (problem.batch=BATCH is recorded for
-    # heuristics but tile selection is M/N/K-driven).
+    # ----------------------------------------------------------------
+    # Per-shape lookup (K-686 iter-2): for the four K-654 batched
+    # residuals, the Origami selector under-picks (its tile heuristic
+    # is BATCH=1-driven and doesn't see the kpack/waves_per_eu axis).
+    # If the (BATCH, M, N, K, dtype) tuple is in ``_BMM_SHAPE_LOOKUP``,
+    # use that explicit launcher config and short-circuit the Origami
+    # path entirely (faster + better ratios; see the lookup-table
+    # docstring above for provenance).
+    #
+    # Hardware constants (NUM_SMS / NUM_XCDS) are still queried from the
+    # current device — the lookup table keys ON shape, not GPU SKU.
+    # ----------------------------------------------------------------
+    lookup = _bmm_lookup_config(BATCH, M, N, K, a.dtype)
+    if lookup is not None:
+        # Hardware metadata still needs an Origami call for NUM_XCD/N_CU,
+        # but the result is LRU-cached so the cost is paid once per
+        # (shape, dtype, device) and amortised across all subsequent
+        # invocations.  We don't *use* selector's tile picks when the
+        # lookup hits — only the hardware-property handles.
+        selector = _bmm_selector_cached(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device.index, BATCH
+        )
+        (BLK_M, BLK_N, BLK_K, gsize_m, num_warps, num_stages,
+         kpack, waves_per_eu) = lookup
+        num_sms_hw = selector._hardware.N_CU
+        hw_xcds = max(1, getattr(selector._hardware, "NUM_XCD", 1))
+        num_xcds = hw_xcds
+        mfmaInstrSize = 16
+
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        tiles_per_batch = total_blocks_M * total_blocks_N
+        total_tiles = BATCH * tiles_per_batch
+        even_k = K % BLK_K == 0
+        grid_size = min(num_sms_hw, total_tiles)
+        if total_tiles < 2 * grid_size:
+            num_xcds = 1
+        chunk_size = min(gsize_m * gsize_m, max(1, grid_size // num_xcds))
+
+        _maybe_wrap(batched_matmul, probe_tensor=a)[(grid_size,)](
+            a, b, out, M, N, K, BATCH,
+            a.stride(0), a.stride(1), a.stride(2),
+            b.stride(0), b.stride(1), b.stride(2),
+            out.stride(0), out.stride(1), out.stride(2),
+            BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m, NUM_SMS=grid_size, NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size, EVEN_K=even_k,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            num_stages=num_stages, num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize, kpack=kpack,
+        )
+        return out
+
+    # Fallback: Origami-driven config for unlisted shapes.  Same path
+    # as before — picks tile / launcher params from the OrigamiSelector
+    # and applies the conservative occupancy-aware tile-downsize
+    # heuristic for severely under-utilised batched shapes.
     selector = _bmm_selector_cached(
         M, N, K, a.dtype, b.dtype, out.dtype, a.device.index, BATCH
     )

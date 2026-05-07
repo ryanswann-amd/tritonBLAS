@@ -259,7 +259,12 @@ class OrigamiMatmulSelector:
         )
 
         # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
+        # Skip for small-M cohort: M<=32 cannot benefit from BM=256 (97% of M-dim
+        # threads would idle), and the small-M narrowing in
+        # _generate_default_configs already constrained BM<=32 deliberately. The
+        # small-M cohort gate (self._small_m) is pinned at __init__ from M alone.
+        if (not self._small_m and
+            check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
             ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
              (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
             self._result.config.mt.m = 256

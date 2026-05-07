@@ -33,25 +33,67 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 # data-parallel persistent kernel.  For an MI300X (304 CUs) a shape like
 # M=16,N=1024,K=1024 produces only ~8 (M,N) tiles, leaving ~37x of the device
 # idle.  Routing such shapes through the Stream-K kernel with the program
-# grid pinned to the CU count fills the device by splitting K across CUs;
-# small num_warps keeps register pressure low for the skinny accumulator and
-# avoids spills.  The threshold is intentionally generous so we cover both
-# decoding-style (M=1..16) and small-batch attention (M=32).
+# grid pinned to the CU count is the persistent-CTA pattern: every CU gets
+# exactly one program that walks the full (N,K) work itinerary internally,
+# splitting K across CUs to fill the device.  We additionally pin the tile
+# shape to (BLOCK_M_small, 256) and num_warps=4 so we (a) actually generate
+# enough N tiles for the persistent loop to spread across CUs and (b) keep
+# register pressure low for the skinny accumulator.  The threshold is
+# intentionally generous so we cover both decoding-style (M=1..16) and
+# small-batch attention (M=32) shapes.
 SMALL_M_THRESHOLD = 32
 SMALL_M_NUM_WARPS = 4
+# Pin BLOCK_N up to 256 to maximise N-tile count and so the per-CU
+# accumulator stays large (BLOCK_M is tiny by definition of this branch).
+# 256 is the largest tile that fits in LDS for fp16/bf16 with num_stages=2
+# alongside a BLOCK_K of 64.
+SMALL_M_BLOCK_N_MAX = 256
+# 64 is a good default for fp16/bf16 K-loop on gfx942 — it matches the L1
+# line and keeps the K-splitting granularity high enough that even M=16
+# leaves enough iters per CU.
+SMALL_M_BLOCK_K = 64
 # Only divert when the data-parallel grid would leave at least this fraction
 # of the device idle.  At 0.5 we divert any shape that would otherwise use
 # fewer than half the CUs, which is the regime where K-splitting clearly wins.
 SMALL_M_GRID_FILL_RATIO = 0.5
 
 
+def _next_pow2(x: int) -> int:
+    """Round x up to the next power of two (>= 1)."""
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
+def _small_m_block_shape(M: int, N: int, K: int, selector) -> Tuple[int, int, int]:
+    """Pick (BLOCK_M, BLOCK_N, BLOCK_K) for the small-M persistent-CTA path.
+
+    ``BLOCK_M`` is the smallest power-of-two MFMA-compatible value that still
+    covers M (gfx942 fp16/bf16 MFMA needs at least 16 in the M dim, so we
+    floor to 16).  ``BLOCK_N`` is pushed to ``SMALL_M_BLOCK_N_MAX`` to
+    maximise N-tile count and hence CU coverage; capped by ``next_pow2(N)``
+    so we never over-tile a tiny N.  ``BLOCK_K`` defaults to
+    ``SMALL_M_BLOCK_K`` but is shrunk for tiny K so each CU still gets
+    multiple K iters after Stream-K splitting.
+    """
+    blk_m = max(16, _next_pow2(M))
+    # MFMA accumulator width is 16-aligned; clamp to 64 so we never spill.
+    if blk_m > 64:
+        blk_m = 64
+    blk_n = min(SMALL_M_BLOCK_N_MAX, max(_next_pow2(N), 16))
+    blk_k = min(SMALL_M_BLOCK_K, max(_next_pow2(K), 16))
+    return blk_m, blk_n, blk_k
+
+
 def _should_route_small_m(M: int, N: int, selector) -> bool:
     """Return True when (M, N, K, selector) is a small-M shape that benefits
-    from being routed through Stream-K to fill the device."""
+    from being routed through the persistent-CTA Stream-K path."""
     if M > SMALL_M_THRESHOLD:
         return False
-    BLK_M = selector.block_m
-    BLK_N = selector.block_n
+    # Use the *override* tile shape (not the origami pick) when judging fill
+    # fraction — origami often picks BLOCK_N <= 64 for tiny M, which would
+    # already pass the threshold but miss the bigger win from BLOCK_N=256.
+    BLK_M, BLK_N, _ = _small_m_block_shape(M, N, getattr(selector, "_k", 0), selector)
     total_tiles = ((M + BLK_M - 1) // BLK_M) * ((N + BLK_N - 1) // BLK_N)
     num_cu = selector._hardware.N_CU
     return total_tiles < int(num_cu * SMALL_M_GRID_FILL_RATIO)
@@ -125,14 +167,16 @@ def persistent_matmul_lt(
     # ─────────────────────────────────────────────────────────────────────
     if (not work_stealing) and (not quantized) and _should_route_small_m(M, N, selector):
         num_cu = selector._hardware.N_CU
+        # Persistent-CTA tile shape: BLOCK_N up to 256 to spread N work across
+        # CUs, BLOCK_M scaled to M (16/32/64), BLOCK_K=64 (or smaller for
+        # tiny K).  These overrides are applied at the kernel launch site so
+        # we don't disturb origami's normal selections for other shapes.
+        BLK_M_, BLK_N_, BLK_K_ = _small_m_block_shape(M, N, K, selector)
         # Clamp grid to the maximum useful program count.  In Stream-K, each
         # program is responsible for at least one (tile, k_iter) pair; if the
         # grid exceeds total_tiles * iters_per_tile, the surplus programs do
         # no work, never set their lock, and the tile-owner aggregation loop
         # hangs waiting on a lock that will never flip to 1.
-        BLK_M_ = selector.block_m
-        BLK_N_ = selector.block_n
-        BLK_K_ = selector.block_k
         total_tiles_ = ((M + BLK_M_ - 1) // BLK_M_) * ((N + BLK_N_ - 1) // BLK_N_)
         iters_per_tile_ = max(1, (K + BLK_K_ - 1) // BLK_K_)
         max_useful_grid = total_tiles_ * iters_per_tile_
@@ -145,6 +189,9 @@ def persistent_matmul_lt(
             quantized=False,
             work_stealing=False,
             num_warps_override=SMALL_M_NUM_WARPS,
+            block_m_override=BLK_M_,
+            block_n_override=BLK_N_,
+            block_k_override=BLK_K_,
         )
 
     BLK_M    = selector.block_m
@@ -277,16 +324,29 @@ def streamk_matmul_lt(
     quantized: bool = False,
     work_stealing: bool = False,
     num_warps_override: Optional[int] = None,
+    block_m_override: Optional[int] = None,
+    block_n_override: Optional[int] = None,
+    block_k_override: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M    = selector.block_m
-    BLK_N    = selector.block_n
-    BLK_K    = selector.block_k
+    # Allow callers (e.g. the small-M dispatch) to pin the tile shape without
+    # mutating the shared origami selector — this preserves caching and
+    # avoids polluting other matmul invocations on the same problem.
+    BLK_M    = block_m_override if block_m_override is not None else selector.block_m
+    BLK_N    = block_n_override if block_n_override is not None else selector.block_n
+    BLK_K    = block_k_override if block_k_override is not None else selector.block_k
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
+    # When tile shape is overridden, the origami group_m mapping (chosen for
+    # a different tile) can exceed the new tile-M count.  The chiplet
+    # transform divides by group_size_m * num_pid_n, so a stale value is
+    # harmless for correctness but degrades L2 reuse.  Clamp it.
+    if block_m_override is not None:
+        tiles_m_ = (M + BLK_M - 1) // BLK_M
+        gsize_m = max(1, min(gsize_m, tiles_m_))
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)

@@ -10,7 +10,7 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .origami import OrigamiMatmulSelector
+from .origami import OrigamiMatmulSelector, recommend_streamk as _recommend_streamk
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -24,6 +24,33 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+def _resolve_enable_streamk(
+    enable_streamk: Optional[bool],
+    M: int,
+    N: int,
+    K: int,
+) -> bool:
+    """Resolve the ``enable_streamk`` argument for the public ``matmul`` /
+    ``addmm`` entry points.
+
+    The public functions accept ``Optional[bool]``:
+
+      * Explicit ``True`` / ``False`` — respect the caller's choice
+        verbatim and bypass the heuristic.
+      * ``None`` (default) — consult :func:`recommend_streamk` and auto-
+        enable stream-K on shapes whose data-parallel tile grid would
+        leave a meaningful chunk of CUs idle in the last wave.  This
+        addresses the "large rectangle" PRD residual shapes where the
+        last-wave imbalance is the dominant performance loss.
+
+    Returns the resolved boolean to forward to the internal kernel
+    selection path.
+    """
+    if enable_streamk is None:
+        return _recommend_streamk(M, N, K, MAX_SMS)
+    return bool(enable_streamk)
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -476,10 +503,18 @@ def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # When the caller leaves enable_streamk unset (None), auto-select the
+    # stream-K kernel on shapes whose data-parallel tile grid would leave a
+    # meaningful chunk of CUs idle in the last wave (last-wave imbalance).
+    # Explicit True/False bypasses the heuristic — see
+    # _resolve_enable_streamk + recommend_streamk for details.
+    M, K = a.shape
+    _, N = b.shape
+    enable_streamk = _resolve_enable_streamk(enable_streamk, M, N, K)
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
@@ -729,10 +764,14 @@ def addmm(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Same auto-streamk behaviour as matmul().
+    M, K = a.shape
+    _, N = b.shape
+    enable_streamk = _resolve_enable_streamk(enable_streamk, M, N, K)
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
         return _addmm(bias, a, b, enable_streamk, sk_grid, work_stealing)

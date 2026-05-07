@@ -59,6 +59,163 @@ def check_triton_lds_capacity(
     return usage <= lds_capacity
 
 
+# --------------------------------------------------------------------------
+# Large-skinny rectangle GEMM detection + stream-K recommendation heuristic.
+#
+# Background: The persistent data-parallel matmul kernel divides the output
+# into MxN tiles and assigns them to CUs in waves.  When the tile grid does
+# not divide evenly across the available CUs, the final ("last") wave only
+# uses a fraction of the CUs and the rest idle until the kernel exits.  On
+# rectangular shapes this last-wave imbalance is the dominant performance
+# loss; the persistent stream-K kernel addresses it by splitting the K-loop
+# of the last wave's tiles across all CUs at the cost of an extra inter-WG
+# reduction.
+#
+# The constants below describe what counts as "large-skinny" for the
+# purposes of dispatch heuristics that sit on top of the autotuner.  They
+# are tuned for gfx942 (MI300X) and exposed as module-level names
+# so consumers (tests, downstream autotuners, debugging shims) can both
+# read and override the thresholds without monkey-patching internals.
+#
+#   LARGE_SKINNY_LONG_DIM_MIN  Minimum value of max(M, N) for the heuristic
+#                              to trigger.  Below this, the K-loop is too
+#                              short to dominate and standard autotune wins.
+#
+#   LARGE_SKINNY_ASPECT_MIN    Minimum aspect ratio max(M, N) / min(M, N).
+#                              Below this the shape is "near-square" and
+#                              the regular tiling already does the right
+#                              thing.
+#
+#   LARGE_SKINNY_K_MIN         Minimum K so that the K-loop length amortises
+#                              the constant-cost of dispatch + epilogue.
+# --------------------------------------------------------------------------
+LARGE_SKINNY_LONG_DIM_MIN = 4096
+LARGE_SKINNY_ASPECT_MIN = 2.0
+LARGE_SKINNY_K_MIN = 2048
+
+
+def is_large_skinny_shape(m: int, n: int, k: int) -> bool:
+    """Classify ``(m, n, k)`` as a large-skinny rectangle GEMM.
+
+    A shape is "large-skinny" when *all* of the following hold:
+
+      1. ``max(M, N) >= LARGE_SKINNY_LONG_DIM_MIN`` (currently 4096).  The
+         longer dimension must be big enough that any tile-shape decision
+         pays off: smaller shapes are dominated by launch overhead, not
+         the inner tiling.
+      2. ``K >= LARGE_SKINNY_K_MIN`` (currently 2048).  The K-loop must be
+         long enough to dominate the kernel runtime; otherwise epilogue
+         and reduction cost mask the inner-loop choice.
+      3. ``max(M, N) / min(M, N) >= LARGE_SKINNY_ASPECT_MIN`` (currently
+         2.0).  The shape must be visibly rectangular; near-square cases
+         already work well with the default near-square tiles.
+
+    The classification is informational only — it is consumed by callers
+    that want to record / log when a shape is in the difficult regime
+    where last-wave imbalance dominates performance.  It does *not* on
+    its own change the autotune search space.
+
+    The thresholds were calibrated empirically on MI300X (gfx942) against
+    the difficult rectangle PRD residual shapes:
+      ``1024x8192x8192`` bf16, ``6144x4096x4096`` fp16, ``8192x2048x4096``
+      fp16.  See ``tests/test_large_skinny_heuristics.py`` for the pinned
+      cases.
+    """
+    long_dim = max(m, n)
+    short_dim = max(1, min(m, n))
+    if long_dim < LARGE_SKINNY_LONG_DIM_MIN:
+        return False
+    if k < LARGE_SKINNY_K_MIN:
+        return False
+    return (long_dim / short_dim) >= LARGE_SKINNY_ASPECT_MIN
+
+
+# --------------------------------------------------------------------------
+# Stream-K recommendation thresholds.
+#
+# These were measured on MI300X (gfx942) with a 4-mode kernel
+# sweep (persistent / persistent+ws / streamk / streamk+ws); see the
+# benchmark CSV in this PR for the data points.  Stream-K wins exactly
+# when:
+#
+#   * ``K >= STREAMK_MIN_K``           — enough K to amortise the inter-WG
+#                                        reduction overhead.
+#   * ``total_tiles >= n_cu``          — at least one full wave; below
+#                                        this the data-parallel kernel
+#                                        already saturates everyone that
+#                                        is going to fit.
+#   * ``waves <= STREAMK_MAX_WAVES``   — past ~4-5 waves the final partial
+#                                        wave is a small fraction of the
+#                                        total runtime and stream-K's
+#                                        reduction cost outweighs its win.
+#   * ``last_wave_frac < STREAMK_LAST_WAVE_FRAC_MAX``
+#                                      — the partial last wave must be
+#                                        small enough that K-splitting it
+#                                        actually fills idle CUs.
+#
+# These thresholds intentionally exclude both ends of the spectrum:
+# sub-wave shapes (where launch overhead dominates) and many-wave shapes
+# (where the imbalance is amortised away by sheer volume).
+# --------------------------------------------------------------------------
+STREAMK_MIN_K = 1024
+STREAMK_MAX_WAVES = 4.5
+STREAMK_LAST_WAVE_FRAC_MAX = 0.6
+
+
+def recommend_streamk(m: int, n: int, k: int, n_cu: int,
+                      default_tile: int = 256) -> bool:
+    """Recommend the persistent stream-K kernel over the data-parallel one.
+
+    Stream-K helps when the data-parallel tile grid has a meaningful
+    *last-wave imbalance*: ``total_tiles mod n_cu`` is a small fraction of
+    ``n_cu`` so a chunk of CUs would otherwise idle while the partial
+    final wave drains.  Stream-K splits the K-loop of the last wave's
+    tiles across all CUs at the cost of an extra inter-WG reduction.
+
+    Args:
+        m, n, k:        GEMM dimensions.
+        n_cu:           Number of compute units in the dispatch grid (304
+                        on MI300X with no CU mask).
+        default_tile:   Macro-tile M and N that the autotuner is expected
+                        to pick (used only to compute ``total_tiles``).
+                        Defaults to 256 because the autotuner picks
+                        ``256x256`` on the relevant shape regime.
+
+    Returns:
+        ``True`` when the persistent stream-K kernel is expected to beat
+        the data-parallel persistent kernel; ``False`` otherwise (in
+        which case the caller should leave ``enable_streamk=False``).
+
+    Empirically validated wins on MI300X (gfx942):
+
+      * ``8192x8192x8192`` bf16 — +5% over persistent
+      * ``8192x8192x8192`` fp16 — +5% over persistent
+      * ``6144x4096x4096`` fp16 — +9% over persistent (rectangle case)
+
+    Empirically validated *non*-wins (heuristic correctly returns False):
+
+      * ``1024x8192x8192`` bf16 — sub-wave, K-split overhead dominates
+      * ``8192x2048x4096`` fp16 — sub-wave, ditto
+      * ``4096x4096x4096`` bf16 — perfectly aligned, no last-wave imbalance
+    """
+    if k < STREAMK_MIN_K:
+        return False
+    tiles_m = (m + default_tile - 1) // default_tile
+    tiles_n = (n + default_tile - 1) // default_tile
+    total_tiles = tiles_m * tiles_n
+    if total_tiles < n_cu:
+        # K-split helps in theory but per-WG overhead dominates in practice.
+        return False
+    waves = total_tiles / n_cu
+    if waves > STREAMK_MAX_WAVES:
+        # Many waves -> last-wave imbalance is a tiny fraction of runtime.
+        return False
+    last_wave = total_tiles % n_cu
+    if last_wave == 0:
+        return False  # perfectly aligned grid -> no imbalance to fix
+    return last_wave < int(n_cu * STREAMK_LAST_WAVE_FRAC_MAX)
+
+
 class OrigamiMatmulSelector:
     @staticmethod
     def estimate_triton_lds(
@@ -192,6 +349,7 @@ class OrigamiMatmulSelector:
         self._block_mn_range = [16, 32, 64, 128, 256]
         self._block_k_range = [16, 32, 64, 128, 256, 512]
         self._kernel_occupancy_range = [1]
+
         self._configs = self._generate_default_configs()
 
         # Create Origami problem_t based on problem metadata (needed for fallback)
@@ -345,6 +503,19 @@ class OrigamiMatmulSelector:
     @property
     def sk_grid(self):
         return self._grid
+
+    @property
+    def recommend_streamk(self) -> bool:
+        """Per-shape heuristic: True when the persistent stream-K kernel is
+        expected to outperform the data-parallel persistent kernel for the
+        ``(M, N, K)`` of this selector on this device.
+
+        This is the selector-bound mirror of :func:`recommend_streamk` for
+        callers that already hold an ``OrigamiMatmulSelector``; it is also
+        what the public :func:`tritonblas.matmul` consults when the caller
+        leaves ``enable_streamk`` unset (auto mode).
+        """
+        return recommend_streamk(self._m, self._n, self._k, self._N_CU)
 
     def _compute_sk_grid(self):
         # Grid model constants for StreamK

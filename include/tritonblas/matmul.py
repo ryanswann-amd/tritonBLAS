@@ -9,6 +9,7 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import splitk_persistent_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
@@ -108,6 +109,58 @@ def persistent_matmul_lt(
         chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
     else:
         num_xcds = 1
+
+    split_k = getattr(selector, "split_k", 1)
+
+    # Split-K is only meaningful for the data-parallel persistent path.  Skip
+    # it when the caller asked for work-stealing (which already saturates CUs
+    # via dynamic stealing) or when bias/quantization make the atomic-add
+    # epilogue too expensive vs. a second small kernel — currently the kernel
+    # supports both, so the only carve-out is work_stealing.
+    if (
+        not work_stealing
+        and split_k > 1
+        and bias is None  # atomic_add epilogue subtle when combined with sk_grid; keep gate tight
+    ):
+        grids = total_tiles * split_k
+        # Atomic-add accumulation requires the output tensor to start at zero.
+        c.zero_()
+        kk = _maybe_wrap(splitk_persistent_matmul, probe_tensor=a)[(grids,)](
+            a,
+            b,
+            c,
+            a_scale if quantized else None,
+            b_scale if quantized else None,
+            None,  # bias intentionally unsupported on this path; gated above
+            M,
+            N,
+            K,
+            a.stride(0),
+            b.stride(1),
+            c.stride(0),
+            c.stride(1),
+            0,  # stride_bias unused
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M,
+            BLOCK_SIZE_N=BLK_N,
+            BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            SPLIT_K=split_k,
+            NUM_XCDS=num_xcds,
+            CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+            CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+            BIAS=False,
+            EVEN_K=even_k,
+            QUANTIZED=quantized,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            num_stages=num_stages,
+            num_warps=num_warps,
+            waves_per_eu=waves_per_eu,
+            matrix_instr_nonkdim=mfmaInstrSize,
+            kpack=kpack,
+        )
+        return c
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU

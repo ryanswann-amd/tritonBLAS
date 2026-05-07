@@ -1,5 +1,6 @@
 from __future__ import annotations
 import itertools
+import os
 import torch
 import origami
 import math
@@ -262,6 +263,73 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+        self._split_k = self._select_split_k()
+
+    @staticmethod
+    def _floor_pow2(n: int) -> int:
+        """Largest power of 2 ≤ n; floor(log2) for n ≥ 1."""
+        if n < 1:
+            return 1
+        p = 1
+        while (p << 1) <= n:
+            p <<= 1
+        return p
+
+    def _select_split_k(self) -> int:
+        """Decide a SPLIT_K factor for the persistent (data-parallel) kernel.
+
+        Gating rule (per task spec): only enable SPLIT_K > 1 when the chosen
+        tile size leaves the GPU under-occupied — i.e.
+
+            total_tiles = ceil(M/BM) * ceil(N/BN) < N_CU
+
+        When the gate fires, choose the largest power of two in {1,2,4,8,16}
+        such that ``total_tiles * SPLIT_K`` does not over-shoot N_CU by more
+        than 2x.  Also require enough K iterations per split (>= 4 BLOCK_K
+        tiles) so the per-WG work amortises atomic-reduce overhead.
+
+        Returns 1 (disabled) for streamk mode — Stream-K already splits K
+        across CUs by construction, so layering SPLIT_K on top is redundant
+        and would conflict with its partial-tile workspace.
+
+        Honors ``TBLAS_DISABLE_SPLIT_K=1`` (or ``TBLAS_SPLIT_K=1``) for
+        ablation / A-B benchmarking against the pre-split-K baseline.
+        """
+        if os.environ.get("TBLAS_DISABLE_SPLIT_K", "").lower() in ("1", "true", "yes"):
+            return 1
+        forced = os.environ.get("TBLAS_SPLIT_K", "")
+        if forced.isdigit() and int(forced) >= 1:
+            # Manual override; clamp to {1,2,4,8,16} for safety.
+            v = int(forced)
+            return v if v in (1, 2, 4, 8, 16) else 1
+        if self.streamk:
+            return 1
+
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        bk = self._result.config.mt.k
+        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        n_cu = self._N_CU
+
+        if total_tiles >= n_cu:
+            return 1
+
+        num_k_tiles = (self._k + bk - 1) // bk
+        # Need at least MIN_K_TILES_PER_SPLIT iterations per workgroup or the
+        # K-loop is too short to hide atomic-add latency.
+        MIN_K_TILES_PER_SPLIT = 4
+        max_split_k_by_k = max(1, num_k_tiles // MIN_K_TILES_PER_SPLIT)
+
+        # Aim to fill (but not over-fill) the CUs.  Cap at 16 per task spec.
+        ideal_split = max(1, n_cu // max(total_tiles, 1))
+        split_k = min(ideal_split, 16, max_split_k_by_k)
+        split_k = self._floor_pow2(split_k)
+        return split_k if split_k >= 2 else 1
+
+    @property
+    def split_k(self) -> int:
+        """SPLIT_K factor for the persistent kernel; 1 when disabled."""
+        return getattr(self, "_split_k", 1)
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

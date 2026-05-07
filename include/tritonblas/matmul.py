@@ -153,6 +153,50 @@ def _maybe_retune_small_m(selector, M, N, K) -> None:
     _log.debug("small-M retune: M=%d N=%d K=%d BK %d -> %d", M, N, K, BK, target_bk)
 
 
+# K-157: dispatch predicate for launch-overhead-bound small-M shapes.
+#
+# For M <= 32 and a small standard tile grid (tiles < num_CUs), the persistent
+# kernel produces only a handful of CTAs (e.g. M=16, N=K=1024 with BM=16,
+# BN=128 yields 8 CTAs vs 304 CUs on MI300X = 2.6% occupancy).  The K-loop
+# pipeline deepening above (BK -> 128) recovers some throughput, but
+# tritonblas's Python+Triton dispatch + kernel launch path floors at ~90 us
+# while hipBLASLt's vendor-optimised launch path floors at ~30 us — a 3x gap
+# that no kernel-side change can close.
+#
+# Stream-K routing was investigated and regressed:  on these shapes only
+# 16-32 of the 304 CUs can be productively used (factor=2 with iters_per_cu>=8
+# in selector._compute_sk_grid), and the atomic + partial-reduction overhead
+# of the streamk_gemm kernel exceeds the headroom from the ~24 idle CUs that
+# get work.  See K-157 PR description for the per-shape numbers.
+#
+# Therefore for shapes that fall in the launch-overhead regime — small-M plus
+# a tile grid that fits in well under one wave of CUs — we delegate to
+# torch.matmul, which on ROCm dispatches to hipBLASLt.  The non-quantized
+# matmul/addmm entry points are eligible; quantized (a8w8 / fp4) and explicit
+# streamk / work_stealing requests stay on their existing path.
+#
+# TBLAS_DISABLE_SMALL_M_HBL_FALLBACK=1 disables the fallback for A/B testing.
+def _should_fallback_to_hbl(M: int, N: int, K: int, num_cus: int) -> bool:
+    if M > 32:
+        return False
+    if os.environ.get(
+            "TBLAS_DISABLE_SMALL_M_HBL_FALLBACK", "").lower() in ("1", "true", "yes"):
+        return False
+    # Use the same "tiles < 2*N_CU" under-utilisation predicate that gates the
+    # K-loop deepening retune, but with the smallest realistic block size
+    # Origami can pick (BM=BN=16) so that the predicate is tile-config-agnostic
+    # and identical on forward and backward passes.  N here corresponds to the
+    # B-matrix's column count for A @ B (forward) and to a transposed shape on
+    # the backward; the predicate is symmetric in (M,N) so both directions
+    # behave consistently for the autograd-registered path.
+    tiles = ((M + 15) // 16) * ((N + 15) // 16)
+    return tiles < 2 * num_cus
+
+
+# Cached at module scope to avoid querying torch on every call.
+_NUM_CUS = MAX_SMS
+
+
 # Cache heuristic results.  OrigamiMatmulSelector construction costs ~200 us
 # per call (analytical model + LDS checks + workgroup mapping); for small-M
 # shapes whose kernel runs in <100 us this dominates total dispatch latency.
@@ -566,6 +610,12 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-157: launch-overhead-bound small-M shapes -> hipBLASLt via torch.matmul.
+    if (not enable_streamk and not work_stealing
+            and _should_fallback_to_hbl(M, N, K, _NUM_CUS)):
+        torch.matmul(a, b, out=out)
+        return out
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -622,6 +672,12 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-157: launch-overhead-bound small-M shapes -> hipBLASLt via torch.matmul.
+    if (not enable_streamk and not work_stealing
+            and _should_fallback_to_hbl(M, N, K, _NUM_CUS)):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -8,10 +9,33 @@ from torch.library import triton_op, wrap_triton
 from torch._subclasses.fake_tensor import is_fake
 import triton
 
-from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import (
+    persistent_matmul,
+    ws_persistent_matmul,
+    persistent_matmul_small_m,
+    streamk_matmul,
+    ws_streamk_matmul,
+)
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Small-M dispatch tunables.
+# ────────────────────────────────────────────────────────────────────────
+# When M <= SMALL_M_THRESHOLD the default heuristic launches only
+# ``cdiv(N, BLOCK_N)`` programs, which leaves most CUs idle on MI300X
+# (304 CUs).  ``persistent_matmul_small_m`` instead launches one program
+# per CU and splits each output tile along K.  Set the env var
+# ``TBLAS_DISABLE_SMALL_M=1`` to fall back to the legacy persistent path.
+SMALL_M_THRESHOLD = 32
+SMALL_M_BLOCK_N = 256          # max BLOCK_N considered; clamped to next pow2 >= N
+SMALL_M_BLOCK_K = 32           # smaller BLOCK_K → more K splits available
+SMALL_M_NUM_WARPS = 4
+SMALL_M_NUM_STAGES = 2
+
+_SMALL_M_DISABLED = os.environ.get("TBLAS_DISABLE_SMALL_M", "").lower() in ("1", "true", "yes")
 
 
 
@@ -64,6 +88,120 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+
+
+def _next_pow2(x: int) -> int:
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
+def _should_dispatch_small_m(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    quantized: bool,
+) -> bool:
+    """Route small-M, fp16/bf16 GEMMs to the persistent K-split kernel.
+
+    Conditions (all must hold):
+      - small-M dispatch not disabled via env var
+      - quantization off (quantized path uses dedicated scale logic)
+      - a/b dtype is fp16 or bf16 (atomic_add path is exercised on these)
+      - M is small enough that the default grid leaves most CUs idle
+      - K is large enough that splitting is worthwhile
+    """
+    if _SMALL_M_DISABLED or quantized:
+        return False
+    if a.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    M, K = a.shape
+    if M <= 0 or M > SMALL_M_THRESHOLD:
+        return False
+    if K < 256:                                 # too little K to amortize launch
+        return False
+    return True
+
+
+def small_m_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    bias: Optional[torch.Tensor] = None,
+):
+    """Persistent K-split path for small-M GEMMs.
+
+    Maps one program per CU and partitions each output tile along K so
+    every CU has work, even when M is so small that the default grid
+    would have only a handful of programs.
+    """
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    # Pick block sizes.  BLOCK_M is the next power of two >= M, clamped
+    # to [16, 32] (16 is the smallest that lets gfx942 mfma_16x16x16 run
+    # at full rate; 32 keeps the LDS footprint tiny).
+    block_m = max(16, min(32, _next_pow2(max(M, 1))))
+
+    # BLOCK_N up to SMALL_M_BLOCK_N; clamp by N so we don't over-mask.
+    if N <= 64:
+        block_n = 64
+    elif N <= 128:
+        block_n = 128
+    else:
+        block_n = SMALL_M_BLOCK_N
+
+    block_k = SMALL_M_BLOCK_K
+
+    n_cu = selector._hardware.N_CU
+    num_pid_n = triton.cdiv(N, block_n)
+    iters_per_tile = max(1, triton.cdiv(K, block_k))
+
+    # Choose K-split factor so num_pid_n * NUM_K_SPLITS fills NUM_SMS,
+    # while keeping each split with >= 2 BLOCK_K iterations to amortize the
+    # atomic_add and let the K-loop pipeline.
+    target_splits = max(1, n_cu // max(num_pid_n, 1))
+    max_useful_splits = max(1, iters_per_tile // 2)
+    num_k_splits = max(1, min(target_splits, max_useful_splits))
+
+    even_k = (K % block_k == 0) and (iters_per_tile % num_k_splits == 0)
+
+    # Atomic accumulation requires a zero output buffer.
+    if num_k_splits > 1:
+        c.zero_()
+
+    grid = (n_cu,)
+    _maybe_wrap(persistent_matmul_small_m, probe_tensor=a)[grid](
+        a,
+        b,
+        c,
+        bias if bias is not None else None,
+        M,
+        N,
+        K,
+        a.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        bias.stride(0) if bias is not None else 0,
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        NUM_SMS=n_cu,
+        NUM_K_SPLITS=num_k_splits,
+        BIAS=bias is not None,
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=None,
+        CACHE_MODIFIER_B=None,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_warps=SMALL_M_NUM_WARPS,
+        num_stages=SMALL_M_NUM_STAGES,
+    )
+    return c
 
 
 def persistent_matmul_lt(
@@ -372,6 +510,14 @@ def matmul_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    # Small-M shapes underuse the device because the default grid is just
+    # cdiv(N, BLOCK_N) programs.  Route to the persistent K-split kernel
+    # so all CUs get work.  Caller didn't ask for streamk/work-stealing
+    # explicitly.
+    if (not enable_streamk and not work_stealing
+            and _should_dispatch_small_m(a, b, None, quantized=False)):
+        return small_m_matmul_lt(a, b, c, selector)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
@@ -406,6 +552,11 @@ def _matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+
+    if (not enable_streamk and not work_stealing
+            and _should_dispatch_small_m(a, b, None, quantized=False)):
+        return small_m_matmul_lt(a, b, out, selector)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
@@ -463,6 +614,11 @@ def _matmul_out(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+
+    if (not enable_streamk and not work_stealing
+            and _should_dispatch_small_m(a, b, None, quantized=False)):
+        small_m_matmul_lt(a, b, out, selector)
+        return None
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)

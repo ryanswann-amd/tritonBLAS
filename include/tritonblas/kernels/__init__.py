@@ -27,6 +27,9 @@ else:
 # Work-stealing kernel (opt-in via work_stealing=True in matmul calls)
 from .persistent_gemm_work_stealing import ws_persistent_matmul
 
+# Small-M persistent kernel: K-split + atomic add to fill all CUs when M<=32.
+from .persistent_gemm_small_m import persistent_matmul_small_m
+
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 
@@ -40,5 +43,6 @@ from .fp4_matmul import fp4_matmul
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
+           'persistent_matmul_small_m',
            'streamk_matmul', 'ws_streamk_matmul',
            'fp4_matmul', 'stages']

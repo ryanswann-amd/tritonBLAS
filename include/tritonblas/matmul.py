@@ -31,9 +31,16 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 # ``TBLAS_DISABLE_SMALL_M=1`` to fall back to the legacy persistent path.
 SMALL_M_THRESHOLD = 32
 SMALL_M_BLOCK_N = 256          # max BLOCK_N considered; clamped to next pow2 >= N
-SMALL_M_BLOCK_K = 32           # smaller BLOCK_K → more K splits available
+SMALL_M_BLOCK_K = 32           # smaller BLOCK_K -> more K splits available
 SMALL_M_NUM_WARPS = 4
 SMALL_M_NUM_STAGES = 2
+# K must be at least this large for the K-split kernel's atomic_add traffic
+# to be amortised vs. the default kernel.
+SMALL_M_MIN_K = 256
+# Approximate program count of the default-tile launch above which we skip
+# the K-split kernel: in that regime the default kernel already covers
+# enough CUs and the K-split's atomic_add cost dominates (regression).
+SMALL_M_MAX_DEFAULT_GRID = 32
 
 _SMALL_M_DISABLED = os.environ.get("TBLAS_DISABLE_SMALL_M", "").lower() in ("1", "true", "yes")
 
@@ -109,16 +116,26 @@ def _should_dispatch_small_m(
       - quantization off (quantized path uses dedicated scale logic)
       - a/b dtype is fp16 or bf16 (atomic_add path is exercised on these)
       - M is small enough that the default grid leaves most CUs idle
-      - K is large enough that splitting is worthwhile
+      - K is large enough to amortise the K-split atomic_add traffic
+      - N is small enough that the default kernel does NOT already cover
+        the device (otherwise the K-split kernel just adds atomic traffic
+        without any CU-occupancy gain -- shown in cohort to regress
+        M=32, N>=4096, K=1024 by ~30%).
     """
     if _SMALL_M_DISABLED or quantized:
         return False
     if a.dtype not in (torch.float16, torch.bfloat16):
         return False
     M, K = a.shape
+    _, N = b.shape
     if M <= 0 or M > SMALL_M_THRESHOLD:
         return False
-    if K < 256:                                 # too little K to amortize launch
+    if K < SMALL_M_MIN_K:                       # too little K to amortise atomic_add
+        return False
+    # Default-grid coverage estimate.  Skip when default already covers the
+    # device AND K is short enough that K-split's atomic_add cost dominates.
+    default_grid_estimate = triton.cdiv(N, 128) * triton.cdiv(max(M, 1), 32)
+    if default_grid_estimate >= SMALL_M_MAX_DEFAULT_GRID and K <= 1024:
         return False
     return True
 
@@ -127,7 +144,7 @@ def small_m_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
-    selector,
+    selector=None,
     bias: Optional[torch.Tensor] = None,
 ):
     """Persistent K-split path for small-M GEMMs.
@@ -135,6 +152,11 @@ def small_m_matmul_lt(
     Maps one program per CU and partitions each output tile along K so
     every CU has work, even when M is so small that the default grid
     would have only a handful of programs.
+
+    The ``selector`` argument is optional: small-M dispatch only needs
+    ``N_CU`` from the device, which we read from the cached module-level
+    ``MAX_SMS`` to avoid the ~150 us OrigamiMatmulSelector cost (which
+    otherwise dominates wall-clock at small-M).
     """
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -155,7 +177,7 @@ def small_m_matmul_lt(
 
     block_k = SMALL_M_BLOCK_K
 
-    n_cu = selector._hardware.N_CU
+    n_cu = selector._hardware.N_CU if selector is not None else MAX_SMS
     num_pid_n = triton.cdiv(N, block_n)
     iters_per_tile = max(1, triton.cdiv(K, block_k))
 
@@ -628,6 +650,41 @@ def _matmul_out(
     return None
 
 
+def _small_m_eager_fast_path(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Bypass @triton_op for small-M, eager-mode calls.
+
+    The @triton_op-wrapped ``_matmul`` / ``_matmul_out`` add ~200 us of
+    Python dispatch overhead per call -- catastrophic at small-M where
+    the GPU work itself is 6-30 us.  When the input tensors are real
+    (not fake-tensor traced under torch.compile) and meet the small-M
+    dispatch criteria, we skip the @triton_op layer and call the kernel
+    directly.
+
+    Returns the output tensor on success, or ``None`` to signal that the
+    caller should take the regular @triton_op path.
+    """
+    if is_fake(a) or is_fake(b) or (out is not None and is_fake(out)):
+        return None
+    if not _should_dispatch_small_m(a, b, None, quantized=False):
+        return None
+    if a.requires_grad or b.requires_grad or (out is not None and out.requires_grad):
+        # Autograd path requires the registered @triton_op for backward setup.
+        return None
+    M, K = a.shape
+    _, N = b.shape
+    if out is None:
+        out = a.new_empty(M, N)
+    # Skip OrigamiMatmulSelector -- small_m_matmul_lt only needs N_CU which
+    # comes from MAX_SMS.  Selector creation costs ~150 us, dominating the
+    # wall-clock at small-M.
+    small_m_matmul_lt(a, b, out, selector=None)
+    return out
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -636,6 +693,12 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Eager fast path: small-M shapes bypass @triton_op (~200 us overhead).
+    if not enable_streamk and not work_stealing:
+        fast = _small_m_eager_fast_path(a, b, out)
+        if fast is not None:
+            return fast
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

@@ -95,7 +95,11 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # num_warps: prefer per-shape value from the selector (K-676 cross-walk
+    # added a num_warps property that returns 4 for shapes/tiles where
+    # hipBLASLt evidence shows num_warps=4 outperforms 8); fall back to 8
+    # for selectors that don't expose the property.
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +245,8 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # num_warps: see persistent_matmul_lt for rationale.
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

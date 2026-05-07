@@ -59,6 +59,59 @@ def check_triton_lds_capacity(
     return usage <= lds_capacity
 
 
+# ---------------------------------------------------------------------------
+# Per-shape kernel-config overrides (K-706 / K-676 cross-walk follow-up)
+# ---------------------------------------------------------------------------
+# Empirically-derived (M, N, K, dtype_str) -> (BLOCK_M, BLOCK_N, BLOCK_K,
+# num_warps) overrides for shapes where Origami's analytical pick (after
+# the symmetric-256 rewrite) leaves measurable TFLOPS on the table.
+#
+# Each entry was validated by a parametric sweep on MI300X (gfx942) using
+# the cache-flushed CUDA-event protocol from K-660 / K-611-iter3 (768 MiB
+# MALL flush, 4-pair rotating buffers, median of 3 trial-medians, 30
+# iterations per trial, TORCH_BLAS_PREFER_HIPBLASLT=1).
+#
+# Methodology guard-rail (per the lesson "Origami's analytical model
+# already selects tiles within 0.9% of the oracle for typical shapes"):
+# we ONLY add an entry when (a) the alternative beats Origami's pick by
+# at least 5pp ratio in the sweep, and (b) the entry has been measured
+# on the actual hardware -- no theoretical / hipBLASLt-evidence-only
+# entries.  This keeps the registry small and conservative: shapes
+# without explicit evidence keep Origami's pick + the historical
+# num_warps=8 default.
+#
+# Keys are (M, N, K, dtype_str); dtype_str follows
+# OrigamiMatmulSelector.dtype_to_str ("bf16", "f16", "f8", ...).
+_HIPBLASLT_SHAPE_OVERRIDES: dict[
+    tuple[int, int, int, str], tuple[int, int, int, int]
+] = {
+    # K-706 sweep: shape #3 (K-654 top-3 residual; ratio 0.65 -> 0.84,
+    # +19pp) at (128, 128, 64) num_warps=4.  Origami picked
+    # (256,256,64)/nw=8 = 327 TF, this entry yields 420 TF.  hipBLASLt
+    # reference at this shape: 502 TF (TORCH_BLAS_PREFER_HIPBLASLT=1).
+    (1024, 8192, 8192, "bf16"): (128, 128, 64, 4),
+    # K-706 sweep: shape #4 (K-654 top-4 residual; ratio 0.65 -> 0.71,
+    # +6pp) at (128, 128, 64) num_warps=4.  Origami picked
+    # (256,256,64)/nw=8 = 382 TF, this entry yields 416 TF.  Closes
+    # only part of the gap -- the residual ~30pp is codegen / non-pow2
+    # tile-search-space (TRITONBLAS-0047 long-term).
+    (6144, 4096, 4096, "f16"):  (128, 128, 64, 4),
+    # NOTE: shape #5 (8192x2048x4096 fp16) intentionally NOT overridden.
+    # Origami's symmetric-256 rewrite picks (256, 256, 64) num_warps=8
+    # which the K-706 sweep confirmed is already optimal at ratio 0.80.
+    # The K-676 hypothesis of (256,128,64) regresses to 0.61 in the
+    # sweep (-19pp); the asymmetric-long-M tile beat the square one at
+    # the WRONG num_warps choice in TritonBLAS history.
+}
+
+
+def _lookup_shape_override(
+    m: int, n: int, k: int, dtype_str: str
+) -> tuple[int, int, int, int] | None:
+    """Return (BM, BN, BK, num_warps) override for (m,n,k,dtype) or None."""
+    return _HIPBLASLT_SHAPE_OVERRIDES.get((m, n, k, dtype_str))
+
+
 class OrigamiMatmulSelector:
     @staticmethod
     def estimate_triton_lds(
@@ -241,6 +294,29 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-706 per-shape kernel-config override (applied AFTER the
+        # symmetric-256 rewrite so it can replace the rewrite's pick when
+        # an empirically-better tile exists).  Source: parametric sweep
+        # in K-706 / state/mc2/workspaces/K-706/output/sweep_results.csv.
+        # See _HIPBLASLT_SHAPE_OVERRIDES at module top for criteria.
+        self._override_num_warps: int | None = None
+        _override = _lookup_shape_override(
+            self._m, self._n, self._k, self._a_dtype_str
+        )
+        if _override is not None:
+            ov_m, ov_n, ov_k, ov_nw = _override
+            # Defensive: skip the override if the chosen tile would not
+            # fit in LDS at the configured num_stages.  Registry entries
+            # are vetted but an LDS-too-big silent rewrite would be worse
+            # than ignoring the entry and falling back to Origami's pick.
+            if check_triton_lds_capacity(
+                ov_m, ov_n, ov_k, bytes_a, bytes_b, lds_cap, self._num_stages
+            ):
+                self._result.config.mt.m = ov_m
+                self._result.config.mt.n = ov_n
+                self._result.config.mt.k = ov_k
+                self._override_num_warps = ov_nw
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -333,6 +409,27 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def num_warps(self):
+        """Per-shape num_warps.
+
+        Returns the override value when this shape has an entry in
+        _HIPBLASLT_SHAPE_OVERRIDES (currently K-706 sweep-validated
+        small-tile entries that prefer num_warps=4); otherwise returns
+        the historical default of 8.
+
+        Rationale for the conservative default: the K-706 sweep showed
+        num_warps=8 wins at most large tiles (e.g. (256,256,64) for
+        shape #5), while num_warps=4 wins only at small tiles (e.g.
+        (128,128,64) for shapes #3 and #4).  Rather than encode a
+        global tile-area heuristic that risks regressing untested
+        shapes, we keep nw=8 as the default and apply nw=4 only via
+        per-shape registry entries that have been measured.
+        """
+        if self._override_num_warps is not None:
+            return self._override_num_warps
+        return 8
 
     @property
     def waves_per_eu(self):

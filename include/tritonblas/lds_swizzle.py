@@ -111,13 +111,46 @@ class KPack2Envelope:
     cache miss, autotune) calls :meth:`admits` rather than re-deriving
     the predicate.
 
+    Decision structure
+    ------------------
+    The original :meth:`admits` was a god-function whose reject cases
+    were only legible by reading the body. It has been factored into
+    three named sub-predicates that each correspond to one observed
+    regression cohort. :meth:`admits` returns ``True`` iff none of
+    the three reject and the shape lies in the medium-K residual band:
+
+    * :meth:`small_k_guard` — rejects the K-539 small-K / small-MN
+      cohort (``K <= 512`` OR ``M*N <= 2048*2048``). The K=512 floor
+      is **structural**: even when ``block_k`` is unknown so the
+      mainloop-iters check can't fire, this floor still rejects the
+      cohort that was observed at −27..−28% on the K-654 sweep.
+    * :meth:`batched_skip` — rejects the large-square / batched
+      cohort whose grid tile-count exceeds :attr:`tiles_max` (L2
+      working-set spill under the wider LDS path).
+    * :meth:`medium_k_residual` — the positive in-band predicate
+      that ``kpack=2`` was originally calibrated for.
+
     Bounds (defaults are calibrated for MI300X bf16/fp16):
 
     * ``k_min`` / ``k_max`` — outer K-axis admittance window. Below
       ``k_min`` the bank-conflict win is too small to matter; above
       ``k_max`` the per-LDS-issue dependency chain dominates.
+    * ``k_floor`` — strict lower bound enforced by
+      :meth:`small_k_guard` regardless of ``block_k``. Calibrated to
+      ``512`` from the K-539 small-K cohort regression sweep:
+      ``M, N ∈ {512, 1024, 2048}, K=512`` regressed −27..−28%.
+      ``k_floor = 512`` makes the rejection of that cohort
+      independent of whether the caller passes ``block_k``.
+    * ``min_problem_area`` — strict floor on ``M * N`` enforced by
+      :meth:`small_k_guard`. Calibrated to ``2048 * 2048`` from the
+      same K-539 cohort: at ``M = N = 2048`` the inner-loop cost is
+      already dominated by launch + epilogue overhead, so the
+      kpack=2 mainloop savings do not amortize. Stronger than the
+      legacy ``min_mn`` floor (which only checked each axis).
     * ``min_mn`` — minimum M and N. Smaller launches are tail-shaped
-      and launch-bound, so kpack changes are noise.
+      and launch-bound, so kpack changes are noise. Retained for
+      backwards-compatibility with callers that test individual axes;
+      ``min_problem_area`` is the load-bearing constraint.
     * ``max_block_k`` — block_k ceiling. Tiles wider than this already
       have favorable LDS access widths; kpack=2 is redundant.
     * ``mainloop_iters_min`` — amortization floor on
@@ -151,11 +184,106 @@ class KPack2Envelope:
 
     k_min: int = 256
     k_max: int = 2048
+    k_floor: int = 512
+    min_problem_area: int = 2048 * 2048
     min_mn: int = 1024
     max_block_k: int = 64
     mainloop_iters_min: int = 16
     mainloop_iters_max: int = 32
     tiles_max: int = 128
+
+    # ── Sub-predicates ────────────────────────────────────────────────
+    #
+    # Each sub-predicate corresponds to one named reject cohort. They
+    # are pure functions of (M, N, K[, tile]) and the envelope's own
+    # calibrated bounds — no I/O, no cache, no env-var lookups. Tests
+    # call them directly to pin per-cohort behavior independently of
+    # the rest of the dispatch stack.
+
+    def small_k_guard(self, M: int, N: int, K: int) -> bool:
+        """Reject the K-539 small-K / small-MN cohort.
+
+        Returns ``True`` (i.e., REJECT) whenever ``K <= k_floor`` OR
+        ``M * N <= min_problem_area``. This floor is enforced
+        independently of ``block_k`` so legacy callers that omit the
+        tile dim still cannot slip a small-K shape through.
+
+        Rationale: the K-654 PRD sweep showed this cohort regressed
+        −27..−28% at ``mode=on`` because the kpack=2 prologue is not
+        amortized over enough mainloop work — the savings on the
+        mainloop body are smaller than the fixed overhead at K=512.
+        Defining the predicate explicitly (rather than relying on the
+        ``mainloop_iters`` check, which only fires when ``block_k`` is
+        passed) makes the rejection structural.
+        """
+        if K <= self.k_floor:
+            return True
+        if M * N <= self.min_problem_area:
+            return True
+        return False
+
+    def batched_skip(
+        self,
+        M: int,
+        N: int,
+        block_m: Optional[int] = None,
+        block_n: Optional[int] = None,
+    ) -> bool:
+        """Reject the large-grid / batched cohort.
+
+        Returns ``True`` (REJECT) when the launch grid
+        ``(ceil(M/BM) * ceil(N/BN))`` exceeds :attr:`tiles_max`. The
+        wider LDS access pattern emitted by ``kpack=2`` enlarges the
+        active L2 working set; on grids with more than ~128 tiles the
+        TCC miss fraction climbs +36..+62% (rocprof, K-580 PRD sweep)
+        and erases the bank-conflict win. When tile dims are not
+        provided, conservatively returns ``False`` (defer to the rest
+        of the gate / cache-side safety).
+        """
+        if block_m is None or block_n is None:
+            return False
+        if block_m <= 0 or block_n <= 0:
+            return False
+        tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
+        return tiles > self.tiles_max
+
+    def medium_k_residual(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        block_k: Optional[int] = None,
+    ) -> bool:
+        """Positive predicate: shape is in the medium-K residual band.
+
+        Returns ``True`` only when:
+          * ``k_min <= K <= k_max``,
+          * ``M >= min_mn`` and ``N >= min_mn``,
+          * ``block_k`` (if supplied) is ``<= max_block_k`` and
+            yields ``mainloop_iters_min <= mainloop_iters
+            <= mainloop_iters_max``.
+
+        This is the original positive identification of the band
+        ``kpack=2`` was calibrated for. It does NOT include the
+        small-K / large-grid reject cases — those live in
+        :meth:`small_k_guard` and :meth:`batched_skip` so each
+        regression cohort has a single named owner.
+        """
+        if not (self.k_min <= K <= self.k_max):
+            return False
+        if M < self.min_mn or N < self.min_mn:
+            return False
+        if block_k is not None:
+            if block_k > self.max_block_k:
+                return False
+            mainloop_iters = (K + block_k - 1) // block_k
+            if mainloop_iters < self.mainloop_iters_min:
+                return False
+            if mainloop_iters > self.mainloop_iters_max:
+                return False
+        return True
+
+    # ── Composed predicate (single source of truth) ───────────────────
 
     def admits(
         self,
@@ -166,33 +294,29 @@ class KPack2Envelope:
         block_m: Optional[int] = None,
         block_n: Optional[int] = None,
     ) -> bool:
-        """Return True if the shape is inside the envelope.
+        """Return True iff the shape is admitted to ``kpack=2`` routing.
 
-        All conditions must hold. Block dims default to ``None`` for
-        legacy callers; when the tile dim is unknown that specific
-        bound is conservatively skipped (the autotune-side cache
-        gating is the load-bearing safety in that path).
+        Composed from the three named sub-predicates above:
+            admit ⇔ NOT small_k_guard
+                  AND NOT batched_skip
+                  AND medium_k_residual
+
+        The order matters for clarity (small-K floor is checked first
+        because it is the strongest cohort guarantee — cf. K-707), but
+        the predicates are independent so any ordering yields the same
+        result.
+
+        Block dims default to ``None`` for legacy callers; when the
+        tile dim is unknown the affected sub-predicate degrades safely
+        (``batched_skip`` returns False; ``medium_k_residual`` skips the
+        block_k-dependent checks). The :meth:`small_k_guard` floor is
+        always enforced.
         """
-        if not (self.k_min <= K <= self.k_max):
+        if self.small_k_guard(M, N, K):
             return False
-        if M < self.min_mn or N < self.min_mn:
+        if self.batched_skip(M, N, block_m=block_m, block_n=block_n):
             return False
-        if block_k is not None and block_k > self.max_block_k:
-            return False
-
-        if block_k is not None:
-            mainloop_iters = (K + block_k - 1) // block_k
-            if mainloop_iters < self.mainloop_iters_min:
-                return False
-            if mainloop_iters > self.mainloop_iters_max:
-                return False
-
-        if block_m is not None and block_n is not None and block_m > 0 and block_n > 0:
-            tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
-            if tiles > self.tiles_max:
-                return False
-
-        return True
+        return self.medium_k_residual(M, N, K, block_k=block_k)
 
 
 #: Process-wide singleton envelope. There is exactly one in-tree caller
@@ -219,6 +343,34 @@ def is_medium_k_residual(
     """
     return DEFAULT_KPACK2_ENVELOPE.admits(
         M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
+    )
+
+
+def small_k_guard(M: int, N: int, K: int) -> bool:
+    """Module-level alias for :meth:`KPack2Envelope.small_k_guard`.
+
+    Returns True (REJECT) when the shape falls in the K-539 small-K /
+    small-MN cohort that regressed at ``kpack=2`` on the K-654 sweep.
+    Exposed so call sites and tests can interrogate the named reject
+    rule without reaching into the envelope dataclass.
+    """
+    return DEFAULT_KPACK2_ENVELOPE.small_k_guard(M, N, K)
+
+
+def batched_skip(
+    M: int,
+    N: int,
+    block_m: Optional[int] = None,
+    block_n: Optional[int] = None,
+) -> bool:
+    """Module-level alias for :meth:`KPack2Envelope.batched_skip`.
+
+    Returns True (REJECT) when the launch grid would exceed the
+    L2-friendly tile-count ceiling under the wider LDS access pattern
+    emitted by ``kpack=2``.
+    """
+    return DEFAULT_KPACK2_ENVELOPE.batched_skip(
+        M, N, block_m=block_m, block_n=block_n
     )
 
 
@@ -491,11 +643,24 @@ def select_lds_config(
         # autotune callback raised → fall through to the memoized auto path.
         mode = "auto"
 
-    return _decide_memo(
+    cfg = _decide_memo(
         mode, _CACHE_VERSION,
         M, N, K, a_dtype, b_dtype, c_dtype,
         block_m, block_n, block_k, streamk, work_stealing,
     )
+
+    # Structural assertion: the K-539 small-K / small-MN cohort must
+    # NEVER receive kpack=2 routing, regardless of mode, cache state,
+    # or any future bug in the envelope. This is the load-bearing
+    # invariant the K-707 PR enforces (cf. K-654 −27..−28% regression).
+    if cfg.kpack != BASELINE_CONFIG.kpack:
+        assert not DEFAULT_KPACK2_ENVELOPE.small_k_guard(M, N, K), (
+            f"lds_swizzle (kpack={cfg.kpack}) returned for K-539-cohort "
+            f"shape M={M} N={N} K={K} (K<=512 OR M*N<=2048*2048); "
+            f"this violates the K-707 small-K guard contract"
+        )
+
+    return cfg
 
 
 __all__ = [
@@ -508,6 +673,8 @@ __all__ = [
     "get_cache",
     "get_mode",
     "is_medium_k_residual",
+    "small_k_guard",
+    "batched_skip",
     "select_lds_config",
     "reset_cache_for_testing",
 ]

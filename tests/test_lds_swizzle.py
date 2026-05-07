@@ -33,10 +33,12 @@ from tritonblas.lds_swizzle import (  # noqa: E402
     LDSSwizzleConfig,
     PersistentSwizzleCache,
     SWIZZLED_CONFIG,
+    batched_skip,
     get_mode,
     is_medium_k_residual,
     reset_cache_for_testing,
     select_lds_config,
+    small_k_guard,
 )
 
 
@@ -146,6 +148,247 @@ def test_envelope_admits_benefit_cohort():
         assert is_medium_k_residual(
             M, N, K, block_k=64, block_m=256, block_n=256
         ), f"benefit shape {M}x{N}x{K} must remain admitted"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# K-707 sub-predicates: small_k_guard / batched_skip / medium_k_residual
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_small_k_guard_rejects_k539_cohort():
+    """K-539 cohort (M, N ∈ {512, 1024, 2048}, K=512) — rejected by floor.
+
+    The K-654 PRD-guard sweep showed this cohort regressing −27..−28%.
+    The K-707 ``small_k_guard`` predicate enforces ``K <= 512`` OR
+    ``M*N <= 2048*2048`` as a structural floor that fires regardless
+    of whether ``block_k`` is supplied. This test pins the floor on
+    every member of the cohort independently, so a future regression
+    on any single shape is caught.
+    """
+    for M in (512, 1024, 2048):
+        for N in (512, 1024, 2048):
+            assert small_k_guard(M, N, 512), (
+                f"K-539 cohort shape M={M} N={N} K=512 must be rejected by "
+                f"small_k_guard (K<=512 floor)"
+            )
+            # Independent of block_k — the floor still fires when block_k is None.
+            assert not is_medium_k_residual(M, N, 512), (
+                f"K-539 cohort shape M={M} N={N} K=512 (no block_k) must NOT "
+                f"be admitted to the envelope; got admit=True"
+            )
+            assert not is_medium_k_residual(M, N, 512, block_k=64), (
+                f"K-539 cohort shape M={M} N={N} K=512 (block_k=64) must NOT "
+                f"be admitted to the envelope; got admit=True"
+            )
+
+
+def test_small_k_guard_floors_independently_of_block_k():
+    """K=512 floor is enforced even when block_k would yield admittance.
+
+    Pre-fix, a caller that passed ``block_k=32`` for K=512 would yield
+    ``mainloop_iters=16`` which slipped through the legacy
+    amortization-floor check. ``small_k_guard``'s K-floor closes that
+    loophole structurally.
+    """
+    assert small_k_guard(4096, 4096, 512)
+    # Even with block_k=32 → mainloop_iters=16, the K-floor still rejects.
+    assert not is_medium_k_residual(4096, 4096, 512, block_k=32)
+
+
+def test_small_k_guard_rejects_small_problem_area():
+    """``M*N <= 2048*2048`` floor rejects under-sized launches.
+
+    Catches shapes that pass the per-axis ``min_mn`` check but whose
+    total M*N is still launch-bound (kpack=2 mainloop savings cannot
+    amortize the prologue/epilogue cost).
+    """
+    # M=N=2048 → M*N == 2048*2048 (boundary, inclusive reject).
+    assert small_k_guard(2048, 2048, 1024)
+    # M=1024, N=4096 → M*N = 4M = 2048² (boundary, inclusive reject).
+    assert small_k_guard(1024, 4096, 1024)
+    # Shrunk to area boundary even though K is well in band.
+    assert not is_medium_k_residual(2048, 2048, 1024, block_k=64)
+
+
+def test_small_k_guard_admits_k580_cohort():
+    """K-580 medium-K benefit cohort must NOT be flagged by small_k_guard.
+
+    All three benefit shapes have K=2048 (>512) AND M*N >> 2048*2048,
+    so the small-K floor does not fire and the kpack=2 routing remains
+    available.
+    """
+    for M, N, K in [(4096, 2048, 2048), (8192, 1024, 2048), (2048, 4096, 2048)]:
+        assert not small_k_guard(M, N, K), (
+            f"K-580 benefit shape M={M} N={N} K={K} must NOT trip the "
+            f"small_k_guard (would erase the medium-K kpack=2 lift)"
+        )
+
+
+def test_batched_skip_rejects_large_grid():
+    """``batched_skip`` rejects launches whose tile-count > tiles_max.
+
+    Replays the K-580 PRD-cohort large-square loser shape: 8K x 8K at
+    BM=BN=128 → 64*64 = 4096 tiles >> 128 → reject (TCC miss frac
+    +36..+62% under wider LDS).
+    """
+    assert batched_skip(8192, 8192, block_m=128, block_n=128)
+    assert batched_skip(4096, 4096, block_m=128, block_n=128)  # 1024 tiles
+
+
+def test_batched_skip_admits_in_band_grid():
+    """In-band benefit shapes have grid <= tiles_max → not skipped."""
+    # 4096 x 2048 at BM=BN=256 → 16*8 = 128 tiles == tiles_max (admitted).
+    assert not batched_skip(4096, 2048, block_m=256, block_n=256)
+    # 2048 x 2048 at BM=BN=256 → 8*8 = 64 tiles.
+    assert not batched_skip(2048, 2048, block_m=256, block_n=256)
+
+
+def test_batched_skip_safe_default_when_block_unknown():
+    """When tile dims are unknown (legacy callers) batched_skip defers.
+
+    The cache-side / autotune-side gating provides the load-bearing
+    safety in that path; ``batched_skip`` returning False here just
+    means it has no opinion to contribute, NOT that the shape is
+    admitted.
+    """
+    assert not batched_skip(8192, 8192)  # no block_m/block_n
+    assert not batched_skip(8192, 8192, block_m=None, block_n=128)
+
+
+def test_admits_decomposes_into_subpredicates():
+    """``admits`` is exactly the conjunction of the named sub-predicates.
+
+    This pins the contract that the god-function refactor is faithful
+    — any future change to ``admits`` must keep the equivalence
+    ``admits == NOT small_k_guard AND NOT batched_skip AND medium_k_residual``.
+    """
+    cases = [
+        # (M, N, K, BK, BM, BN, expected)
+        # K-539 cohort — small_k_guard rejects.
+        (2048, 2048, 512, 64, 256, 256, False),
+        # K-580 benefit shape — all three pass.
+        (4096, 2048, 2048, 64, 256, 256, True),
+        # Large-square loser — batched_skip rejects.
+        (8192, 8192, 1024, 64, 128, 128, False),
+        # Out-of-band high K — medium_k_residual rejects.
+        (4096, 4096, 4096, 64, 128, 128, False),
+    ]
+    env = DEFAULT_KPACK2_ENVELOPE
+    for M, N, K, BK, BM, BN, expected in cases:
+        composed = (
+            (not env.small_k_guard(M, N, K))
+            and (not env.batched_skip(M, N, block_m=BM, block_n=BN))
+            and env.medium_k_residual(M, N, K, block_k=BK)
+        )
+        assert composed == env.admits(M, N, K, block_k=BK, block_m=BM, block_n=BN), (
+            f"admits() decomposition mismatch on M={M} N={N} K={K} "
+            f"BK={BK} BM={BM} BN={BN}"
+        )
+        assert composed == expected, (
+            f"composed predicate disagrees with expected on "
+            f"M={M} N={N} K={K} BK={BK} BM={BM} BN={BN}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# K-707 cohort pinning: end-to-end select_lds_config decisions
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "M,N,K",
+    [
+        (M, N, 512)
+        for M in (512, 1024, 2048)
+        for N in (512, 1024, 2048)
+    ],
+)
+@pytest.mark.parametrize("mode", ["off", "auto", "on"])
+def test_k539_cohort_never_swizzles(monkeypatch, M, N, K, mode):
+    """End-to-end: every K-539 cohort shape returns BASELINE on every mode.
+
+    This is the load-bearing K-707 invariant: K<=512 OR M*N<=2048²
+    must NEVER receive kpack=2 routing under ANY mode (off / auto /
+    on), regardless of cache state. Pinned per-(shape, mode) so a
+    regression on any single combination is caught individually.
+    """
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", mode)
+    cfg = select_lds_config(
+        M, N, K,
+        "f16", "f16", "f16",
+        block_m=256, block_n=256, block_k=64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg == BASELINE_CONFIG, (
+        f"K-539 cohort shape M={M} N={N} K={K} on mode={mode} got "
+        f"{cfg}; must be BASELINE_CONFIG (kpack=1)"
+    )
+
+
+@pytest.mark.parametrize(
+    "M,N,K",
+    [
+        (4096, 2048, 2048),
+        (8192, 1024, 2048),
+        (2048, 4096, 2048),
+    ],
+)
+def test_k580_medium_k_cohort_swizzles_on_mode_on(monkeypatch, M, N, K):
+    """K-580 medium-K benefit cohort returns SWIZZLED on mode=on.
+
+    Companion to ``test_k539_cohort_never_swizzles``: the K-580 lift
+    is preserved (the K-707 floor does not over-reject the benefit
+    cohort).
+    """
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    cfg = select_lds_config(
+        M, N, K,
+        "f16", "f16", "f16",
+        block_m=256, block_n=256, block_k=64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg == SWIZZLED_CONFIG, (
+        f"K-580 benefit shape M={M} N={N} K={K} on mode=on got "
+        f"{cfg}; must be SWIZZLED_CONFIG (kpack=2)"
+    )
+
+
+def test_k539_floor_holds_against_poisoned_cache(monkeypatch, tmp_path):
+    """Even a hand-poisoned ``kpack=2`` cache entry on a K-539 shape
+    must be dropped to baseline at lookup time.
+
+    Regression mechanism documented in K-654: a cache populated by an
+    older / looser-gate release can carry a stale ``kpack=2`` entry on
+    a now-out-of-envelope shape. The K-707 small_k_guard floor and the
+    structural assertion in ``select_lds_config`` jointly guarantee
+    the cached choice is rejected on every dispatch.
+    """
+    cache_path = tmp_path / "k539_poisoned.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    reset_cache_for_testing()
+
+    cache = PersistentSwizzleCache(path=cache_path)
+    for M in (512, 1024, 2048):
+        for N in (512, 1024, 2048):
+            key = (
+                f"{M}x{N}x512|f16|f16|f16|"
+                f"256x256x64|ds|nows"
+            )
+            cache.set(key, SWIZZLED_CONFIG)
+    reset_cache_for_testing()
+
+    for M in (512, 1024, 2048):
+        for N in (512, 1024, 2048):
+            cfg = select_lds_config(
+                M, N, 512,
+                "f16", "f16", "f16",
+                256, 256, 64,
+                streamk=False, work_stealing=False,
+            )
+            assert cfg == BASELINE_CONFIG, (
+                f"K-539 cohort shape M={M} N={N} K=512 returned {cfg} from "
+                f"poisoned cache; small_k_guard floor must drop to baseline"
+            )
 
 
 

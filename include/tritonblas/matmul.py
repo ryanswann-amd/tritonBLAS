@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .dispatch import should_use_streamk
 
 
 
@@ -37,8 +38,12 @@ def _maybe_wrap(fn, probe_tensor):
 
 
 # Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily.
+# K-162: the auto-Stream-K dispatcher can call this twice per skinny shape
+# (once for the persistent selector to extract BLK_M/BLK_N, once for the
+# Stream-K selector when the gate fires).  Caching keeps that free after
+# the first call.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -65,6 +70,36 @@ def _make_matmul_selector(
         num_stages=num_stages,
     )
 
+
+def _select_dispatch(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    c_dtype: torch.dtype,
+    device: torch.device,
+    enable_streamk: bool,
+):
+    """Build an Origami selector and decide between persistent and Stream-K.
+
+    When the caller did NOT explicitly request Stream-K but the data-parallel
+    grid is too small to fill the device (see ``dispatch.should_use_streamk``),
+    flip ``enable_streamk`` and rebuild the selector so its grid sizing
+    (``sk_grid``) and workgroup mapping match the Stream-K kernel's
+    expectations.
+    """
+    selector = _make_matmul_selector(
+        M, N, K, a_dtype, b_dtype, c_dtype, device, streamk=enable_streamk
+    )
+    if not enable_streamk and should_use_streamk(
+        M, N, K, selector.block_m, selector.block_n, device
+    ):
+        enable_streamk = True
+        selector = _make_matmul_selector(
+            M, N, K, a_dtype, b_dtype, c_dtype, device, streamk=True
+        )
+    return selector, enable_streamk
 
 def persistent_matmul_lt(
     a: torch.Tensor,
@@ -404,7 +439,9 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    selector, enable_streamk = _select_dispatch(
+        M, N, K, a.dtype, b.dtype, out.dtype, a.device, enable_streamk
+    )
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -461,7 +498,9 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    selector, enable_streamk = _select_dispatch(
+        M, N, K, a.dtype, b.dtype, out.dtype, a.device, enable_streamk
+    )
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -509,7 +548,9 @@ def matmul_a8w8(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    selector, enable_streamk = _select_dispatch(
+        M, N, K, a.dtype, b.dtype, c.dtype, a.device, enable_streamk
+    )
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
@@ -638,12 +679,15 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
-
     # Allocate an output tensor
     out = a.new_empty(M, N)
+
+    # Query Origami for solution (auto-route under-occupied skinny shapes
+    # to Stream-K -- see tritonblas.dispatch).
+    selector, enable_streamk = _select_dispatch(
+        M, N, K, a.dtype, b.dtype, bias.dtype, a.device, enable_streamk
+    )
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -710,8 +754,11 @@ def _addmm_out(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    # Query Origami for solution (auto-route under-occupied skinny shapes
+    # to Stream-K -- see tritonblas.dispatch).
+    selector, enable_streamk = _select_dispatch(
+        M, N, K, a.dtype, b.dtype, bias.dtype, a.device, enable_streamk
+    )
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

@@ -77,6 +77,60 @@ def test_lru_cache_decorator_present():
     assert hasattr(matmul_mod._make_matmul_selector, "cache_clear")
 
 
+def test_lru_cache_maxsize_is_1024():
+    """maxsize must stay at 1024 — fails loudly if someone shrinks it.
+
+    A smaller maxsize would silently weaken the cache (more evictions =
+    more Origami re-runs at small M = the K-198/K-231 regression). The
+    Testing Zealot review on K-231 explicitly required catching this
+    silent-weakening case, not just outright decorator removal.
+    """
+    info = matmul_mod._make_matmul_selector.cache_info()
+    assert info.maxsize == 1024, (
+        f"_make_matmul_selector maxsize must be 1024 (got {info.maxsize}). "
+        "Reducing maxsize evicts hot small-M shapes and re-runs the Origami "
+        "heuristic on the kernel critical path — see K-231 reviewer notes."
+    )
+
+
+def test_lru_cache_evicts_after_maxsize(fake_selector):
+    """Filling >maxsize distinct keys must evict the oldest (LRU semantics).
+
+    Builds 1024 distinct keys (all hit the cache once), then adds a
+    1025th — the first key must now miss when re-queried, proving the
+    cache size is bounded at the documented 1024 and is doing real LRU
+    bookkeeping rather than silently behaving like maxsize=None.
+    """
+    matmul_mod._make_matmul_selector.cache_clear()
+    base = _key()
+
+    # 1024 distinct N values -> exactly fills the cache, all misses.
+    for i in range(1024):
+        matmul_mod._make_matmul_selector(**{**base, "N": 4096 + i})
+    info = matmul_mod._make_matmul_selector.cache_info()
+    assert info.currsize == 1024, f"expected currsize=1024, got {info.currsize}"
+    assert info.misses == 1024
+
+    # Re-query the very first key — should still be a hit (no eviction yet).
+    matmul_mod._make_matmul_selector(**{**base, "N": 4096})
+    info = matmul_mod._make_matmul_selector.cache_info()
+    assert info.hits == 1, f"first key should be a hit before overflow, got hits={info.hits}"
+
+    # Add a 1025th distinct key — forces eviction. Re-query the second
+    # key (N=4097), which is now the LRU entry — it must be evicted.
+    matmul_mod._make_matmul_selector(**{**base, "N": 4096 + 1024})
+    matmul_mod._make_matmul_selector(**{**base, "N": 4097})
+    info = matmul_mod._make_matmul_selector.cache_info()
+    assert info.currsize == 1024, (
+        f"cache must stay bounded at 1024 (got currsize={info.currsize}) — "
+        "if currsize grows past maxsize the lru_cache decorator was replaced "
+        "with an unbounded cache."
+    )
+    assert info.misses >= 1026, (
+        f"re-query of evicted key must register a miss (misses={info.misses})"
+    )
+
+
 def test_repeated_call_returns_same_instance(fake_selector):
     """Same (M,N,K,dtype,device) -> cache hit, same object."""
     sel1 = matmul_mod._make_matmul_selector(**_key())

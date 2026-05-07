@@ -26,88 +26,37 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
-# ---------------------------------------------------------------------------
-# Skinny-M Stream-K dispatch heuristic
-# ---------------------------------------------------------------------------
-# When M is very small (M<=32, batch decode / DLRM head shapes), the
-# data-parallel grid is cdiv(M,BLK_M) * cdiv(N,BLK_N).  With BLK_M=16 and
-# skinny M, that grid is bounded by cdiv(N, BLK_N) (typically 8..128 tiles
-# for N in 1k..16k), well below 304 CUs on MI300X.  Stream-K can in
-# principle split along K to cover the under-utilised CUs.
-#
-# Empirical calibration (MI300X, gfx942, ROCm 7.2 + Triton 3.6):
-#
-#   For most M=16 shapes the persistent kernel completes in ~0.23 ms, which
-#   is dominated by the Triton launch / dispatch overhead floor; the actual
-#   compute is well under 50 us.  Switching to Stream-K adds the partial-tile
-#   reduction (atomic locks + per-grid P-buffer accumulation) overhead, and
-#   that addition exceeds the parallelism gain in the launch-bound regime.
-#
-#   The break-even is reached only when (a) K is very deep (so the persistent
-#   tile is compute-bound, not launch-bound), and (b) the data-parallel grid
-#   is tiny enough that Stream-K's K-split materially raises CU occupancy.
-#
-# The heuristic therefore fires only in this narrow regime:
-#
-#   * M <= SKINNY_M_THRESHOLD (default 32)
-#   * data-parallel grid < num_CUs / 4  (truly under-utilised, not merely
-#                                        below the CU count)
-#   * K   >= SKINNY_K_MIN_FOR_SPLIT     (deep enough K to amortise the
-#                                        partial-tile reduction overhead)
-#   * K/N >= SKINNY_K_TO_N_RATIO        (skinny in N too; otherwise the
-#                                        persistent path's launch overhead
-#                                        is already negligible)
-#
-# Outside this regime the heuristic returns False, leaving the existing
-# persistent path untouched.  Users who want to override (force-enable or
-# force-disable) can pass an explicit ``enable_streamk`` flag, which the
-# resolver below always honours.
-#
-# These thresholds intentionally prevent the heuristic from regressing the
-# 12-shape M=16 sweep used as the K-104 acceptance gate -- on that sweep the
-# persistent path wins, and the heuristic correctly returns False for every
-# shape, leaving behaviour unchanged.  Future work (faster Stream-K kernel
-# for skinny shapes, or a dedicated split-K kernel) can relax these
-# thresholds without touching the dispatcher.
-SKINNY_M_THRESHOLD = 32
-SKINNY_K_MIN_FOR_SPLIT = 16384
-SKINNY_K_TO_N_RATIO = 8  # K/N=4 still regresses on MI300X (measured 0.75x); K/N>=8 wins
+def _resolve_streamk(M: int, N: int, K: int, enable_streamk) -> bool:
+    """Resolve ``enable_streamk`` for skinny-M shapes.
 
+    Explicit ``True``/``False`` is honored.  When ``enable_streamk is None``
+    (the new default), Stream-K auto-fires only in the empirically-validated
+    win zone for skinny-M deep-K GEMM:
 
-def _should_auto_streamk(M: int, N: int, K: int, num_cus: int = MAX_SMS) -> bool:
-    """Return True when the skinny-M Stream-K path should be enabled.
+        M <= 32  AND  K >= 16384  AND  N <= 2048
 
-    See the module-level comment block for the empirical calibration of
-    these thresholds on MI300X.
+    Calibration (MI300X gfx942, current ROCm + Triton, fp16,
+    transA=T transB=N) on the small-M cohort (M in {8,16,32},
+    N in {1024..16384}, K in {1024..16384}, 33 shapes total):
+
+        Inside the win zone (2 cohort shapes):
+            (M=16, N=1024, K=16384):  Stream-K vs persistent = 1.115x
+            (M=16, N=2048, K=16384):  Stream-K vs persistent = 1.138x
+        Outside the win zone:
+            persistent floor is ~0.26 ms (Triton launch-overhead bound);
+            Stream-K's partial-tile reduction adds ~0.02-0.03 ms,
+            erasing any parallelism gain.
+        Regression band (deliberately gated out):
+            K=16384 with N>=4096 collapses to sk/per = 0.59x-0.92x.
+
+    The N<=2048 gate is tighter than a CU-count check because the real
+    bottleneck is the launch-overhead floor, not CU occupancy: persistent
+    on these shapes uses ~8-16 tiles (already CU-light), but its launch
+    floor still beats Stream-K's reduction overhead until K dominates.
     """
-    if M <= 0 or N <= 0 or K <= 0:
-        return False
-    if M > SKINNY_M_THRESHOLD:
-        return False
-    if K < SKINNY_K_MIN_FOR_SPLIT:
-        return False
-    if K < SKINNY_K_TO_N_RATIO * N:
-        return False
-    # Conservative grid estimate (real selector picks block sizes after this
-    # heuristic; here we use representative values to gate the decision).
-    est_block_m = 16 if M <= 16 else 32
-    est_block_n = 128
-    grid = ((M + est_block_m - 1) // est_block_m) * ((N + est_block_n - 1) // est_block_n)
-    return grid * 4 < num_cus
-
-
-def _resolve_streamk(M: int, N: int, K: int,
-                     enable_streamk, num_cus: int = MAX_SMS) -> bool:
-    """Resolve the user-supplied ``enable_streamk`` flag against the skinny-M
-    auto-dispatch heuristic.
-
-    A user-supplied True/False is always respected.  ``None`` (the new
-    default) means "let the dispatcher decide" -- the skinny-M heuristic
-    picks Stream-K when it is expected to help.
-    """
-    if enable_streamk is None:
-        return _should_auto_streamk(M, N, K, num_cus)
-    return bool(enable_streamk)
+    if enable_streamk is not None:
+        return bool(enable_streamk)
+    return 0 < M <= 32 and 0 < N <= 2048 and K >= 16384
 
 
 def _maybe_wrap(fn, probe_tensor):

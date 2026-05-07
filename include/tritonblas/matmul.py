@@ -817,7 +817,13 @@ _BMM_SHAPE_LOOKUP = {
     (4, 1024, 1024, 1024, torch.float16):
         (128, 128, 64, 4, 8, 2, 2, 2),  # ratio 0.788 (vs Origami 0.529)
     (8,  512,  512,  512, torch.float16):
-        (64,  64,  64, 4, 4, 2, 2, 2),  # ratio 0.874 (vs Origami 0.492)
+        (128, 128, 64, 8, 8, 2, 1, 0),  # ratio 0.86 (slow-hipBLASLt) /
+                                         # 0.77 (fast-hipBLASLt nodes);
+                                         # robust cross-node winner.
+                                         # 64x64x64 wins +0.01 only on
+                                         # slow nodes; 128x128 wins
+                                         # +0.04 on fast nodes — pick
+                                         # the geomean-best config.
 }
 
 

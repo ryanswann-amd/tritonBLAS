@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -9,9 +10,23 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import (
+    persistent_splitk_matmul,
+    choose_split_k,
+    should_use_atomic_free_splitk,
+)
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# Opt-out kill-switch for the atomic-free split-K small-M dispatcher.
+# Set TBLAS_DISABLE_SPLITK_SMALLM=1 to fall back to the persistent / stream-K
+# paths even on the gated cohort -- useful for A/B perf bisection.  Read at
+# call time (not import time) so benchmark harnesses can flip the env var
+# between calls without reloading the module.
+def _splitk_smallm_disabled() -> bool:
+    return os.environ.get("TBLAS_DISABLE_SPLITK_SMALLM", "").lower() in ("1", "true", "yes")
 
 
 
@@ -64,6 +79,67 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+
+
+def _maybe_dispatch_atomic_free_splitk(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+) -> Optional[torch.Tensor]:
+    """Try the atomic-free split-K small-M path; return ``c`` if it ran, else None.
+
+    Gating (must all be true):
+      * dtypes are FP16 or BF16 (the cohort where the FP16/BF16 atomic CAS
+        loop on gfx942 dominates -- not relevant for INT8/FP8/quantized)
+      * M <= 32 AND K >= 4096
+      * the chosen SPLIT_K is >= 4
+      * not under torch.compile fake-tensor tracing
+      * not opted out via TBLAS_DISABLE_SPLITK_SMALLM
+
+    Falls through (returns None) on any failure so the caller can use the
+    existing persistent / stream-K dispatch.
+    """
+    if _splitk_smallm_disabled() or quantized:
+        return None
+    if is_fake(a) or is_fake(b) or is_fake(c):
+        return None
+    if a.dtype not in (torch.float16, torch.bfloat16):
+        return None
+    if a.dim() != 2 or b.dim() != 2:
+        return None
+
+    M, K = a.shape
+    _, N = b.shape
+    if M > 32 or K < 4096:
+        return None
+
+    # Origami's tile picker is tuned for the persistent path; for the small-M
+    # split-K path use a fixed compact tile that is friendly to the MFMA
+    # 16x16x16 instruction and keeps the workspace small.
+    block_m = 16 if M <= 16 else 32
+    block_n = 128 if N >= 128 else max(16, triton.next_power_of_2(N))
+    block_k = 64
+    group_m = 1
+
+    split_k = choose_split_k(M, K, block_k)
+    if not should_use_atomic_free_splitk(M, K, split_k):
+        return None
+
+    persistent_splitk_matmul(
+        a, b, c,
+        block_m=block_m,
+        block_n=block_n,
+        block_k=block_k,
+        group_m=group_m,
+        split_k=split_k,
+        bias=bias,
+        num_stages=2,
+        num_warps=4,
+        allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+    )
+    return c
 
 
 def persistent_matmul_lt(
@@ -404,6 +480,11 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # Atomic-free split-K small-M dispatcher (M <= 32, K >= 4096, SPLIT_K >= 4).
+    # Falls through to the persistent / stream-K paths on any gating failure.
+    if _maybe_dispatch_atomic_free_splitk(a, b, out) is not None:
+        return out
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +541,10 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # Atomic-free split-K small-M dispatcher (matches _matmul above).
+    if _maybe_dispatch_atomic_free_splitk(a, b, out) is not None:
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -645,6 +730,10 @@ def _addmm(
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
+    # Atomic-free split-K small-M dispatcher (with bias fold-in epilogue).
+    if _maybe_dispatch_atomic_free_splitk(a, b, out, bias=bias) is not None:
+        return out
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
@@ -709,6 +798,10 @@ def _addmm_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # Atomic-free split-K small-M dispatcher (matches _addmm above).
+    if _maybe_dispatch_atomic_free_splitk(a, b, out, bias=bias) is not None:
+        return None
 
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)

@@ -36,9 +36,25 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# Atomic-free split-K dispatcher for the small-M residual cohort
+# (M <= 32, K >= 4096, SPLIT_K >= 4).  See persistent_splitk.py for the
+# rationale -- gfx942 has no native FP16/BF16 atomic-add, so the classic
+# split-K path serializes via a CAS retry loop on the C tile; this dispatcher
+# replaces it with a workspace + epilogue reduction.
+from .persistent_splitk import (
+    persistent_splitk_matmul,
+    splitk_partials_kernel,
+    splitk_reduce_kernel,
+    choose_split_k,
+    should_use_atomic_free_splitk,
+)
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
-           'fp4_matmul', 'stages']
+           'fp4_matmul', 'stages',
+           'persistent_splitk_matmul', 'splitk_partials_kernel',
+           'splitk_reduce_kernel', 'choose_split_k',
+           'should_use_atomic_free_splitk']

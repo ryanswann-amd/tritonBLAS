@@ -1,6 +1,7 @@
 import ctypes
 import functools
 import logging
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -123,9 +124,39 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Small-M GEMMs (M <= 32) under-fill MI300X because the data-parallel tile
+# grid yields tiles < 2*N_CU (e.g. M=16, N=K=1024 -> 8 CTAs vs 304 CUs).
+# Origami's BK=32 default leaves the K-loop pipeline shallow; boosting BK to
+# 128 deepens the pipeline (more MFMA per iter, fewer global loads per tile)
+# inside the persistent kernel.  Stream-K routing was tried and regressed
+# (atomic + reduction overhead at low CTA count).  Larger-M shapes are
+# untouched.  TBLAS_DISABLE_SMALL_M_RETUNE=1 disables the retune for A/B testing.
+def _maybe_retune_small_m(selector, M, N, K) -> None:
+    if M > 32 or os.environ.get(
+            "TBLAS_DISABLE_SMALL_M_RETUNE", "").lower() in ("1", "true", "yes"):
+        return
+    BM, BN, BK = selector.block_m, selector.block_n, selector.block_k
+    tiles = ((M + BM - 1) // BM) * ((N + BN - 1) // BN)
+    if tiles >= 2 * selector._hardware.N_CU or K < 256 or BK >= 128:
+        return
+    target_bk = min(128, K)
+    try:
+        from .origami import check_triton_lds_capacity
+        if not check_triton_lds_capacity(
+                BM, BN, target_bk,
+                selector._a_dtype_bitsize / 8, selector._b_dtype_bitsize / 8,
+                selector._hardware.lds_capacity, selector._num_stages):
+            return
+    except Exception:
+        return
+    selector._result.config.mt.k = target_bk
+    _log.debug("small-M retune: M=%d N=%d K=%d BK %d -> %d", M, N, K, BK, target_bk)
+
+
+# Cache heuristic results.  OrigamiMatmulSelector construction costs ~200 us
+# per call (analytical model + LDS checks + workgroup mapping); for small-M
+# shapes whose kernel runs in <100 us this dominates total dispatch latency.
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -138,8 +169,7 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -151,6 +181,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    # Deepen K-loop pipeline for under-utilised small-M shapes.
+    _maybe_retune_small_m(selector, M, N, K)
+    return selector
 
 
 def _dispatch_persistent_kernel(

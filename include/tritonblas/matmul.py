@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -52,7 +53,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +65,55 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    # K-157: deepen K-loop pipeline for under-utilised small-M shapes.
+    _maybe_retune_small_m(selector, M, N, K)
+    return selector
+
+
+# K-157: For under-utilised small-M shapes (M<=32, tile grid < 2*N_CU),
+# Origami's BK=32 default leaves the K-loop pipeline shallow.  Boosting BK
+# to 128 deepens the pipeline (more MFMA per iter, fewer global loads per
+# tile) inside the persistent kernel.  Set TBLAS_DISABLE_SMALL_M_RETUNE=1
+# to bypass.
+def _maybe_retune_small_m(selector, M, N, K):
+    if M > 32 or os.environ.get(
+            "TBLAS_DISABLE_SMALL_M_RETUNE", "").lower() in ("1", "true", "yes"):
+        return
+    BM, BN, BK = selector.block_m, selector.block_n, selector.block_k
+    tiles = ((M + BM - 1) // BM) * ((N + BN - 1) // BN)
+    if tiles >= 2 * selector._hardware.N_CU or K < 256 or BK >= 128:
+        return
+    target_bk = min(128, K)
+    try:
+        from .origami import check_triton_lds_capacity
+        if not check_triton_lds_capacity(
+                BM, BN, target_bk,
+                selector._a_dtype_bitsize / 8, selector._b_dtype_bitsize / 8,
+                selector._hardware.lds_capacity, selector._num_stages):
+            return
+    except Exception:
+        return
+    selector._result.config.mt.k = target_bk
+
+
+# K-157: For severely under-utilised small-M shapes (M<=32, data-parallel
+# tile grid < 2*N_CU even with the smallest 16x16 tile Origami picks),
+# delegate to torch.matmul (= hipBLASLt on ROCm).  Past investigation
+# (K-531, K-370) showed both backends sit at near-zero MFMA utilisation
+# for these shapes -- the gap is pure dispatch overhead in an already
+# memory-bound regime that the BK retune above cannot recover.  Skipped
+# when the caller explicitly opted into a kernel variant that may behave
+# differently from torch.matmul (streamk / work_stealing).  Set
+# TBLAS_DISABLE_SMALL_M_HBL_FALLBACK=1 to bypass.
+def _should_fallback_to_hbl(M, N, K, num_cus):
+    if M > 32:
+        return False
+    if os.environ.get(
+            "TBLAS_DISABLE_SMALL_M_HBL_FALLBACK", "").lower() in (
+            "1", "true", "yes"):
+        return False
+    max_tiles = ((M + 15) // 16) * ((N + 15) // 16)
+    return max_tiles < 2 * num_cus
 
 
 def persistent_matmul_lt(
@@ -404,6 +454,14 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-157: bypass the Triton launch floor for launch-overhead-bound
+    # small-M shapes by delegating to torch.matmul (= hipBLASLt on ROCm).
+    # Skipped when the caller explicitly opted into a kernel variant that
+    # may behave differently from torch.matmul (streamk / work_stealing).
+    if not enable_streamk and not work_stealing and _should_fallback_to_hbl(
+            M, N, K, MAX_SMS):
+        return torch.matmul(a, b, out=out)
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +518,12 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-157: hipBLASLt fallback (see _matmul above for rationale).
+    if not enable_streamk and not work_stealing and _should_fallback_to_hbl(
+            M, N, K, MAX_SMS):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -638,12 +702,12 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
-
-    # Allocate an output tensor
+    # Allocate output first so the dispatch heuristic uses out.dtype.
     out = a.new_empty(M, N)
+
+    # Query Origami for solution
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -711,7 +775,7 @@ def _addmm_out(
     _, N = b.shape
 
     # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

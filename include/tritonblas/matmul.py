@@ -23,9 +23,46 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Selector cache.
+#
+# OrigamiMatmulSelector construction calls the C++ analytical model
+# `origami.select_config`, which costs ~150-180us per call on MI300X.
+# For the skinny-GEMM cohort (M<=32) the actual GPU kernel is only ~45us,
+# so an uncached selector dominates the wall time. Caching the selector
+# by problem shape drives the overhead to <2us on repeat calls, which is
+# the regime LLM token-decode hits (same shape called for every decode
+# step).
+#
+# A previous attempt re-enabled @functools.lru_cache and was reverted in
+# commit cd11927 ("Temporarily disable selector cache due to hash bug").
+# The hash issue: `torch.device("cuda")` and `torch.device("cuda", 0)`
+# are equivalent on the kernel side but hash differently; passing one or
+# the other yielded duplicate entries (and worse, an unhashable error
+# under some torch versions). We side-step both by normalising every
+# argument into a deterministic primitive tuple key.
+_selector_cache: Dict[Tuple, Any] = {}
+
+
+def _selector_cache_key(
+    M, N, K, a_dtype, b_dtype, c_dtype, device, mx_block_size, streamk, num_stages
+):
+    if isinstance(device, torch.device):
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        dev_key: Any = (device.type, idx)
+    else:
+        dev_key = device
+
+    def _dt(d):
+        # torch.dtype is hashable but str() makes the key picklable / debuggable.
+        return d if not isinstance(d, torch.dtype) else str(d)
+
+    return (
+        int(M), int(N), int(K),
+        _dt(a_dtype), _dt(b_dtype), _dt(c_dtype),
+        dev_key, int(mx_block_size), bool(streamk), int(num_stages),
+    )
+
+
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -38,8 +75,13 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    key = _selector_cache_key(
+        M, N, K, a_dtype, b_dtype, c_dtype, device, mx_block_size, streamk, num_stages
+    )
+    sel = _selector_cache.get(key)
+    if sel is not None:
+        return sel
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -51,6 +93,8 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    _selector_cache[key] = sel
+    return sel
 
 
 def persistent_matmul_lt(

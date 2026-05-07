@@ -250,6 +250,37 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
+        # Skinny-M cohort tile override.
+        #
+        # Origami's analytical model under-selects tile width for M<=32 because
+        # it scores tiles assuming a data-parallel grid (no K-split). For
+        # skinny-M shapes the M-dim already fills only one MFMA-row per tile,
+        # so picking BLK_N=32 (Origami default for M=16) leaves only 16-256
+        # tiles vs. 304 CUs even before split-K. Empirical baseline on MI300X:
+        #   - Origami picks (16, 32, 32) for M=16 N=K=5120 -> 0.06x of hipBLASLt
+        #   - Override to (16, 256, 64) + auto-streamk recovers ~0.7x+
+        #
+        # Override picks the largest-N tile that fits Triton LDS, with
+        # num_stages=1 for (16,256,64) bf16/fp16 since two-stage padded
+        # double-buffering of (64*256+16*64)*2B = ~36KB exceeds the per-WG
+        # 64KB LDS budget. streamk K-split (computed in _compute_sk_grid when
+        # streamk=True) then multiplies the grid by 2-8x to fill the CUs.
+        SKINNY_M_THRESHOLD = 32
+        is_supported_arch = self._hardware.N_CU in (304, 80, 64, 228, 256)
+        if (
+            m <= SKINNY_M_THRESHOLD
+            and n >= 256
+            and k >= 64
+            and is_supported_arch
+        ):
+            target = self._select_skinny_tile(bytes_a, bytes_b, lds_cap)
+            if target is not None:
+                blk_m, blk_n, blk_k, num_stages = target
+                self._result.config.mt.m = blk_m
+                self._result.config.mt.n = blk_n
+                self._result.config.mt.k = blk_k
+                self._num_stages = num_stages
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -260,6 +291,50 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._result.config, self._grid
         )
         self._workgroup_mapping = abs(wgm)  # wgm can be negative for M-major
+
+    # Preference-ordered list of (BLK_M, BLK_N, BLK_K, num_stages) candidates
+    # for the skinny-M cohort.
+    #
+    # Empirically (MI300X bf16 sweep, CUDA-graph kernel-only timing) keeping
+    # num_stages=2 dominates forcing num_stages=1 at the wider BLK_N=256:
+    # the lost pipelining costs more time than the wider tile saves.
+    # Concretely on MI300X bf16 (lds_cap=65536):
+    #
+    #   shape                  (16, 256, 64) s=1     (16, 128, 64) s=2
+    #   M=16 N=K=5120          39us  ratio 0.36       29us  ratio 0.48
+    #   M=16 N=K=8192          60us  ratio 0.55       42us  ratio 0.76
+    #   M=16 N=4096  K=14336   56us  ratio 0.47       44us  ratio 0.60
+    #   M=16 N=14336 K=4096    42us  ratio 0.67       33us  ratio 0.84
+    #   M=16 N=28672 K=4096    60us  ratio 0.81       58us  ratio 0.83
+    #
+    # The double-buffered (16, 256, 64) tile (78KB padded LDS) does not fit
+    # MI300X's 64KB per-workgroup LDS budget for bf16/fp16, which is why
+    # BLK_N=256 was previously paired with stages=1. (16, 128, 64) stages=2
+    # is the largest tile that keeps the pipeline depth at 2 within the
+    # bf16/fp16 LDS budget (~38KB padded), so it is the primary pick.
+    # BLK_K=64 halves Origami's default 32 K-loops while still leaving
+    # 8-bank LDS vector reads aligned.
+    _SKINNY_TILE_CANDIDATES = (
+        # (BLK_M, BLK_N, BLK_K, num_stages)
+        (16, 128, 64, 2),   # primary: ~38KB LDS for bf16/fp16, double-buffered
+        (16, 256, 32, 2),   # wide-N alternative if (128, 64) is rejected
+        (16, 256, 64, 1),   # explicit ticket tile (forfeits pipelining)
+        (16, 128, 32, 2),   # last resort: matches Origami's default budget
+    )
+
+    def _select_skinny_tile(self, bytes_a, bytes_b, lds_cap):
+        """Return (BLK_M, BLK_N, BLK_K, num_stages) for the skinny-M cohort.
+
+        Picks the first candidate from _SKINNY_TILE_CANDIDATES whose padded
+        Triton LDS footprint fits the per-workgroup LDS budget. Returns None
+        if none fit (caller should fall back to Origami's pick).
+        """
+        for blk_m, blk_n, blk_k, stages in self._SKINNY_TILE_CANDIDATES:
+            if check_triton_lds_capacity(
+                blk_m, blk_n, blk_k, bytes_a, bytes_b, lds_cap, stages
+            ):
+                return (blk_m, blk_n, blk_k, stages)
+        return None
 
     @property
     def block_m(self):
@@ -348,8 +423,17 @@ class OrigamiMatmulSelector:
                     break
 
         # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # workspace exceeds what the problem allows, fall back to no split.
+        #
+        # The original predicate (tiles % sk_grid != 0) is the right
+        # "uneven split" check when sk_grid <= tiles (the `tiles > cu_count`
+        # branch above), but it always trips for the K-split branch where
+        # sk_grid = tiles * factor > tiles and so tiles % sk_grid == tiles
+        # != 0. That silently disabled the K-split for every small-tile-count
+        # problem (skinny-M GEMMs in particular: M=16 N=5120 has 40 tiles vs
+        # 304 CUs and was rolled back to sk_grid=40, leaving 87% of the CUs
+        # idle). Constrain the rollback to the case it was meant for.
+        if sk_grid <= tiles and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

@@ -763,6 +763,21 @@ def addmm(
 # ──────────────────────────────────────────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=1024)
+def _bmm_selector_cached(M, N, K, a_dtype, b_dtype, c_dtype, device_index, batch):
+    """LRU-cached batched-matmul selector.
+
+    The Origami solver takes ~300 µs per invocation — for small batched
+    shapes that overhead alone exceeded the actual compute.  Caching by
+    (shape, dtype, device, batch) eliminates the cost on hot paths and
+    is safe because the selector output is a pure function of its inputs.
+    """
+    device = torch.device("cuda", device_index)
+    return OrigamiMatmulSelector(
+        M, N, K, a_dtype, b_dtype, c_dtype, device, batch=batch
+    )
+
+
 def _batched_matmul_launch(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -788,20 +803,44 @@ def _batched_matmul_launch(
     # Origami picks the per-shape tile config; batch GEMM reuses the same
     # tile across all batch entries (problem.batch=BATCH is recorded for
     # heuristics but tile selection is M/N/K-driven).
-    selector = OrigamiMatmulSelector(
-        M, N, K, a.dtype, b.dtype, out.dtype, a.device, batch=BATCH
+    selector = _bmm_selector_cached(
+        M, N, K, a.dtype, b.dtype, out.dtype, a.device.index, BATCH
     )
 
     BLK_M = selector.block_m
     BLK_N = selector.block_n
     BLK_K = selector.block_k
     gsize_m = selector.group_m
+    num_xcds = selector.num_sms
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     tiles_per_batch = total_blocks_M * total_blocks_N
-    grids = (BATCH * tiles_per_batch,)
+    total_tiles = BATCH * tiles_per_batch
     even_k = K % BLK_K == 0
+
+    # Persistent grid: cap at the hardware CU count, but never exceed
+    # total_tiles (avoids idle WGs when batch is tiny).
+    num_sms_hw = selector._hardware.N_CU
+    grid_size = min(num_sms_hw, total_tiles)
+    grids = (grid_size,)
+
+    # Chunk size used by chiplet_transform_chunked (mirrors the
+    # single-shot kernel: gsize_m * gsize_m, clamped against per-XCD
+    # budget).  ``selector.num_sms`` returns 0 on architectures where
+    # Origami did not populate the XCC mapping; fall back to the
+    # hardware-reported XCD count.  Disable the chiplet remap when the
+    # problem is too small to give each XCD multiple chunks
+    # (empirically: with ``total_tiles < 2 * grid_size``, the remap
+    # over-serialises the small batched shapes — k654-r2 regressed
+    # from 0.20 to 0.13 with the remap on; gating restores 0.20).
+    hw_xcds = max(1, getattr(selector._hardware, "NUM_XCD", 1))
+    if num_xcds is None or num_xcds < 1:
+        num_xcds = hw_xcds
+    if total_tiles < 2 * grid_size:
+        num_xcds = 1
+    chunk_size = gsize_m * gsize_m
+    chunk_size = min(chunk_size, max(1, grid_size // num_xcds))
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -830,6 +869,9 @@ def _batched_matmul_launch(
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
         GROUP_SIZE_M=gsize_m,
+        NUM_SMS=grid_size,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
         EVEN_K=even_k,
         ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
         num_stages=num_stages,

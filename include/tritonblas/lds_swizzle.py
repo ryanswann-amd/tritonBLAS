@@ -21,13 +21,15 @@ Modes (``TRITONBLAS_LDS_SWIZZLE`` env var):
               baseline.  This is **safe** — auto can never regress: any shape
               not yet timed by the autotuner stays on the baseline kpack=1
               config that has been the historical default.
-    on        Force the swizzled config for every shape.  Useful for
-              microbenchmarks but can regress shapes outside the medium-K
-              band, so do not use as a global default.
-    autotune  Time-measure both candidates and persist the winner to the
-              cache.  This is the recommended way to populate the cache for
-              new shapes — the per-shape decision avoids the regressions
-              ``on`` exhibits on, e.g., very large K.
+    on        Force the swizzled config for shapes inside the
+              :class:`KPack2Envelope` (regressing shapes still get the
+              baseline). Useful for microbenchmarks; the envelope guarantees
+              no out-of-band shape ever pays the kpack=2 penalty regardless
+              of mode.
+    autotune  Time-measure both candidates (only inside the envelope) and
+              persist the winner. The envelope restricts the candidate set so
+              the cache cannot be poisoned with a regressing kpack=2 entry on
+              shapes that are dominated by overhead rather than bank conflicts.
 
 The cache file lives at ``$TRITONBLAS_LDS_SWIZZLE_CACHE`` if set, else
 ``~/.cache/tritonblas/lds_swizzle.json``.
@@ -36,6 +38,15 @@ Each kernel call site (``persistent_matmul_lt`` and ``streamk_matmul_lt``)
 calls :func:`select_lds_config` to retrieve the (kpack, num_warps) tuple to
 forward to the Triton kernel launch — keeping the change isolated and
 backwards-compatible.
+
+Routing chokepoint
+------------------
+:func:`select_lds_config` is the single entry point that returns the config
+to forward to the Triton launch. Every code path — mode resolution, cache
+hit, cache miss, autotune — is funneled through one call to
+:meth:`KPack2Envelope.admits` so the routing contract cannot drift between
+call sites. Callers must NOT branch on the cached value themselves; the
+envelope is enforced inside the lookup.
 """
 
 from __future__ import annotations
@@ -43,7 +54,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -83,26 +94,111 @@ SWIZZLED_CONFIG = LDSSwizzleConfig(kpack=2, num_warps=8)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Medium-K residual gate
+# kpack=2 routing envelope (single source of truth)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-# Upper bound on K-iteration count beyond which kpack=2's longer per-LDS-issue
-# wait dominates the bank-conflict reduction (cluster rocprof confirmed: see
-# project_context lessons "K-646 iter-2/3"). At BK=64 this admits K up to 2048,
-# matching the original design envelope's upper bound.
-KPACK2_MAINLOOP_ITERS_MAX = 32
+@dataclass(frozen=True)
+class KPack2Envelope:
+    """Calibrated bounds for when ``kpack=2`` is profitable.
 
-# Lower bound on mainloop iterations needed to amortize the per-launch fixed
-# overhead of the wider LDS path (autotune cache miss + kpack=2 codegen prologue).
-# Below this the small-K cohort regresses (see K-654 sweep: K=512 cohort regressed
-# −27..−28% under unconditional kpack=2). At BK=64 this rejects K < 1024.
-KPACK2_MAINLOOP_ITERS_MIN = 16
+    Each bound corresponds to a regression mechanism observed during
+    pre-merge sweeps on MI300X / gfx942 (cluster rocprof + 61-shape
+    PRD-guard sweep). The envelope is the **single source of truth**
+    for whether a shape is allowed to receive ``kpack=2`` — every code
+    path in :func:`select_lds_config` (mode resolution, cache hit,
+    cache miss, autotune) calls :meth:`admits` rather than re-deriving
+    the predicate. To extend the envelope (e.g., per-dtype bounds, new
+    architectures), construct a new ``KPack2Envelope`` and pass it
+    explicitly into :func:`select_lds_config`.
 
-# Upper bound on grid tile-count beyond which kpack=2's L2 working-set spill
-# becomes the secondary regression mechanism (K-646 iter-2: TCC miss frac
-# +36..+62% on the two largest PRD-guard shapes).
-KPACK2_TILES_MAX = 128
+    Bounds (defaults are calibrated for MI300X bf16/fp16):
+
+    * ``k_min`` / ``k_max`` — outer K-axis admittance window. Below
+      ``k_min`` the bank-conflict win is too small to matter; above
+      ``k_max`` the per-LDS-issue dependency chain dominates.
+    * ``min_mn`` — minimum M and N. Smaller launches are tail-shaped
+      and launch-bound, so kpack changes are noise.
+    * ``max_block_k`` — block_k ceiling. Tiles wider than this already
+      have favorable LDS access widths; kpack=2 is redundant.
+    * ``mainloop_iters_min`` — amortization floor on
+      ``ceil(K / block_k)``. Below this the kpack=2 codegen prologue
+      and cache-lookup cost are not amortized over enough MFMA
+      iterations. (The default is calibrated empirically — a
+      regression sweep on the small-K cohort observed −27..−28% on
+      ``M, N ∈ {512, 1024, 2048}, K=512`` because at ``block_k=64``
+      that cohort spends only 8 iterations in the mainloop and the
+      fixed kpack=2 prologue/epilogue dominates. The amortization
+      floor must be high enough that the bank-conflict savings on
+      the *mainloop body* exceed those fixed overheads — empirically
+      ``mainloop_iters >= 16`` is the smallest power-of-two round
+      number that does so on this hardware. ``9`` would suffice to
+      reject the worst-offending cohort but still admits cases like
+      ``K=576/BK=64 → 9 iters`` which were observed flat-or-worse;
+      ``16`` provides a safety margin without rejecting any winner
+      shapes from the mainline benefit cohort, which are all at
+      ``K=2048/BK=64 → 32 iters``.)
+    * ``mainloop_iters_max`` — upper bound on mainloop iterations.
+      Beyond this the per-LDS-issue wait dominates the bank-conflict
+      reduction (rocprof: ``per_lds_wait`` +54..+96%,
+      ``mfma_active_frac`` −10..−18% at ``kpack=2`` once
+      ``SQ_LDS_BANK_CONFLICT == 0`` already holds at the baseline →
+      pure overhead, no offsetting benefit).
+    * ``tiles_max`` — upper bound on grid tile-count.
+      ``(M/BM) * (N/BN) > tiles_max`` triggers L2 working-set spill
+      under the wider LDS path (TCC miss frac +36..+62% on the
+      8K/16K-square shapes in the PRD-guard cohort).
+    """
+
+    k_min: int = 256
+    k_max: int = 2048
+    min_mn: int = 1024
+    max_block_k: int = 64
+    mainloop_iters_min: int = 16
+    mainloop_iters_max: int = 32
+    tiles_max: int = 128
+
+    def admits(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        block_k: Optional[int] = None,
+        block_m: Optional[int] = None,
+        block_n: Optional[int] = None,
+    ) -> bool:
+        """Return True if the shape is inside the envelope.
+
+        All conditions must hold. Block dims default to ``None`` for
+        legacy callers; when the tile dim is unknown that specific
+        bound is conservatively skipped (the autotune-side cache
+        gating is the load-bearing safety in that path).
+        """
+        if not (self.k_min <= K <= self.k_max):
+            return False
+        if M < self.min_mn or N < self.min_mn:
+            return False
+        if block_k is not None and block_k > self.max_block_k:
+            return False
+
+        if block_k is not None:
+            mainloop_iters = (K + block_k - 1) // block_k
+            if mainloop_iters < self.mainloop_iters_min:
+                return False
+            if mainloop_iters > self.mainloop_iters_max:
+                return False
+
+        if block_m is not None and block_n is not None and block_m > 0 and block_n > 0:
+            tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
+            if tiles > self.tiles_max:
+                return False
+
+        return True
+
+
+#: Process-wide default envelope. Override by passing ``envelope=...`` to
+#: :func:`select_lds_config` (e.g., from a per-arch dispatch layer).
+DEFAULT_KPACK2_ENVELOPE = KPack2Envelope()
 
 
 def is_medium_k_residual(
@@ -112,56 +208,10 @@ def is_medium_k_residual(
     block_k: Optional[int] = None,
     block_m: Optional[int] = None,
     block_n: Optional[int] = None,
+    envelope: KPack2Envelope = DEFAULT_KPACK2_ENVELOPE,
 ) -> bool:
-    """Return True if the shape sits in the medium-K residual band.
-
-    Two-sided gate calibrated against three disjoint shape sources (K-580
-    winners, K-646 PRD-guard losers, K-654 K-539 small-K losers):
-
-    * **Lower K bound (K-654)**: ``mainloop_iters = ceil(K/BK) >= 16`` —
-      reject the K-539 small-K cohort (M,N ∈ {512,1024,2048}, K=512) where
-      kpack=2 codegen + cache-lookup overhead dominates over the (small)
-      bank-conflict win. Empirically observed −27..−28% regression vs the
-      kpack=1 baseline before this guard.
-    * **Upper K bound (K-646)**: ``mainloop_iters <= 32`` — reject large-K
-      shapes whose per-LDS-issue dependency chain starves the MFMA pipeline
-      (rocprof: ``per_lds_wait`` +54..+96%, ``mfma_active_frac`` −10..−18%
-      at kpack=2 with ``SQ_LDS_BANK_CONFLICT == 0`` at the baseline → pure
-      overhead, no offsetting benefit).
-    * **Tile-count upper bound (K-646)**: ``(M//BM) * (N//BN) <= 128`` —
-      reject high-occupancy launches whose L2 working-set spills under the
-      wider LDS path (TCC miss frac +36..+62% on 8K/16K-square shapes).
-    * **Original lower bound (K-550/K-552)**: ``M, N >= 1024`` and
-      ``block_k <= 64`` are kept to exclude launch-bound tail shapes and
-      naturally-wide-LDS tiles respectively.
-
-    All four conditions must hold. Block dims default to None for legacy
-    callers; when unknown the tile-count check is skipped (consult the
-    cache-side autotune as the load-bearing safety in that path).
-    """
-    if not (256 <= K <= 2048):
-        return False
-    if M < 1024 or N < 1024:
-        return False
-    if block_k is not None and block_k > 64:
-        # Larger block_k tiles already have favorable LDS access widths.
-        return False
-
-    # K-654 amortization-floor guard (lower bound on mainloop iters).
-    if block_k is not None:
-        mainloop_iters = (K + block_k - 1) // block_k
-        if mainloop_iters < KPACK2_MAINLOOP_ITERS_MIN:
-            return False
-        if mainloop_iters > KPACK2_MAINLOOP_ITERS_MAX:
-            return False
-
-    # K-646 tile-count upper bound — only enforceable when block dims are known.
-    if block_m is not None and block_n is not None and block_m > 0 and block_n > 0:
-        tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
-        if tiles > KPACK2_TILES_MAX:
-            return False
-
-    return True
+    """Backwards-compatible wrapper around :meth:`KPack2Envelope.admits`."""
+    return envelope.admits(M, N, K, block_k=block_k, block_m=block_m, block_n=block_n)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -295,7 +345,7 @@ def _cache_key(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public entry point
+# Public entry point — single chokepoint for kpack routing
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -312,12 +362,14 @@ def select_lds_config(
     streamk: bool = False,
     work_stealing: bool = False,
     autotune_fn: Optional[Callable[[LDSSwizzleConfig], float]] = None,
+    envelope: KPack2Envelope = DEFAULT_KPACK2_ENVELOPE,
 ) -> LDSSwizzleConfig:
     """Resolve the LDS swizzle config for one kernel launch.
 
-    The mode env var, the persistent cache and the medium-K residual gate
-    are consulted in that order.  In ``autotune`` mode (or when forced via
-    ``autotune_fn``), both candidates are timed and the winner persisted.
+    Routes mode, cache, and autotune through one envelope check so the
+    contract that "no out-of-envelope shape ever sees ``kpack=2``" is
+    enforced structurally rather than by convention. Callers MUST funnel
+    every dispatch through this function.
 
     Args:
         M, N, K: Problem dimensions.
@@ -329,6 +381,8 @@ def select_lds_config(
             config and returns elapsed time (ms). Required when mode is
             "autotune" — without it autotune falls back to the cached/auto
             decision.
+        envelope: Optional override for the kpack=2 routing envelope.
+            Defaults to :data:`DEFAULT_KPACK2_ENVELOPE`.
 
     Returns:
         ``LDSSwizzleConfig`` to forward to the Triton kernel launch.
@@ -338,17 +392,11 @@ def select_lds_config(
     if mode == "off":
         return BASELINE_CONFIG
 
-    # K-683: structural guard — kpack=2 may only be returned for shapes that
-    # pass the calibrated medium-K residual gate. This is enforced **regardless
-    # of mode or cache state** because (per K-646 iter-3) the K-580 PR landed
-    # despite passing both Criterion-A (winners) and Criterion-B (PRD guards)
-    # yet still regressed 5 large-square shapes under forced mode=on, and
-    # (per K-654) regressed 53/61 shapes including the K-539 small-K cohort
-    # by −27..−28%. The fix must live at the codegen layer, not behind the
-    # mode flag, because downstream consumers do force mode=on. The
-    # block-aware predicate is only enforceable when block dims are known;
-    # all in-tree call sites supply them.
-    in_envelope = is_medium_k_residual(
+    # Single envelope check — all subsequent branches consult ``in_envelope``
+    # rather than re-deriving the predicate. This is the structural guarantee
+    # that no out-of-envelope shape ever receives ``kpack=2``, regardless of
+    # mode, cache state, or autotune callback.
+    in_envelope = envelope.admits(
         M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
     )
 
@@ -361,10 +409,10 @@ def select_lds_config(
         block_m, block_n, block_k, streamk, work_stealing,
     )
 
-    # autotune mode: time both candidates and persist the winner. Restrict
-    # the candidate set to the baseline outside the envelope so the cache
-    # cannot be poisoned by a regressing kpack=2 entry on out-of-envelope
-    # shapes (the K-654 root cause for the K-539 cohort).
+    # autotune mode: time both candidates and persist the winner. Restrict the
+    # candidate set to the baseline outside the envelope so the cache cannot be
+    # poisoned by a regressing kpack=2 entry on an out-of-envelope shape (the
+    # observed root cause for the small-K cohort regression in pre-merge sweeps).
     if mode == "autotune" and autotune_fn is not None:
         candidates = (BASELINE_CONFIG, SWIZZLED_CONFIG) if in_envelope else (BASELINE_CONFIG,)
         try:
@@ -382,9 +430,9 @@ def select_lds_config(
     # auto mode (and autotune fall-through): cache → baseline.
     # auto is intentionally safe — it never picks a non-baseline config without
     # an empirical timing in the cache. Cache hits are still gated by the
-    # envelope: a stale kpack=2 entry on an out-of-envelope shape is dropped
-    # to baseline rather than served, preventing K-654-style regressions when
-    # cohort definitions tighten between releases.
+    # envelope: a stale ``kpack=2`` entry on an out-of-envelope shape is dropped
+    # to baseline rather than served, preventing silent regressions when the
+    # envelope tightens between releases.
     cached = cache.get(key)
     if cached is not None:
         if cached.kpack == BASELINE_CONFIG.kpack or in_envelope:
@@ -399,6 +447,8 @@ __all__ = [
     "LDSSwizzleConfig",
     "BASELINE_CONFIG",
     "SWIZZLED_CONFIG",
+    "KPack2Envelope",
+    "DEFAULT_KPACK2_ENVELOPE",
     "PersistentSwizzleCache",
     "get_cache",
     "get_mode",

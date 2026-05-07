@@ -101,7 +101,7 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # K-580: select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
     # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
     _lds_cfg = select_lds_config(
         M, N, K,
@@ -256,7 +256,7 @@ def streamk_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # K-580: select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
     # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
     _lds_cfg = select_lds_config(
         M, N, K,

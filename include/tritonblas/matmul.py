@@ -441,14 +441,14 @@ def _bmm_pick_tile_cached(
     #   the CUs), and num_warps=8 is too wide for tiles this size.
     if mn_area >= 4 * 1024 * 1024:
         priority = [(256, 256, 64), (256, 128, 64), (128, 256, 64), (128, 128, 64)]
-        gsm_override = 4
+        gsm_override = 0  # 0 = keep selector default (8 for these shapes)
         kpack_override = 1
         nw_override = 8
     elif mn_area >= 1024 * 1024 and B >= 4:
         priority = [(128, 128, 64), (128, 256, 64), (256, 128, 64)]
         gsm_override = 4
         kpack_override = 1
-        nw_override = 4
+        nw_override = 8
     else:
         # Smaller MN or smaller batch: defer to Origami. Sweep showed the
         # override does not improve these and can mildly regress some.

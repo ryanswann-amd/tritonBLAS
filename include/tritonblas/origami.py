@@ -275,6 +275,84 @@ class OrigamiMatmulSelector:
             p <<= 1
         return p
 
+    @staticmethod
+    def _compute_split_k(
+        m: int,
+        n: int,
+        k: int,
+        bm: int,
+        bn: int,
+        bk: int,
+        n_cu: int,
+        streamk: bool,
+        env=None,
+    ) -> int:
+        """Pure decision logic for SPLIT_K selection.
+
+        Factored out of ``_select_split_k`` so the rule can be unit-tested
+        without spinning up an ``OrigamiMatmulSelector`` (which requires a
+        GPU + origami backend).  Tests should call this directly.
+
+        Returns the chosen SPLIT_K (one of {1, 2, 4, 8, 16}).
+        """
+        if env is None:
+            env = os.environ
+
+        def _env(short: str, long: str) -> str:
+            v = env.get(short, "")
+            return v if v else env.get(long, "")
+
+        if _env("TBLAS_DISABLE_SPLIT_K", "TRITONBLAS_DISABLE_SPLIT_K").lower() in ("1", "true", "yes"):
+            return 1
+        forced = _env("TBLAS_SPLIT_K", "TRITONBLAS_SPLIT_K")
+        if forced.isdigit() and int(forced) >= 1:
+            v = int(forced)
+            return v if v in (1, 2, 4, 8, 16) else 1
+        if streamk:
+            return 1
+
+        total_tiles = ((m + bm - 1) // bm) * ((n + bn - 1) // bn)
+        if total_tiles >= n_cu:
+            return 1
+
+        # Origami often picks tiles such that ``total_tiles`` lands near
+        # ``n_cu`` regardless of M (e.g. it produces 256 tiles for both
+        # M=16,N=4096,BM=16,BN=16 and M=4096,N=4096,BM=256,BN=256).  The
+        # under-saturation rule alone therefore can't distinguish a
+        # genuinely thin GEMM (where SPLIT_K helps) from a square one
+        # (where the atomic-add epilogue is pure overhead).  Add a
+        # tile-area guard: only fire SPLIT_K when each output tile is
+        # small enough that its per-tile work is dominated by launch /
+        # atomic-add overhead rather than dot throughput.  The 4096-elem
+        # cutoff covers every tile Origami picks for the M={16,32,64}
+        # target grid (16×16=256 up to 16×128=2048) while excluding the
+        # 64×128=8192 and 256×256=65536 tiles used for medium- / large-M
+        # shapes — which empirically regress under the atomic epilogue.
+        TILE_AREA_GATE = 4096
+        if bm * bn > TILE_AREA_GATE:
+            return 1
+
+        num_k_tiles = (k + bk - 1) // bk
+        # Need at least MIN_K_TILES_PER_SPLIT iterations per workgroup or the
+        # K-loop is too short to hide atomic-add latency.
+        MIN_K_TILES_PER_SPLIT = 4
+        max_split_k_by_k = max(1, num_k_tiles // MIN_K_TILES_PER_SPLIT)
+
+        # When the gate has fired (total_tiles < n_cu) we want SPLIT_K to
+        # *fill* the remaining CU budget, not floor-divide it away.  Using
+        # ceiling here means a near-saturating shape (e.g. 256 tiles on a
+        # 304-CU GPU) still gets at least SPLIT_K=2; the floor-pow2 step
+        # below guarantees the launch never overshoots N_CU by more than 2x.
+        # Cap at 16 per task spec.
+        ideal_split = max(2, (n_cu + total_tiles - 1) // max(total_tiles, 1))
+        split_k = min(ideal_split, 16, max_split_k_by_k)
+        # Largest power of two ≤ split_k.
+        p = 1
+        while (p << 1) <= split_k:
+            p <<= 1
+        split_k = p
+        return split_k if split_k >= 2 else 1
+
     def _select_split_k(self) -> int:
         """Decide a SPLIT_K factor for the persistent (data-parallel) kernel.
 
@@ -292,39 +370,24 @@ class OrigamiMatmulSelector:
         across CUs by construction, so layering SPLIT_K on top is redundant
         and would conflict with its partial-tile workspace.
 
-        Honors ``TBLAS_DISABLE_SPLIT_K=1`` (or ``TBLAS_SPLIT_K=1``) for
-        ablation / A-B benchmarking against the pre-split-K baseline.
+        Honors ``TBLAS_DISABLE_SPLIT_K=1`` (or ``TBLAS_SPLIT_K=N``) for
+        ablation / A-B benchmarking against the pre-split-K baseline.  The
+        long-form aliases ``TRITONBLAS_DISABLE_SPLIT_K`` /
+        ``TRITONBLAS_SPLIT_K`` are accepted as well so external benchmark
+        harnesses that spell out the package name still work.
+
+        The actual decision is delegated to ``_compute_split_k`` so the
+        pure rule can be unit-tested without instantiating a hardware-backed
+        selector.
         """
-        if os.environ.get("TBLAS_DISABLE_SPLIT_K", "").lower() in ("1", "true", "yes"):
-            return 1
-        forced = os.environ.get("TBLAS_SPLIT_K", "")
-        if forced.isdigit() and int(forced) >= 1:
-            # Manual override; clamp to {1,2,4,8,16} for safety.
-            v = int(forced)
-            return v if v in (1, 2, 4, 8, 16) else 1
-        if self.streamk:
-            return 1
-
-        bm = self._result.config.mt.m
-        bn = self._result.config.mt.n
-        bk = self._result.config.mt.k
-        total_tiles = ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
-        n_cu = self._N_CU
-
-        if total_tiles >= n_cu:
-            return 1
-
-        num_k_tiles = (self._k + bk - 1) // bk
-        # Need at least MIN_K_TILES_PER_SPLIT iterations per workgroup or the
-        # K-loop is too short to hide atomic-add latency.
-        MIN_K_TILES_PER_SPLIT = 4
-        max_split_k_by_k = max(1, num_k_tiles // MIN_K_TILES_PER_SPLIT)
-
-        # Aim to fill (but not over-fill) the CUs.  Cap at 16 per task spec.
-        ideal_split = max(1, n_cu // max(total_tiles, 1))
-        split_k = min(ideal_split, 16, max_split_k_by_k)
-        split_k = self._floor_pow2(split_k)
-        return split_k if split_k >= 2 else 1
+        return OrigamiMatmulSelector._compute_split_k(
+            self._m, self._n, self._k,
+            self._result.config.mt.m,
+            self._result.config.mt.n,
+            self._result.config.mt.k,
+            self._N_CU,
+            self.streamk,
+        )
 
     @property
     def split_k(self) -> int:

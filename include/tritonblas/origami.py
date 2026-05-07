@@ -241,6 +241,36 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # Skinny-M cohort tile override.
+        #
+        # Origami's analytical model under-selects tile width for M<=32
+        # because it scores tiles assuming a data-parallel grid (no K-split).
+        # For skinny-M shapes the M-dim already fills only one MFMA-row per
+        # tile, so picking BLK_N=32 (Origami default for M=16, N=K=5120)
+        # leaves only 16-256 tiles vs. 304 CUs even before split-K.
+        # Empirical baseline on MI300X (kernel-only timing): tritonblas at
+        # 0.06x of hipBLASLt for 16x5120x5120 bf16.
+        #
+        # Override picks the widest BLK_N that fits Triton LDS, stages=2
+        # for double-buffered pipelining. Combined with auto-streamk
+        # (matmul.py), this expands the small data-parallel grid by 2-8x
+        # via _compute_sk_grid, filling the CUs.
+        SKINNY_M_THRESHOLD = 32
+        is_supported_arch = self._hardware.N_CU in (304, 80, 64, 228, 256)
+        if (
+            m <= SKINNY_M_THRESHOLD
+            and n >= 256
+            and k >= 64
+            and is_supported_arch
+        ):
+            target = self._select_skinny_tile(bytes_a, bytes_b, lds_cap)
+            if target is not None:
+                blk_m, blk_n, blk_k, num_stages = target
+                self._result.config.mt.m = blk_m
+                self._result.config.mt.n = blk_n
+                self._result.config.mt.k = blk_k
+                self._num_stages = num_stages
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -262,6 +292,29 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+    # Skinny-M cohort tile: (BLK_M, BLK_N, BLK_K, num_stages).
+    # Validated on MI300X bf16 LLM-decode shapes (16xNxK with N,K in 4096..28672)
+    # via kernel-only CUDA-graph timing — see PR for the 5-shape sweep. Picked
+    # for: (a) widest BLK_N that fits the MI300X 64KB-per-workgroup LDS budget
+    # at the bf16 bytes/elem the cohort gates on; (b) double-buffered
+    # pipelining (stages=2) to overlap HBM loads with MFMA. The LDS check
+    # below makes selection no-op if a future arch/dtype combination ever
+    # exceeds budget, falling back to Origami's analytical pick.
+    _SKINNY_TILE = (16, 256, 64, 2)
+
+    def _select_skinny_tile(self, bytes_a, bytes_b, lds_cap):
+        """Return _SKINNY_TILE if it fits LDS budget, else None.
+
+        Returning None lets the caller keep Origami's analytical pick
+        rather than forcing a tile that won't compile.
+        """
+        blk_m, blk_n, blk_k, stages = self._SKINNY_TILE
+        if check_triton_lds_capacity(
+            blk_m, blk_n, blk_k, bytes_a, bytes_b, lds_cap, stages
+        ):
+            return self._SKINNY_TILE
+        return None
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.
@@ -396,9 +449,18 @@ class OrigamiMatmulSelector:
                     sk_grid = split_grid
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # Final check: if the chosen grid leaves a remainder AND workspace
+        # exceeds what the problem allows, fall back to no split.
+        #
+        # The original predicate (tiles % sk_grid != 0) is the right
+        # "uneven split" check when sk_grid <= tiles (the `tiles > cu_count`
+        # branch above), but it always trips for the K-split branch where
+        # sk_grid = tiles * factor > tiles, so tiles % sk_grid == tiles != 0.
+        # That silently disabled the K-split for every small-tile-count
+        # problem (skinny-M GEMMs in particular: M=16 N=5120 has 40 tiles vs
+        # 304 CUs and was rolled back to sk_grid=40, leaving 87% of CUs idle).
+        # Constrain the rollback to the case it was meant for.
+        if sk_grid <= tiles and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

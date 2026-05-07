@@ -93,7 +93,12 @@ def _maybe_dispatch_atomic_free_splitk(
     Gating (must all be true):
       * dtypes are FP16 or BF16 (the cohort where the FP16/BF16 atomic CAS
         loop on gfx942 dominates -- not relevant for INT8/FP8/quantized)
-      * M <= 32 AND K >= 4096
+      * ``M <= 32`` (small-M, decode-style skinny GEMM)
+      * ``K >= 8192`` (long enough K-loop to amortize the two-kernel launch
+        overhead on MI300X; at ``K = 4096`` the new path loses to hipBLASLt
+        on every measured shape)
+      * ``N >= 4096`` (below this the tile count is too small to feed
+        SPLIT_K parallelism and the new path stays below 0.4x torch)
       * the chosen SPLIT_K is >= 4
       * not under torch.compile fake-tensor tracing
       * not opted out via TBLAS_DISABLE_SPLITK_SMALLM
@@ -112,7 +117,9 @@ def _maybe_dispatch_atomic_free_splitk(
 
     M, K = a.shape
     _, N = b.shape
-    if M > 32 or K < 4096:
+    # Cheap pre-check: drop out on the obvious M/K/N misses before paying the
+    # SPLIT_K computation.
+    if M > 32 or K < 8192 or N < 4096:
         return None
 
     # Origami's tile picker is tuned for the persistent path; for the small-M
@@ -124,7 +131,7 @@ def _maybe_dispatch_atomic_free_splitk(
     group_m = 1
 
     split_k = choose_split_k(M, K, block_k)
-    if not should_use_atomic_free_splitk(M, K, split_k):
+    if not should_use_atomic_free_splitk(M, N, K, split_k):
         return None
 
     persistent_splitk_matmul(

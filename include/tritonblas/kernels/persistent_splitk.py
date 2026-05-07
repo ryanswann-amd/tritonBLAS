@@ -274,9 +274,38 @@ def choose_split_k(M: int, K: int, block_k: int) -> int:
     return candidates[0]
 
 
-def should_use_atomic_free_splitk(M: int, K: int, split_k: int) -> bool:
-    """Gate: only enable for the small-M, deep-K, high-SPLIT_K cohort."""
-    return M <= 32 and K >= 4096 and split_k >= 4
+def should_use_atomic_free_splitk(M: int, N: int, K: int, split_k: int) -> bool:
+    """Gate: only enable for the small-M, deep-K, deep-N, high-SPLIT_K cohort.
+
+    Gating rationale (measured on MI300X / gfx942):
+
+      * ``M <= 32`` -- small-M is the cohort where Origami's persistent /
+        stream-K paths produce only a handful of (pid_m, pid_n) tiles and
+        leave most of the gfx942 CU array idle.
+      * ``K >= 8192`` -- the two-stage launch overhead (~80 us on MI300X) is
+        only amortized when the K-loop is long enough that the partial-write
+        kernel actually has work to hide it.  At ``K = 4096`` the new path
+        loses to torch.matmul on every measured ``(N, dtype)`` pair; at
+        ``K >= 8192`` it begins to win on the wider-N tail.
+      * ``N >= 4096`` -- below this the (pid_m, pid_n) tile count is too
+        small for SPLIT_K to add useful parallelism and the new path stays
+        below 0.4x torch.  Above it the geomean climbs to 0.47-0.55x.
+      * ``SPLIT_K >= 4`` -- ensures we are actually using the split-K codepath
+        (not a degenerate 1-split that would just be the persistent path with
+        extra overhead).
+
+    Boundary fall-through (verified):
+
+      * ``M = 64`` (just outside the small-M cohort) -> persistent path
+      * ``K = 4096`` or ``K = 2048`` -> persistent path
+      * ``N = 1024`` or ``N = 2048`` -> persistent path
+      * ``SPLIT_K = 2`` (e.g. via ``choose_split_k`` returning 1 or 2) ->
+        persistent path
+
+    Callers may set ``TBLAS_DISABLE_SPLITK_SMALLM=1`` to force fall-through
+    even on the gated cohort (useful for A/B perf bisection).
+    """
+    return M <= 32 and N >= 4096 and K >= 8192 and split_k >= 4
 
 
 def persistent_splitk_matmul(

@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
 
 from tritonblas.lds_swizzle import (  # noqa: E402
     BASELINE_CONFIG,
+    SMALL_K_GATE_THRESHOLD,
     SWIZZLED_CONFIG,
     LDSSwizzleConfig,
     PersistentSwizzleCache,
@@ -70,8 +71,21 @@ def test_recognized_modes(monkeypatch, mode):
 
 def test_medium_k_residual_in_band():
     assert is_medium_k_residual(4096, 4096, 1024, block_k=64)
-    assert is_medium_k_residual(2048, 2048, 256, block_k=32)
+    assert is_medium_k_residual(4096, 4096, 1536, block_k=64)
     assert is_medium_k_residual(8192, 8192, 2048, block_k=64)
+
+
+def test_medium_k_residual_small_k_excluded():
+    """Small K (< SMALL_K_GATE_THRESHOLD) is excluded — the K-loop is too
+    short to amortize the wider-load VGPR pressure of kpack=2."""
+    assert not is_medium_k_residual(4096, 4096, 256, block_k=64)
+    assert not is_medium_k_residual(4096, 4096, 512, block_k=64)
+    assert not is_medium_k_residual(4096, 4096, 768, block_k=64)
+    # Boundary: exactly the threshold IS in-band.
+    assert is_medium_k_residual(4096, 4096, SMALL_K_GATE_THRESHOLD, block_k=64)
+    assert not is_medium_k_residual(
+        4096, 4096, SMALL_K_GATE_THRESHOLD - 1, block_k=64
+    )
 
 
 def test_medium_k_residual_out_of_band_low_k():
@@ -113,6 +127,84 @@ def test_off_mode_returns_baseline(monkeypatch):
 def test_on_mode_returns_swizzled(monkeypatch):
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
     assert _select() == SWIZZLED_CONFIG
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Small-K runtime guard — the K-539 cohort regression fix.
+#
+# These tests pin the small-K guard against regression. The guard runs
+# BEFORE the cache lookup and BEFORE the "on" mode override so neither a
+# stale cache entry nor a forced "on" can demote a small-K shape into the
+# regressing kpack=2 config.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("small_k", [64, 128, 256, 512, 768, SMALL_K_GATE_THRESHOLD - 1])
+def test_small_k_guard_overrides_on_mode(monkeypatch, small_k):
+    """Even mode=on must not pick swizzle for K below the threshold."""
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    assert _select(K=small_k) == BASELINE_CONFIG
+
+
+@pytest.mark.parametrize("small_k", [64, 256, 512, 768, SMALL_K_GATE_THRESHOLD - 1])
+def test_small_k_guard_overrides_cached_swizzle(monkeypatch, tmp_path, small_k):
+    """A stale cached SWIZZLED_CONFIG for a small-K shape must be ignored."""
+    cache_path = tmp_path / "stale.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "auto")
+    reset_cache_for_testing()
+
+    # Pre-populate cache with SWIZZLED for the small-K shape (simulating a
+    # stale entry from before the guard was added).
+    cache = PersistentSwizzleCache(path=cache_path)
+    sk = "ds"
+    ws = "nows"
+    key = (
+        f"2048x2048x{small_k}|f16|f16|f16|"
+        f"128x128x64|{sk}|{ws}"
+    )
+    cache.set(key, SWIZZLED_CONFIG)
+
+    reset_cache_for_testing()  # force singleton to re-read on disk
+    cfg = select_lds_config(
+        2048, 2048, small_k,
+        "f16", "f16", "f16",
+        128, 128, 64,
+        streamk=False, work_stealing=False,
+    )
+    # Even though the cache says SWIZZLED, the guard demotes to BASELINE.
+    assert cfg == BASELINE_CONFIG
+
+
+def test_small_k_guard_preserves_off_mode(monkeypatch):
+    """mode=off short-circuits before the guard — both still return BASELINE."""
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "off")
+    assert _select(K=512) == BASELINE_CONFIG
+    assert _select(K=2048) == BASELINE_CONFIG
+
+
+def test_threshold_boundary_small_k_guard(monkeypatch):
+    """K == threshold passes the guard; K == threshold-1 is gated."""
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    # Exactly at the threshold: guard does NOT demote.
+    assert _select(K=SMALL_K_GATE_THRESHOLD) == SWIZZLED_CONFIG
+    # One below: guard demotes.
+    assert _select(K=SMALL_K_GATE_THRESHOLD - 1) == BASELINE_CONFIG
+
+
+def test_k539_cohort_kpack_is_one(monkeypatch):
+    """The K-539 small-K cohort (M,N=512..2048, K=512) must dispatch kpack=1.
+
+    This is the pinned acceptance test for the K-681 fix: every shape in the
+    cohort must take the baseline (kpack=1) config regardless of mode.
+    """
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    for mn in (512, 1024, 1536, 2048):
+        cfg = _select(M=mn, N=mn, K=512)
+        assert cfg.kpack == 1, (
+            f"K-539 cohort regression: M=N={mn}, K=512 dispatched kpack={cfg.kpack}, "
+            "expected 1 (small-K gate must demote)."
+        )
 
 
 def test_auto_mode_defaults_to_baseline_when_cache_empty():

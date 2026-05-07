@@ -9,6 +9,7 @@ from .lds_swizzle import (
     LDSSwizzleConfig,
     BASELINE_CONFIG as LDS_BASELINE_CONFIG,
     SWIZZLED_CONFIG as LDS_SWIZZLED_CONFIG,
+    SMALL_K_GATE_THRESHOLD as LDS_SMALL_K_GATE_THRESHOLD,
     is_medium_k_residual,
     select_lds_config,
     get_cache as get_lds_swizzle_cache,

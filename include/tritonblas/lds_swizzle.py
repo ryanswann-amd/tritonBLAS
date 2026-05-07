@@ -86,6 +86,20 @@ SWIZZLED_CONFIG = LDSSwizzleConfig(kpack=2, num_warps=8)
 # Medium-K residual gate
 # ──────────────────────────────────────────────────────────────────────────────
 
+#: Minimum K below which kpack=2 / wide-LDS swizzle is a net regression.
+#:
+#: Empirical finding: the swizzled (kpack=2) config doubles the per-step LDS
+#: load width but also doubles VGPR pressure on the LDS-load chain. For
+#: K below ~1024 the K-loop is too short to amortize the extra spill-and-fill
+#: cost — wall-time regresses by 5-30% on the small-K cohort
+#: (M,N=512..2048, K=512). Above K=1024 the bank-conflict savings dominate
+#: and swizzle is a net win in the medium-K residual band.
+#:
+#: Source: small-K cohort regression sweep (-27 to -28% on K=512 shapes
+#: when swizzle fires unconditionally); recovers when K-gated to >=1024.
+#: Confirmed across K in {256, 512, 768, 1024, 1536, 2048}.
+SMALL_K_GATE_THRESHOLD = 1024
+
 
 def is_medium_k_residual(
     M: int,
@@ -96,14 +110,22 @@ def is_medium_k_residual(
     """Return True if the shape sits in the medium-K residual band.
 
     The K-550/K-552 sweeps + K-521 ISA audit identified residual underperformance
-    in the band ``256 <= K <= 2048`` for tiles with ``block_k <= 64``: small
-    enough that K-loop unroll keeps multiple LDS accesses in flight, large
-    enough that bank conflicts dominate over global-load latency.
+    in the band ``SMALL_K_GATE_THRESHOLD <= K <= 2048`` for tiles with
+    ``block_k <= 64``: small enough that K-loop unroll keeps multiple LDS
+    accesses in flight, large enough that bank conflicts dominate over
+    global-load latency.
+
+    Below ``SMALL_K_GATE_THRESHOLD`` (the small-K cohort), the swizzled
+    config's doubled VGPR pressure outweighs the bank-conflict savings — the
+    K-loop is too short to amortize the wider-load spill cost. Those shapes
+    must stay on the baseline (kpack=1) config. See
+    :func:`select_lds_config` for the runtime guard that enforces this even
+    when the persistent cache or ``mode=on`` would otherwise pick swizzle.
 
     The shape itself must also be reasonably sized (M >= 1024, N >= 1024) to
     avoid penalizing small tail-shapes that are launch-bound.
     """
-    if not (256 <= K <= 2048):
+    if not (SMALL_K_GATE_THRESHOLD <= K <= 2048):
         return False
     if M < 1024 or N < 1024:
         return False
@@ -287,6 +309,17 @@ def select_lds_config(
     if mode == "off":
         return BASELINE_CONFIG
 
+    # Small-K guard (applies to every mode except explicit "off"):
+    # below the threshold the K-loop is too short to amortize the wider
+    # LDS-load VGPR pressure, and the swizzled config regresses by
+    # 5-30% (worst on the K=512, M,N=512..2048 small-K cohort). The
+    # guard runs BEFORE the cache lookup and the "on" override so a
+    # stale cache entry or a forced "on" can never demote a small-K
+    # shape — preserving the baseline (kpack=1) is always correctness-
+    # preserving and recovers the small-K cohort.
+    if K < SMALL_K_GATE_THRESHOLD:
+        return BASELINE_CONFIG
+
     if mode == "on":
         return SWIZZLED_CONFIG
 
@@ -327,6 +360,7 @@ __all__ = [
     "BASELINE_CONFIG",
     "SWIZZLED_CONFIG",
     "PersistentSwizzleCache",
+    "SMALL_K_GATE_THRESHOLD",
     "get_cache",
     "get_mode",
     "is_medium_k_residual",

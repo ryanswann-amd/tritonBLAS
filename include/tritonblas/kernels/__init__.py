@@ -27,6 +27,10 @@ else:
 # Work-stealing kernel (opt-in via work_stealing=True in matmul calls)
 from .persistent_gemm_work_stealing import ws_persistent_matmul
 
+# Batched persistent kernel (true batched matmul; one launch per batch
+# instead of B sequential launches — see batched_persistent_gemm.py)
+from .batched_persistent_gemm import batched_persistent_matmul
+
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 
@@ -40,5 +44,6 @@ from .fp4_matmul import fp4_matmul
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
+           'batched_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
            'fp4_matmul', 'stages']

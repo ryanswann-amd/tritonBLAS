@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels import batched_persistent_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
+from .batched_dispatch import should_dispatch_batched, select_batched_config
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -399,12 +400,12 @@ def batched_persistent_matmul_lt(
     bias: Optional[torch.Tensor] = None,
 ):
     """
-    Single-launch batched GEMM host wrapper.
+    Single-launch batched GEMM host wrapper (K-684).
 
     Inputs are rank-3: a is (Z, M, K), b is (Z, K, N), c is (Z, M, N).
-    All batches must share the same (M, N, K). Block sizes come from the
-    Origami selector chosen for the per-batch (M, N, K). The grid fuses
-    BATCH into the program-id space so a Python loop is not required.
+    All batches must share the same (M, N, K). Block sizes are picked by
+    `select_batched_config` (in `batched_dispatch.py`) which adjusts the
+    per-batch tile UP when the batch dimension already saturates the GPU.
     """
     assert a.dim() == 3 and b.dim() == 3 and c.dim() == 3, "rank-3 expected"
     Z, M, K = a.shape
@@ -414,19 +415,38 @@ def batched_persistent_matmul_lt(
     assert K == Kb, "Incompatible Inner Dimensions"
     assert M == Mc and N == Nc, "Inconsistent output shape"
 
-    BLK_M = selector.block_m
-    BLK_N = selector.block_n
-    BLK_K = selector.block_k
-    gsize_m = selector.group_m
-    num_xcds = selector.num_sms
+    # ─── batched-aware tile selection ────────────────────────────────────
+    # Origami picked tiles for a single GEMM of (M, N, K). For a batched
+    # launch we typically want LARGER tiles when total grid >> num_CUs.
+    bytes_a = a.element_size()
+    bytes_b = b.element_size()
+    num_cus = torch.cuda.get_device_properties(a.device).multi_processor_count
+    btile = select_batched_config(
+        M=M, N=N, K=K, Z=Z,
+        base_block_m=selector.block_m,
+        base_block_n=selector.block_n,
+        base_block_k=selector.block_k,
+        base_group_m=selector.group_m,
+        base_num_xcds=selector.num_sms,
+        base_num_stages=getattr(selector, "num_stages", 2),
+        bytes_a=bytes_a,
+        bytes_b=bytes_b,
+        num_cus=num_cus,
+    )
+
+    BLK_M = btile.block_m
+    BLK_N = btile.block_n
+    BLK_K = btile.block_k
+    gsize_m = btile.group_m
+    num_xcds = btile.num_xcds
+    num_stages = btile.num_stages
+    num_warps = btile.num_warps
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     tiles_per_batch = total_blocks_M * total_blocks_N
     even_k = (K % BLK_K == 0)
 
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -656,9 +676,12 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # Rank-3 inputs go through the true batched-GEMM single-launch entrypoint
-    # to avoid paying Tcold launch overhead per batch element (K-684).
-    if a.dim() == 3 and b.dim() == 3:
+    # K-684: rank-3 inputs route through the fused-batch entrypoint so we do
+    # not pay Tcold launch overhead per batch element. The dispatch decision
+    # is centralized in `batched_dispatch.should_dispatch_batched(a, b)` so
+    # extending to rank-N or mixed broadcasting is a one-line change there
+    # rather than another branch grafted onto this public wrapper.
+    if should_dispatch_batched(a, b):
         return bmm(a, b, out=out)
 
     if out is None:

@@ -69,8 +69,11 @@ def test_recognized_modes(monkeypatch, mode):
 
 
 def test_medium_k_residual_in_band():
+    # K=1024, BK=64 → mainloop_iters=16 (>=KPACK2_MAINLOOP_ITERS_MIN). Tile check
+    # skipped when block_m/n omitted, so the legacy 2-arg form still admits.
     assert is_medium_k_residual(4096, 4096, 1024, block_k=64)
-    assert is_medium_k_residual(2048, 2048, 256, block_k=32)
+    # K=2048, BK=64 → mainloop_iters=32 (== KPACK2_MAINLOOP_ITERS_MAX, still
+    # admitted since the upper bound is inclusive).
     assert is_medium_k_residual(8192, 8192, 2048, block_k=64)
 
 
@@ -88,6 +91,37 @@ def test_medium_k_residual_small_mn_excluded():
 
 def test_medium_k_residual_large_block_k_excluded():
     assert not is_medium_k_residual(4096, 4096, 1024, block_k=128)
+
+
+def test_medium_k_residual_amortization_floor_excludes_small_mainloop_iters():
+    """K-654 K-539 cohort: K=512, BK=64 → 8 iters < 16 → reject."""
+    # In-band by K (256<=K<=2048), in-band by M/N (>=1024), block_k<=64,
+    # but mainloop_iters=8 below the amortization floor (=16).
+    assert not is_medium_k_residual(2048, 2048, 512, block_k=64)
+    assert not is_medium_k_residual(1024, 1024, 512, block_k=64)
+    # K=256 with BK=32 → 8 iters → reject under new floor.
+    assert not is_medium_k_residual(2048, 2048, 256, block_k=32)
+
+
+def test_medium_k_residual_tile_count_upper_bound_excludes_large_grids():
+    """K-646 PRD-guard losers: tiles > 128 → reject (L2 working-set spill)."""
+    # 4096x4096 at BM=BN=128 → 1024 tiles → reject regardless of K.
+    assert not is_medium_k_residual(
+        4096, 4096, 1024, block_k=64, block_m=128, block_n=128
+    )
+    # 8192x4096 at BM=BN=256 → 32*16=512 tiles → reject.
+    assert not is_medium_k_residual(
+        8192, 4096, 2048, block_k=64, block_m=256, block_n=256
+    )
+
+
+def test_medium_k_residual_admits_k580_winner_envelope():
+    """K-580 winner cohort: K/BK=32 AND tiles=128 → admit."""
+    # All three K-580 winner shapes at the autotuner-selected BM=BN=256, BK=64.
+    for M, N, K in [(4096, 2048, 2048), (8192, 1024, 2048), (2048, 4096, 2048)]:
+        assert is_medium_k_residual(
+            M, N, K, block_k=64, block_m=256, block_n=256
+        ), f"K-580 winner {M}x{N}x{K} must remain admitted"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -110,9 +144,25 @@ def test_off_mode_returns_baseline(monkeypatch):
     assert _select() == BASELINE_CONFIG
 
 
-def test_on_mode_returns_swizzled(monkeypatch):
+def test_on_mode_returns_swizzled_only_inside_envelope(monkeypatch):
+    """K-683: mode=on respects the envelope (K-646/K-654 lessons).
+
+    Pre-K-683, mode=on returned SWIZZLED unconditionally — that contract
+    landed the K-580 PR despite K-646 PRD-guard regressions and K-654
+    K-539-cohort regressions (all triggered when downstream consumers
+    forced mode=on, bypassing the gate). Mode=on must now match the
+    autotuned `auto`-mode envelope.
+    """
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
-    assert _select() == SWIZZLED_CONFIG
+    # In-envelope K-580 winner shape → swizzled.
+    assert _select(M=4096, N=2048, K=2048, block_m=256, block_n=256, block_k=64) \
+        == SWIZZLED_CONFIG
+    # Out-of-envelope K-539 small-K cohort → baseline (was buggy SWIZZLED pre-K-683).
+    assert _select(M=2048, N=2048, K=512, block_m=256, block_n=256, block_k=64) \
+        == BASELINE_CONFIG
+    # Out-of-envelope K-646 large-square loser → baseline.
+    assert _select(M=4096, N=4096, K=4096, block_m=128, block_n=128, block_k=64) \
+        == BASELINE_CONFIG
 
 
 def test_auto_mode_defaults_to_baseline_when_cache_empty():
@@ -193,10 +243,12 @@ def test_autotune_picks_faster_and_persists(monkeypatch, tmp_path):
     def timing(cfg: LDSSwizzleConfig) -> float:
         return 1.0 if cfg == SWIZZLED_CONFIG else 2.0
 
+    # Use an in-envelope K-580 winner shape (BM=BN=256, BK=64, K=2048) so the
+    # autotuner is allowed to consider the swizzled candidate at all.
     cfg = select_lds_config(
-        4096, 4096, 1024,
+        4096, 2048, 2048,
         "f16", "f16", "f16",
-        128, 128, 64,
+        256, 256, 64,
         streamk=False, work_stealing=False,
         autotune_fn=timing,
     )
@@ -205,6 +257,69 @@ def test_autotune_picks_faster_and_persists(monkeypatch, tmp_path):
     # Cache file written.
     saved = json.loads(cache_path.read_text())
     assert any(v.get("kpack") == 2 for v in saved.values())
+
+
+def test_autotune_skips_swizzled_outside_envelope(monkeypatch, tmp_path):
+    """K-683: out-of-envelope shapes must never time-and-cache kpack=2.
+
+    The K-654 root cause was an autotune cache poisoned with kpack=2
+    entries on shapes outside the K-646 envelope; this test pins the new
+    contract that autotune restricts its candidate set to BASELINE for
+    such shapes.
+    """
+    cache_path = tmp_path / "auto_outside.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "autotune")
+    reset_cache_for_testing()
+
+    # Even if the synthetic timing claims SWIZZLED is faster, autotune
+    # must not pick or persist it for an out-of-envelope shape.
+    def timing(cfg: LDSSwizzleConfig) -> float:
+        return 1.0 if cfg == SWIZZLED_CONFIG else 2.0
+
+    # K-539 cohort: K=512 → mainloop_iters=8 < amortization floor.
+    cfg = select_lds_config(
+        2048, 2048, 512,
+        "f16", "f16", "f16",
+        256, 256, 64,
+        autotune_fn=timing,
+    )
+    assert cfg == BASELINE_CONFIG
+    saved = json.loads(cache_path.read_text())
+    # The persisted entry, if any, must be kpack=1.
+    assert all(v.get("kpack") == 1 for v in saved.values())
+
+
+def test_cached_kpack2_dropped_for_out_of_envelope_shape(monkeypatch, tmp_path):
+    """K-683: stale kpack=2 cache entries on out-of-envelope shapes are
+    dropped to baseline at lookup time, not served.
+
+    This protects against silent regressions when the envelope tightens
+    between releases (the K-654 mechanism).
+    """
+    cache_path = tmp_path / "stale.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    reset_cache_for_testing()
+
+    # Manually pre-populate the cache as if a previous (looser-gate) release
+    # had timed kpack=2 as the winner on a now-out-of-envelope shape.
+    cache = PersistentSwizzleCache(path=cache_path)
+    key = (
+        "2048x2048x512|f16|f16|f16|"
+        "256x256x64|ds|nows"
+    )
+    cache.set(key, SWIZZLED_CONFIG)
+    reset_cache_for_testing()
+
+    cfg = select_lds_config(
+        2048, 2048, 512,
+        "f16", "f16", "f16",
+        256, 256, 64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg == BASELINE_CONFIG, (
+        "stale kpack=2 cache entry on K-539 cohort shape must drop to baseline"
+    )
 
 
 def test_autotune_picks_baseline_when_faster(monkeypatch, tmp_path):

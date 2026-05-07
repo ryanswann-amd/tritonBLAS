@@ -87,21 +87,57 @@ SWIZZLED_CONFIG = LDSSwizzleConfig(kpack=2, num_warps=8)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+# Upper bound on K-iteration count beyond which kpack=2's longer per-LDS-issue
+# wait dominates the bank-conflict reduction (cluster rocprof confirmed: see
+# project_context lessons "K-646 iter-2/3"). At BK=64 this admits K up to 2048,
+# matching the original design envelope's upper bound.
+KPACK2_MAINLOOP_ITERS_MAX = 32
+
+# Lower bound on mainloop iterations needed to amortize the per-launch fixed
+# overhead of the wider LDS path (autotune cache miss + kpack=2 codegen prologue).
+# Below this the small-K cohort regresses (see K-654 sweep: K=512 cohort regressed
+# −27..−28% under unconditional kpack=2). At BK=64 this rejects K < 1024.
+KPACK2_MAINLOOP_ITERS_MIN = 16
+
+# Upper bound on grid tile-count beyond which kpack=2's L2 working-set spill
+# becomes the secondary regression mechanism (K-646 iter-2: TCC miss frac
+# +36..+62% on the two largest PRD-guard shapes).
+KPACK2_TILES_MAX = 128
+
+
 def is_medium_k_residual(
     M: int,
     N: int,
     K: int,
     block_k: Optional[int] = None,
+    block_m: Optional[int] = None,
+    block_n: Optional[int] = None,
 ) -> bool:
     """Return True if the shape sits in the medium-K residual band.
 
-    The K-550/K-552 sweeps + K-521 ISA audit identified residual underperformance
-    in the band ``256 <= K <= 2048`` for tiles with ``block_k <= 64``: small
-    enough that K-loop unroll keeps multiple LDS accesses in flight, large
-    enough that bank conflicts dominate over global-load latency.
+    Two-sided gate calibrated against three disjoint shape sources (K-580
+    winners, K-646 PRD-guard losers, K-654 K-539 small-K losers):
 
-    The shape itself must also be reasonably sized (M >= 1024, N >= 1024) to
-    avoid penalizing small tail-shapes that are launch-bound.
+    * **Lower K bound (K-654)**: ``mainloop_iters = ceil(K/BK) >= 16`` —
+      reject the K-539 small-K cohort (M,N ∈ {512,1024,2048}, K=512) where
+      kpack=2 codegen + cache-lookup overhead dominates over the (small)
+      bank-conflict win. Empirically observed −27..−28% regression vs the
+      kpack=1 baseline before this guard.
+    * **Upper K bound (K-646)**: ``mainloop_iters <= 32`` — reject large-K
+      shapes whose per-LDS-issue dependency chain starves the MFMA pipeline
+      (rocprof: ``per_lds_wait`` +54..+96%, ``mfma_active_frac`` −10..−18%
+      at kpack=2 with ``SQ_LDS_BANK_CONFLICT == 0`` at the baseline → pure
+      overhead, no offsetting benefit).
+    * **Tile-count upper bound (K-646)**: ``(M//BM) * (N//BN) <= 128`` —
+      reject high-occupancy launches whose L2 working-set spills under the
+      wider LDS path (TCC miss frac +36..+62% on 8K/16K-square shapes).
+    * **Original lower bound (K-550/K-552)**: ``M, N >= 1024`` and
+      ``block_k <= 64`` are kept to exclude launch-bound tail shapes and
+      naturally-wide-LDS tiles respectively.
+
+    All four conditions must hold. Block dims default to None for legacy
+    callers; when unknown the tile-count check is skipped (consult the
+    cache-side autotune as the load-bearing safety in that path).
     """
     if not (256 <= K <= 2048):
         return False
@@ -110,6 +146,21 @@ def is_medium_k_residual(
     if block_k is not None and block_k > 64:
         # Larger block_k tiles already have favorable LDS access widths.
         return False
+
+    # K-654 amortization-floor guard (lower bound on mainloop iters).
+    if block_k is not None:
+        mainloop_iters = (K + block_k - 1) // block_k
+        if mainloop_iters < KPACK2_MAINLOOP_ITERS_MIN:
+            return False
+        if mainloop_iters > KPACK2_MAINLOOP_ITERS_MAX:
+            return False
+
+    # K-646 tile-count upper bound — only enforceable when block dims are known.
+    if block_m is not None and block_n is not None and block_m > 0 and block_n > 0:
+        tiles = ((M + block_m - 1) // block_m) * ((N + block_n - 1) // block_n)
+        if tiles > KPACK2_TILES_MAX:
+            return False
+
     return True
 
 
@@ -287,8 +338,22 @@ def select_lds_config(
     if mode == "off":
         return BASELINE_CONFIG
 
+    # K-683: structural guard — kpack=2 may only be returned for shapes that
+    # pass the calibrated medium-K residual gate. This is enforced **regardless
+    # of mode or cache state** because (per K-646 iter-3) the K-580 PR landed
+    # despite passing both Criterion-A (winners) and Criterion-B (PRD guards)
+    # yet still regressed 5 large-square shapes under forced mode=on, and
+    # (per K-654) regressed 53/61 shapes including the K-539 small-K cohort
+    # by −27..−28%. The fix must live at the codegen layer, not behind the
+    # mode flag, because downstream consumers do force mode=on. The
+    # block-aware predicate is only enforceable when block dims are known;
+    # all in-tree call sites supply them.
+    in_envelope = is_medium_k_residual(
+        M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
+    )
+
     if mode == "on":
-        return SWIZZLED_CONFIG
+        return SWIZZLED_CONFIG if in_envelope else BASELINE_CONFIG
 
     cache = get_cache()
     key = _cache_key(
@@ -296,9 +361,12 @@ def select_lds_config(
         block_m, block_n, block_k, streamk, work_stealing,
     )
 
-    # autotune mode: time both candidates and persist the winner.
+    # autotune mode: time both candidates and persist the winner. Restrict
+    # the candidate set to the baseline outside the envelope so the cache
+    # cannot be poisoned by a regressing kpack=2 entry on out-of-envelope
+    # shapes (the K-654 root cause for the K-539 cohort).
     if mode == "autotune" and autotune_fn is not None:
-        candidates = (BASELINE_CONFIG, SWIZZLED_CONFIG)
+        candidates = (BASELINE_CONFIG, SWIZZLED_CONFIG) if in_envelope else (BASELINE_CONFIG,)
         try:
             timings = [(autotune_fn(c), c) for c in candidates]
         except Exception:
@@ -313,11 +381,16 @@ def select_lds_config(
 
     # auto mode (and autotune fall-through): cache → baseline.
     # auto is intentionally safe — it never picks a non-baseline config without
-    # an empirical timing in the cache.  `is_medium_k_residual` is exposed only
-    # as advice for the autotuner / users, not as a default decision.
+    # an empirical timing in the cache. Cache hits are still gated by the
+    # envelope: a stale kpack=2 entry on an out-of-envelope shape is dropped
+    # to baseline rather than served, preventing K-654-style regressions when
+    # cohort definitions tighten between releases.
     cached = cache.get(key)
     if cached is not None:
-        return cached
+        if cached.kpack == BASELINE_CONFIG.kpack or in_envelope:
+            return cached
+        # Cached non-baseline config but shape is out of envelope → baseline.
+        return BASELINE_CONFIG
 
     return BASELINE_CONFIG
 

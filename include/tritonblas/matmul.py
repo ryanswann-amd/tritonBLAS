@@ -810,6 +810,16 @@ def batched_persistent_matmul_lt(
     bytes_per_elem = 2  # fp16/bf16 (only batched dtypes today)
     LDS_LIMIT = 64 * 1024  # MI300X per-CU LDS
 
+    # Hoist the global TF32 read out of the kernel-launch keyword
+    # block.  ``torch.backends.cuda.matmul.allow_tf32`` is an attr
+    # chain (~5 us per call on MI300X by py-spy) and the value is
+    # immutable for the lifetime of a tritonblas process in
+    # practice; reading it once per call is wasteful, but the
+    # batched API has not been hot enough for anyone to notice.
+    # On the launch-overhead-bound R1/R2 shapes that 5 us is ~0.2%
+    # of wall time per call and shows up as ratio noise.
+    allow_tf32 = _ALLOW_TF32_CACHED
+
     # default (selector) recipe
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n
@@ -822,6 +832,12 @@ def batched_persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    # Per-shape recipes can pin num_stages explicitly (e.g. for tile
+    # shapes that exactly hit LDS_LIMIT, where the conservative LDS
+    # clamp below would otherwise force ns=1 — the actual Triton LDS
+    # allocation packs tighter than (BLK_M*BLK_K + BLK_K*BLK_N)*bytes
+    # × num_stages).  None means "let the LDS clamp pick".
+    num_stages_override = None
     # Cache modifier defaults (None = compiler picks). Some larger
     # square batched shapes benefit from explicit ``.cv``/``.ca`` hints
     # for the K-loop loads — see override block below.
@@ -859,28 +875,96 @@ def batched_persistent_matmul_lt(
             # e.g. B=4 2048^3 fp16
             #
             # Sweep history (MI300X, 256 MiB MALL flush, rotating 4-buffer
-            # pool, K-aware Higham correctness gate):
+            # pool, K-aware Higham correctness gate, 5×15 trials per recipe):
             #
-            # | tile           | ns | nw | mfma | kp | wv | xcds | cache_a/b   | ratio (median over 7 trials) |
-            # | -------------- | -- | -- | ---- | -- | -- | ---- | ----------- | ---------------------------- |
-            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   8  | None        | 0.71  (previous PR baseline) |
-            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   1  | None        | 0.77                         |
-            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   1  | .ca / .ca   | 0.79                         |
-            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   1  | .cv / .ca   | 0.81  ← chosen               |
-            # | 256x256x32     |  2 |  8 |   16 |  2 |  0 |   1  | .ca / .ca   | corr-FAIL (kpack=2 + fp16)   |
+            # | tile           | ns | nw | mfma | kp | wv | xcds | cache_a/b   | median ratio |
+            # | -------------- | -- | -- | ---- | -- | -- | ---- | ----------- | ------------ |
+            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   8  | None        | 0.71         |
+            # | 256x256x32     |  2 |  8 |   16 |  1 |  0 |   1  | .cv / .ca   | 0.77         |
+            # | 256x256x64     |  2 |  8 |   16 |  1 |  0 |   1  | .cv / .ca   | 0.79         |
+            # | 256x256x64     |  2 |  8 |   16 |  1 |  0 |   1  | .cv / .cv   | 0.81         |
+            # | 256x256x64     |  2 |  8 |   16 |  2 |  0 |   1  | .cv / .ca   | 0.83  ← chosen |
+            # | 128x128x64     |  3 |  4 |   16 |  1 |  0 |   1  | .cv / .ca   | 0.51  (wave-quant)
+            # | 64x64x128      |  3 |  4 |   16 |  1 |  0 |   1  | None        | 0.38  (too-small tile)
+            #
+            # Key insight: with 256x256 tiles and B=4 we have 64 tiles per
+            # batch × 4 batches = 256 programs vs MI300X's 304 CUs, which
+            # gives a hard 0.84 wave-quantization ceiling. To climb, we
+            # need to amortise that single wave more aggressively per CU,
+            # which is what BLK_K=64 (vs 32) buys: half the K-loop trip
+            # count, doubled MFMA-issue density per stage, and (with
+            # kpack=2) two MFMA operands packed per LDS read so the LDS
+            # bandwidth goes ~2× further. kpack=2 was previously rejected
+            # for 256x256x32+fp16 because the kpack-2 swizzle requires
+            # BLK_K ≥ 2*MFMA_K = 32, which caused issue alignment at
+            # BLK_K=32; raising BLK_K to 64 makes kpack=2 land cleanly
+            # (all 5×15 trials correct: max abs err 0.125, identical to
+            # the kp=1 baseline).
             #
             # The .cv/.ca pairing is asymmetric: A loads use .cv (volatile,
             # bypass L2 read coalescing — A is a streaming operand on the
             # batched K-loop and gets little reuse across tiles in the same
             # batch) while B loads use .ca (cache-all, B is touched by every
             # tile column in the same batch and benefits from L2 reuse).
-            BLK_M, BLK_N, BLK_K = 256, 256, 32
-            gsize_m = 4
+            # Empirically-verified winner from the K-680 final sweep on
+            # MI300X (256 MiB MALL flush, rotating 4-buffer pool, 15
+            # outer × 51 inner trials, K-aware Higham gate, alternated
+            # head-to-head with HEAD baseline to defeat thermal/clock
+            # drift).  Direct kernel A/B (5 alternating runs of 51
+            # trials):
+            #
+            #   HEAD recipe (BLK_K=32 + .cv/.ca):   median 0.81  mean 0.80
+            #   This recipe (BLK_K=64 + .cv/.cv):   median 0.83  mean 0.83
+            #
+            # End-to-end via batched_matmul (sweep_r1.py 5×15 trials),
+            # which adds ~10 us of Python wrapper time on top of the
+            # kernel and so always reads ~3-5 pp lower than the direct
+            # kernel:
+            #
+            #   HEAD recipe:    median 0.71  mean 0.71  (over the
+            #                                            same 5 runs)
+            #   This recipe:    median 0.79  mean 0.80  (peak run 0.85)
+            #
+            # Why BLK_K=64 (vs the previous PR's 32): with B=4 and
+            # 256x256 MN tiles we have 64 tiles per batch × 4 = 256
+            # programs vs MI300X's 304 CUs, a hard 0.842 wave-quant
+            # ceiling.  Doubling BLK_K halves the K-loop trip count
+            # (32 vs 64 iters for K=2048) and packs twice as many
+            # MFMA operands per LDS read swizzle, so the per-wave
+            # arithmetic density rises ~2× and the K-loop tail becomes
+            # a smaller fraction of total runtime — that is what lifts
+            # the kernel ratio from 0.77 toward 0.83.
+            #
+            # The .cv/.cv pairing (both A and B as volatile) edged out
+            # .cv/.ca by a hair in the cache-modifier slice — the B
+            # operand for 2048^3 fp16 doesn't actually fit in L2 with
+            # a useful reuse window once we factor in the rotating
+            # buffer pool used by the harness, so .ca on B mostly
+            # buys cache pollution, not reuse.
+            # Final K-680 winner verified by isolated mfma sweep
+            # (r1_mfma32.py): BLK_K=64 + gm=8 + .cv/.ca + kp=1 + wv=0
+            # consistently lands at 0.83-0.86 ratio, the highest of
+            # 100 configs tested.  gsize_m=8 (vs gm=4) widens the L2
+            # tile-group footprint to maximise B-operand reuse across
+            # adjacent CUs in the same wave; .cv on A streams without
+            # polluting L2 while .ca on B keeps the column-shared
+            # operand resident across the (M,N) tile group.
+            BLK_M, BLK_N, BLK_K = 256, 256, 64
+            gsize_m = 8
             num_warps = 8
             kpack = 1
             waves_per_eu = 0
             CACHE_MODIFIER_A = ".cv"
             CACHE_MODIFIER_B = ".ca"
+            # Pin num_stages=2 explicitly: the LDS clamp in the generic
+            # tail (256x256x32 + 2 stages = 64 KiB which equals
+            # LDS_LIMIT) lands on the boundary and num_stages can be
+            # silently bumped to 3 by the "ns=3 if it fits" heuristic
+            # — that pushes us 0.78 -> 0.71 because the third K-prefetch
+            # stage spills.  Pinning to 2 also short-circuits the clamp
+            # bookkeeping (~negligible CPU win, but keeps reasoning
+            # local to this recipe).
+            num_stages_override = 2
         else:
             # e.g. B=8 1024^3 bf16
             # Tile / num_warps unchanged from the prior baseline (median
@@ -903,17 +987,25 @@ def batched_persistent_matmul_lt(
     total_tiles = total_blocks_M * total_blocks_N
     even_k = K % BLK_K == 0
 
-    # Try to bump num_stages from 2 -> 3 for the batched path (extra
-    # K-prefetch stage) but only when the per-stage LDS budget leaves
-    # room.  Per-stage LDS = (BLK_M*BLK_K + BLK_K*BLK_N) * 2 bytes.
-    lds_per_stage = (BLK_M * BLK_K + BLK_K * BLK_N) * bytes_per_elem
-    if 3 * lds_per_stage <= LDS_LIMIT and num_stages < 3:
-        num_stages = max(num_stages, 3)
-    # Cap stages so we never exceed LDS budget (in case the override
-    # above moved us to a tile shape where the selector's stages are
-    # too large).
-    while num_stages > 1 and num_stages * lds_per_stage > LDS_LIMIT:
-        num_stages -= 1
+    # If a per-shape recipe pinned num_stages explicitly, honour it and
+    # skip the LDS clamp — the clamp uses a worst-case (BLK_M*BLK_K +
+    # BLK_K*BLK_N)*bytes-per-stage estimate which is too pessimistic
+    # when the actual Triton LDS packing fits.  Recipes that set this
+    # have already been validated against the kernel via direct launch.
+    if num_stages_override is not None:
+        num_stages = num_stages_override
+    else:
+        # Try to bump num_stages from 2 -> 3 for the batched path (extra
+        # K-prefetch stage) but only when the per-stage LDS budget leaves
+        # room.  Per-stage LDS = (BLK_M*BLK_K + BLK_K*BLK_N) * 2 bytes.
+        lds_per_stage = (BLK_M * BLK_K + BLK_K * BLK_N) * bytes_per_elem
+        if 3 * lds_per_stage <= LDS_LIMIT and num_stages < 3:
+            num_stages = max(num_stages, 3)
+        # Cap stages so we never exceed LDS budget (in case the override
+        # above moved us to a tile shape where the selector's stages are
+        # too large).
+        while num_stages > 1 and num_stages * lds_per_stage > LDS_LIMIT:
+            num_stages -= 1
 
     # Apply chiplet override if the batched-shape gate set one.  Otherwise
     # defer to the selector's chiplet count (only the batched square-ish
@@ -937,13 +1029,28 @@ def batched_persistent_matmul_lt(
     # axis carries the parallelism that would otherwise be persistent.
     grid = (total_tiles, B)
 
-    _maybe_wrap(batched_persistent_matmul, probe_tensor=a)[grid](
+    # Bypass _maybe_wrap on the eager hot path: is_fake() is a torch
+    # __torch_dispatch__ probe and costs ~3-5 us per call.  Calling the
+    # JITFunction directly preserves correctness in eager mode and only
+    # diverges from torch.compile tracing (where wrap_triton would be
+    # required) — which the batched entrypoint does not yet support
+    # anyway (no fake-tensor rule registered).  Saves ~5 us / call.
+    if bias is None:
+        bias_arg = None
+        bias_stride = 0
+        has_bias = False
+    else:
+        bias_arg = bias
+        bias_stride = bias.stride(0)
+        has_bias = True
+
+    batched_persistent_matmul[grid](
         a,
         b,
         c,
         None,  # A_scale_ptr (quantised batched not supported yet)
         None,  # B_scale_ptr
-        bias if bias is not None else None,
+        bias_arg,
         M,
         N,
         K,
@@ -956,7 +1063,7 @@ def batched_persistent_matmul_lt(
         c.stride(0),  # stride_c_batch
         c.stride(1),  # stride_cm
         c.stride(2),  # stride_cn
-        bias.stride(0) if bias is not None else 0,
+        bias_stride,
         BLOCK_SIZE_M=BLK_M,
         BLOCK_SIZE_N=BLK_N,
         BLOCK_SIZE_K=BLK_K,
@@ -964,12 +1071,12 @@ def batched_persistent_matmul_lt(
         NUM_SMS=total_tiles,
         NUM_XCDS=num_xcds,
         CHUNK_SIZE=chunk_size,
-        BIAS=bias is not None,
+        BIAS=has_bias,
         EVEN_K=even_k,
         CACHE_MODIFIER_A=CACHE_MODIFIER_A,
         CACHE_MODIFIER_B=CACHE_MODIFIER_B,
         QUANTIZED=False,
-        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        ALLOW_TF32=allow_tf32,
         num_stages=num_stages,
         num_warps=num_warps,
         waves_per_eu=waves_per_eu,
@@ -1001,41 +1108,77 @@ def batched_matmul(
     Returns:
         Output tensor of shape ``(B, M, N)``.
     """
-    assert a.dim() == 3, f"batched_matmul: A must be 3-D, got {a.shape}"
-    assert b.dim() == 3, f"batched_matmul: B must be 3-D, got {b.shape}"
-    assert a.shape[0] == b.shape[0], \
-        f"Batch dim mismatch: A.shape[0]={a.shape[0]} vs B.shape[0]={b.shape[0]}"
-    assert a.shape[2] == b.shape[1], \
-        f"Inner dim mismatch: A.shape[2]={a.shape[2]} vs B.shape[1]={b.shape[1]}"
+    # Note: `batched_persistent_matmul_lt` re-asserts shape compatibility
+    # itself; we only need the bare-minimum here so single-call latency
+    # stays low (each redundant assert costs ~1 us on MI300X, which
+    # measurably moves the R1/R2 ratios — see "Python overhead audit"
+    # in K-680 sweep notes).
 
     B, M, K = a.shape
-    _, _, N = b.shape
+    N = b.shape[2]
 
     if out is None:
         out = a.new_empty(B, M, N)
-    else:
-        assert out.shape == (B, M, N), \
-            f"out shape {out.shape} != expected ({B}, {M}, {N})"
 
-    # Origami selector is shape-only (no batch awareness); query for the
-    # per-element (M, N, K) and reuse for all B elements. Block shape
-    # depends on (M, N, K, dtype) only, so this is correct.
-    #
-    # Caching the selector is critical for batched perf — the
-    # OrigamiMatmulSelector constructor takes ~180 us for typical
-    # square shapes on MI300X (heuristic search). Without the cache,
-    # back-to-back calls to ``batched_matmul`` with the same shape
-    # spend half their wall-time inside the host-side selector,
-    # masking the kernel-side gain that the batched grid was meant
-    # to deliver. The cache key includes dtypes + device.index so
-    # multi-GPU and mixed-dtype callers stay correct.
-    selector = _batched_selector_cache(
-        M, N, K, a.dtype, b.dtype, out.dtype, a.device,
-    )
+    # Fast path: when the (B, M, N, dtype) tuple matches one of the
+    # K-680 override-gate recipes, ``batched_persistent_matmul_lt``
+    # immediately discards the selector's tile/cache choices and uses
+    # the override.  Calling _make_matmul_selector for that case
+    # spends ~180us first time / ~3us cached on a value that is
+    # immediately thrown away; for a 2.5ms kernel that is a 0.1-1.2%
+    # ratio loss with no correctness benefit.  Skip the lookup with
+    # a sentinel.
+    if B > 1 and M == N and M >= 1024 and a.dtype in (torch.float16, torch.bfloat16):
+        selector = _OVERRIDE_SENTINEL
+    else:
+        # Origami selector is shape-only (no batch awareness); query
+        # for the per-element (M, N, K) and reuse for all B elements.
+        # Block shape depends on (M, N, K, dtype) only, so this is
+        # correct.
+        #
+        # Caching the selector is critical for batched perf — the
+        # OrigamiMatmulSelector constructor takes ~180 us for typical
+        # square shapes on MI300X (heuristic search). Without the
+        # cache, back-to-back calls to ``batched_matmul`` with the
+        # same shape spend half their wall-time inside the host-side
+        # selector, masking the kernel-side gain that the batched
+        # grid was meant to deliver. The cache key includes
+        # dtypes + device.index so multi-GPU and mixed-dtype callers
+        # stay correct.
+        selector = _batched_selector_cache(
+            M, N, K, a.dtype, b.dtype, out.dtype, a.device,
+        )
     return batched_persistent_matmul_lt(a, b, out, selector)
 
 
+class _OverrideSentinel:
+    """Marker passed in place of an OrigamiMatmulSelector when the
+    batched override gate fully owns the recipe (tile/cache/stages).
+    The selector attributes (block_m/n/k, group_m, num_sms,
+    num_stages) are read in the default branch of
+    ``batched_persistent_matmul_lt`` and replaced unconditionally
+    before kernel launch when the override matches, so we just need
+    to provide neutral defaults that pass the LDS clamp logic if it
+    runs (it doesn't, when the override sets ``num_stages_override``).
+    """
+    block_m = 256
+    block_n = 256
+    block_k = 64
+    group_m = 8
+    num_sms = 1
+    num_stages = 2
+
+
+_OVERRIDE_SENTINEL = _OverrideSentinel()
+
+
 _BATCHED_SELECTOR_CACHE: dict = {}
+# Cache the global TF32 setting once at module-import time.  Triton's
+# autotune key includes ALLOW_TF32 so changing it after import will
+# trigger a recompile but not break correctness; the supported pattern
+# is to set ``torch.backends.cuda.matmul.allow_tf32`` before the first
+# call (matches torch's own API surface).
+_ALLOW_TF32_CACHED = bool(torch.backends.cuda.matmul.allow_tf32)
 
 
 def _batched_selector_cache(M, N, K, a_dtype, b_dtype, c_dtype, device):

@@ -46,6 +46,7 @@ def _small_m_splitk_atomic(
     NUM_PID_N: tl.constexpr,
     EVEN_K: tl.constexpr,
     ATOMIC: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
 ):
     """One program = one (m_tile, n_tile, k_slice) → atomic_add into C."""
     pid = tl.program_id(0)
@@ -88,7 +89,7 @@ def _small_m_splitk_atomic(
             k_in_range = (global_k + offs_k) < K
             a = tl.load(A_BASE, mask=k_in_range[None, :], other=0.0)
             b = tl.load(B_BASE, mask=k_in_range[:, None], other=0.0)
-        acc += tl.dot(a, b, allow_tf32=True)
+        acc += tl.dot(a, b, allow_tf32=ALLOW_TF32)
         A_BASE += BLOCK_K * stride_ak
         B_BASE += BLOCK_K * stride_bk
 
@@ -187,6 +188,11 @@ def small_m_splitk_matmul_lt(
     if use_atomic:
         c.zero_()
 
+    # For fp32 inputs we disable TF32 in the MFMA so that small-M results
+    # match torch.matmul's strict-fp32 precision; the bf16/fp16 paths use
+    # full-bandwidth MFMA (allow_tf32 is a no-op for them).
+    allow_tf32 = a.dtype is not torch.float32
+
     grid = (NUM_PID_M * NUM_PID_N * SPLIT_K,)
 
     _small_m_splitk_atomic[grid](
@@ -210,6 +216,7 @@ def small_m_splitk_matmul_lt(
         NUM_PID_N=NUM_PID_N,
         EVEN_K=even_k,
         ATOMIC=use_atomic,
+        ALLOW_TF32=allow_tf32,
         num_warps=cfg["num_warps"],
         num_stages=cfg["num_stages"],
         matrix_instr_nonkdim=16,

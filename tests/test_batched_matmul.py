@@ -125,3 +125,82 @@ def test_bmm_rejects_rank2():
     b = _randn((128, 128), torch.float16)
     with pytest.raises(ValueError, match="rank-3"):
         tritonblas.bmm(a, b)
+
+
+def test_bmm_rejects_dtype_mismatch():
+    a = _randn((2, 128, 128), torch.float16)
+    b = _randn((2, 128, 128), torch.bfloat16)
+    with pytest.raises(ValueError, match="dtype"):
+        tritonblas.bmm(a, b)
+
+
+def test_batched_matmul_out_shape_mismatch_raises():
+    """Wrong-shape out tensor must be rejected (don't silently corrupt)."""
+    a = _randn((2, 128, 128), torch.float16)
+    b = _randn((2, 128, 128), torch.float16)
+    bad = torch.empty((4, 128, 128), device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match="shape"):
+        tritonblas.batched_matmul(a, b, out=bad)
+
+
+def test_batched_matmul_streamk_rejected_on_rank3():
+    """Reviewer-noted limitation: streamk path only supports rank-2 today.
+    The rank-3 router must fail loudly rather than silently ignoring the flag.
+    """
+    a = _randn((2, 128, 128), torch.float16)
+    b = _randn((2, 128, 128), torch.float16)
+    with pytest.raises(ValueError, match="streamk"):
+        tritonblas.matmul(a, b, enable_streamk=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Speedup gates: assert that the batched dispatch is meaningfully faster than
+# the legacy Python-loop path. These guard against regressions that would let
+# the loop path silently win (e.g. batched-kernel compile failures fell back).
+#
+# The threshold (>=2x speedup vs Python loop) is conservative; the actual K-678
+# benchmark shows 7-36x speedups on the K-654 target shapes. We check on a
+# small representative shape so the test stays inside CI time budgets.
+# ════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("batch, m, n, k, dtype", [
+    (8, 512, 512, 512, torch.float16),
+    (8, 1024, 1024, 1024, torch.bfloat16),
+])
+def test_batched_path_beats_python_loop(batch, m, n, k, dtype):
+    """tritonblas.bmm must be at least 2x faster than the legacy Python loop
+    (one tritonblas.matmul call per batch element). Anything less suggests the
+    batched kernel has silently regressed to the rank-2 path or failed to
+    compile and dropped back to the loop."""
+    import time
+    a = _randn((batch, m, k), dtype)
+    b = _randn((batch, k, n), dtype)
+
+    # Warmup
+    for _ in range(5):
+        tritonblas.bmm(a, b)
+        for i in range(batch):
+            tritonblas.matmul(a[i], b[i])
+    torch.cuda.synchronize()
+
+    # Time the batched path
+    t0 = time.perf_counter()
+    for _ in range(20):
+        tritonblas.bmm(a, b)
+    torch.cuda.synchronize()
+    t_batched = (time.perf_counter() - t0) / 20
+
+    # Time the legacy Python-loop dispatch
+    t0 = time.perf_counter()
+    for _ in range(20):
+        for i in range(batch):
+            tritonblas.matmul(a[i], b[i])
+    torch.cuda.synchronize()
+    t_loop = (time.perf_counter() - t0) / 20
+
+    speedup = t_loop / t_batched
+    assert speedup >= 2.0, (
+        f"Batched dispatch only {speedup:.2f}x faster than Python loop "
+        f"(batched={t_batched*1e6:.1f}us, loop={t_loop*1e6:.1f}us); "
+        f"expected >=2x speedup."
+    )

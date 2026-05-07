@@ -69,12 +69,32 @@ def batched_persistent_matmul(
 ):
     """Batched persistent GEMM with grid = (NUM_SMS, BATCH).
 
+    The kernel is identical to the rank-2 ``persistent_matmul`` body except
+    that it accepts an additional ``stride_az/_bz/_cz`` triple for the batch
+    dimension and biases the A/B/C base pointers by ``batch_id * stride_*z``
+    before constructing the per-batch matrix views. Each (program_id_0,
+    program_id_1) pair therefore computes one tile of one batch slice; the
+    inner GEMM loop and tile-scheduler logic are shared verbatim with the
+    production rank-2 kernel through ``GemmContext`` / ``ScheduleContext``.
+
     Stride parameters:
-      stride_az / stride_bz / stride_cz : per-batch (Z) strides. Pass 0 to
-        broadcast that operand across the batch dimension (e.g. shared B).
+      stride_az / stride_bz / stride_cz : per-batch (Z) strides in elements.
+        Pass 0 to broadcast that operand across the batch dimension (e.g.
+        a shared rank-2 ``B`` matrix multiplied against a rank-3 ``A``).
+        The kernel performs the multiplication in 64-bit so that batches
+        whose slice byte-size exceeds 2 GiB do not overflow.
       stride_am, stride_ak : A's M and K row/col strides per batch slice.
       stride_bk, stride_bn : B's K and N row/col strides per batch slice.
       stride_cm, stride_cn : C's M and N row/col strides per batch slice.
+
+    Grid sizing (chosen by the Python-side dispatcher):
+      ``NUM_SMS`` controls the persistent loop length per batch. The
+      dispatcher picks one of: ``total_tiles`` (one program per tile),
+      ``NUM_CUS`` (one persistent wave per batch), ``NUM_CUS//2``
+      (lighter persistence to amortize tile scheduling), or
+      ``total_tiles*2`` (oversubscribe to hide tail latency on small grids).
+      See ``_BatchedKernelConfig.nsm_mode`` and the autotune sweep results
+      in the K-678 workspace for the rationale per shape.
     """
     # Determine accumulator dtype based on output type.
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32

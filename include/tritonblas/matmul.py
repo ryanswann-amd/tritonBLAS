@@ -90,26 +90,24 @@ def _maybe_dispatch_atomic_free_splitk(
 ) -> Optional[torch.Tensor]:
     """Try the atomic-free split-K small-M path; return ``c`` if it ran, else None.
 
-    Gating (must all be true):
-      * dtypes are FP16 or BF16 (the cohort where the FP16/BF16 atomic CAS
-        loop on gfx942 dominates -- not relevant for INT8/FP8/quantized)
-      * ``M <= 32`` (small-M, decode-style skinny GEMM)
-      * ``K >= 8192`` (long enough K-loop to amortize the two-kernel launch
-        overhead on MI300X; at ``K = 4096`` the new path loses to hipBLASLt
-        on every measured shape)
-      * ``N >= 4096`` (below this the tile count is too small to feed
-        SPLIT_K parallelism and the new path stays below 0.4x torch)
-      * the chosen SPLIT_K is >= 4
-      * not under torch.compile fake-tensor tracing
-      * not opted out via TBLAS_DISABLE_SPLITK_SMALLM
+    The (M, N, K, SPLIT_K) gate predicate lives in
+    :func:`tritonblas.kernels.persistent_splitk.should_use_atomic_free_splitk`
+    -- this dispatcher only handles the *runtime* eligibility checks
+    (dtype, fake-tensor tracing, kill switch, quantization) and forwards
+    everything else to the predicate.  This keeps the shape gate as the
+    single source of truth so widening / tightening it requires editing
+    exactly one location.
 
     Falls through (returns None) on any failure so the caller can use the
     existing persistent / stream-K dispatch.
     """
+    # Runtime eligibility -- not part of the (M, N, K, SPLIT_K) gate.
     if _splitk_smallm_disabled() or quantized:
         return None
     if is_fake(a) or is_fake(b) or is_fake(c):
         return None
+    # Atomic-CAS-loop pathology is FP16/BF16-specific on gfx942; FP32 has a
+    # native hardware atomic and quantized paths use their own dequant epilogue.
     if a.dtype not in (torch.float16, torch.bfloat16):
         return None
     if a.dim() != 2 or b.dim() != 2:
@@ -117,22 +115,21 @@ def _maybe_dispatch_atomic_free_splitk(
 
     M, K = a.shape
     _, N = b.shape
-    # Cheap pre-check: drop out on the obvious M/K/N misses before paying the
-    # SPLIT_K computation.
-    if M > 32 or K < 8192 or N < 4096:
-        return None
 
-    # Origami's tile picker is tuned for the persistent path; for the small-M
-    # split-K path use a fixed compact tile that is friendly to the MFMA
-    # 16x16x16 instruction and keeps the workspace small.
-    block_m = 16 if M <= 16 else 32
-    block_n = 128 if N >= 128 else max(16, triton.next_power_of_2(N))
+    # Tile shape -- compact tiles that match the small-M motif and the gfx942
+    # MFMA 16x16x16 instruction.  ``block_k`` is fixed at 64 here so that
+    # ``choose_split_k`` and ``should_use_atomic_free_splitk`` see a consistent
+    # SPLIT_K.
     block_k = 64
-    group_m = 1
-
     split_k = choose_split_k(M, K, block_k)
+
+    # Single source of truth for the (M, N, K, SPLIT_K) gate.
     if not should_use_atomic_free_splitk(M, N, K, split_k):
         return None
+
+    block_m = 16 if M <= 16 else 32
+    block_n = 128 if N >= 128 else max(16, triton.next_power_of_2(N))
+    group_m = 1
 
     persistent_splitk_matmul(
         a, b, c,

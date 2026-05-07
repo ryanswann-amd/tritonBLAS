@@ -205,3 +205,96 @@ class TestPublicAPIFallThrough:
         c = tritonblas.matmul(a, b)
         ref = torch.matmul(a, b)
         torch.testing.assert_close(c, ref, rtol=2e-2, atol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# 4. Numerical correctness of the two-stage atomic-free split-K KERNEL itself.
+#    These are the guarded CI assertions the Testing Zealot asked for: a
+#    gated shape goes end-to-end through the new kernel pair and is compared
+#    against an FP32-accumulated reference (NOT torch.matmul, which uses its
+#    own kernel and would mask a bug in the new path with matching tolerance).
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicFreeSplitKKernelCorrectness:
+    """End-to-end numerical correctness of the two-stage split-K kernel pair.
+
+    Reference is ``(a.float() @ b.float()).to(dtype)`` -- an explicit FP32
+    matmul cast back to the output dtype.  This pins the assertion to the
+    *math*, not to whatever path the same library happens to dispatch
+    ``torch.matmul`` to.  Tolerance: ``rtol=atol=2e-2`` -- generous enough to
+    absorb FP16/BF16 dot-product rounding, tight enough to catch a bug in
+    the workspace stride math, the ``EVEN_K_PER_SPLIT`` branch, or the
+    epilogue cast.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _force_dispatcher_path(self, monkeypatch):
+        # Belt-and-braces: clear the kill switch on every test in this class.
+        monkeypatch.delenv("TBLAS_DISABLE_SPLITK_SMALLM", raising=False)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize("M,N,K", [
+        # Boundary: minimum gated shape on every axis.
+        (16, 4096, 8192),
+        # M = 32 path (block_m = 32).
+        (32, 4096, 8192),
+        # Wider N -- multiple N-tiles per (pid_m, pid_n).
+        (16, 8192, 8192),
+        # Deeper K -- exercises EVEN_K_PER_SPLIT fast path with larger SPLIT_K.
+        (16, 4096, 16384),
+        (32, 8192, 16384),
+    ])
+    def test_kernel_matches_fp32_reference(self, M, N, K, dtype):
+        """The new kernel pair must match an FP32 reference end-to-end.
+
+        Crucially, this test goes through the public ``tritonblas.matmul``
+        entry point so it also asserts that the dispatcher routed to the
+        new path (otherwise the test silently exercises the persistent path
+        and the reviewer's concern would not be addressed).
+        """
+        torch.manual_seed(0)
+        a = torch.randn(M, K, device="cuda", dtype=dtype)
+        b = torch.randn(K, N, device="cuda", dtype=dtype)
+
+        # Pre-flight assertion: the dispatcher MUST gate this shape into
+        # the new kernel.  If the gate widens / narrows in the future and
+        # this stops being true, the test should fail loudly (not silently
+        # fall back to the persistent path and pass anyway).
+        block_k = 64
+        split_k = choose_split_k(M, K, block_k)
+        assert should_use_atomic_free_splitk(M, N, K, split_k), (
+            f"shape ({M=}, {N=}, {K=}, {split_k=}) is no longer in the "
+            "atomic-free split-K cohort; this test would silently exercise "
+            "the persistent path -- update the parametrize list."
+        )
+
+        c = tritonblas.matmul(a, b)
+        ref = (a.float() @ b.float()).to(dtype)
+        torch.testing.assert_close(c, ref, rtol=2e-2, atol=2e-2)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_kernel_matches_fp32_reference_with_bias(self, dtype):
+        """The bias-fold-in epilogue path also matches FP32 reference."""
+        torch.manual_seed(1)
+        M, N, K = 16, 4096, 8192
+        a = torch.randn(M, K, device="cuda", dtype=dtype)
+        b = torch.randn(K, N, device="cuda", dtype=dtype)
+        bias = torch.randn(N, device="cuda", dtype=dtype)
+        c = tritonblas.addmm(bias, a, b)
+        ref = (a.float() @ b.float() + bias.float()).to(dtype)
+        torch.testing.assert_close(c, ref, rtol=2e-2, atol=2e-2)
+
+    def test_uneven_k_per_split_path(self):
+        """K not divisible by SPLIT_K -- exercises the masked slow path
+        (``EVEN_K_PER_SPLIT = False``) of stage 1."""
+        # 8192 + 64 ensures K // SPLIT_K is not a clean multiple of BLOCK_K
+        # for at least some of the SPLIT_K candidates.  Still in-cohort
+        # because K >= 8192 and N >= 4096 and M <= 32.
+        torch.manual_seed(2)
+        M, N, K = 16, 4096, 8192 + 64
+        a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+        b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+        c = tritonblas.matmul(a, b)
+        ref = (a.float() @ b.float()).to(torch.float16)
+        torch.testing.assert_close(c, ref, rtol=2e-2, atol=2e-2)

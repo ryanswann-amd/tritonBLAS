@@ -1,7 +1,7 @@
 import functools
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch.library import triton_op, wrap_triton
@@ -26,8 +26,16 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# Type alias: the public ``enable_streamk`` parameter accepts an
+# explicit boolean OR the literal string ``"auto"`` OR ``None`` (kept as
+# a backward-compatible alias for ``"auto"``).  Everything else raises
+# ``TypeError`` from :func:`_resolve_enable_streamk` so callers see the
+# error at dispatch time rather than as a silent True/False coercion.
+EnableStreamKArg = Union[bool, str, None]
+
+
 def _resolve_enable_streamk(
-    enable_streamk: Optional[bool],
+    enable_streamk: EnableStreamKArg,
     M: int,
     N: int,
     K: int,
@@ -35,22 +43,40 @@ def _resolve_enable_streamk(
     """Resolve the ``enable_streamk`` argument for the public ``matmul`` /
     ``addmm`` entry points.
 
-    The public functions accept ``Optional[bool]``:
+    The public functions accept:
 
-      * Explicit ``True`` / ``False`` — respect the caller's choice
-        verbatim and bypass the heuristic.
-      * ``None`` (default) — consult :func:`recommend_streamk` and auto-
-        enable stream-K on shapes whose data-parallel tile grid would
-        leave a meaningful chunk of CUs idle in the last wave.  This
-        addresses the "large rectangle" PRD residual shapes where the
-        last-wave imbalance is the dominant performance loss.
+      * ``True`` / ``False`` — explicit caller choice; bypasses the
+        heuristic.  Use this when a caller has already done its own
+        autotuning (the existing behaviour for any code path that
+        previously passed an explicit boolean).
+      * ``"auto"`` (string sentinel, the default) — consult
+        :func:`recommend_streamk` and auto-enable stream-K on shapes
+        whose data-parallel tile grid would leave a meaningful chunk
+        of CUs idle in the last wave.  This addresses the
+        "large rectangle" PRD residual shapes where last-wave
+        imbalance is the dominant performance loss.
+      * ``None`` — alias for ``"auto"``, retained so old callers that
+        passed a positional ``Optional[bool]`` from a wrapper continue
+        to opt in to the heuristic (which is what ``None`` meant under
+        the prior public default ``enable_streamk=False`` — it could
+        not be observed there because the parameter was never exposed
+        as ``None`` to the public).
 
     Returns the resolved boolean to forward to the internal kernel
     selection path.
+
+    Raises ``TypeError`` for any other value (e.g. ``0``, ``"true"``)
+    so a caller mistake surfaces immediately at dispatch instead of
+    silently flipping kernel selection.
     """
-    if enable_streamk is None:
+    if enable_streamk is True or enable_streamk is False:
+        return enable_streamk
+    if enable_streamk is None or enable_streamk == "auto":
         return _recommend_streamk(M, N, K, MAX_SMS)
-    return bool(enable_streamk)
+    raise TypeError(
+        f"enable_streamk must be True, False, 'auto', or None; "
+        f"got {enable_streamk!r}"
+    )
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -503,15 +529,18 @@ def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = None,
+    enable_streamk: EnableStreamKArg = "auto",
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # When the caller leaves enable_streamk unset (None), auto-select the
-    # stream-K kernel on shapes whose data-parallel tile grid would leave a
-    # meaningful chunk of CUs idle in the last wave (last-wave imbalance).
-    # Explicit True/False bypasses the heuristic — see
-    # _resolve_enable_streamk + recommend_streamk for details.
+    # ``enable_streamk`` defaults to the string sentinel ``"auto"`` (and
+    # accepts ``None`` as an alias).  In auto mode the dispatch policy
+    # consults :func:`recommend_streamk` to decide whether the persistent
+    # stream-K kernel is expected to outperform the data-parallel kernel
+    # on this shape (see ``_resolve_enable_streamk`` for the full
+    # contract).  Explicit ``True`` / ``False`` bypasses the heuristic
+    # so existing callers that already chose a kernel manually keep
+    # their previous behaviour byte-for-byte.
     M, K = a.shape
     _, N = b.shape
     enable_streamk = _resolve_enable_streamk(enable_streamk, M, N, K)
@@ -764,11 +793,12 @@ def addmm(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = None,
+    enable_streamk: EnableStreamKArg = "auto",
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # Same auto-streamk behaviour as matmul().
+    # Same auto-streamk behaviour as matmul() — see _resolve_enable_streamk
+    # for the parameter contract ("auto"/None/True/False).
     M, K = a.shape
     _, N = b.shape
     enable_streamk = _resolve_enable_streamk(enable_streamk, M, N, K)

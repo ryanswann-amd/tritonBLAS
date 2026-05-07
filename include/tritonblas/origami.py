@@ -121,8 +121,14 @@ def is_large_skinny_shape(m: int, n: int, k: int) -> bool:
       fp16.  See ``tests/test_large_skinny_heuristics.py`` for the pinned
       cases.
     """
+    # Reject degenerate / non-positive shapes outright — there is no
+    # meaningful "aspect ratio" for an empty matmul, and we don't want
+    # ``min(m, n) == 0`` to silently divide-by-zero (or trigger via the
+    # 1-floor below) and report the shape as "skinny".
+    if m <= 0 or n <= 0 or k <= 0:
+        return False
     long_dim = max(m, n)
-    short_dim = max(1, min(m, n))
+    short_dim = min(m, n)
     if long_dim < LARGE_SKINNY_LONG_DIM_MIN:
         return False
     if k < LARGE_SKINNY_K_MIN:

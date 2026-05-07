@@ -2,15 +2,16 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Batched persistent GEMM kernel — single-launch BMM (K-684).
+Batched persistent GEMM kernel — single-launch BMM.
 
 Motivation
 ----------
 Before this kernel landed, tritonblas.matmul() handled rank-3 inputs by
 looping on the host over the batch dimension and launching one single-GEMM
-kernel per element. K-654 + K-659 measured this path: for a Z=4 batch of
-2048^3 fp16 GEMMs the per-element kernel-launch (Tcold) overhead dominated
-end-to-end time, leaving tritonblas at ratio≈0.30 vs torch.bmm.
+kernel per element. Profiling showed the per-element kernel-launch (Tcold)
+overhead dominated end-to-end time on small batched workloads, leaving
+tritonblas at roughly 1/3 of torch.bmm throughput on a Z=4 batch of
+2048³ fp16 GEMMs.
 
 The fused kernel here closes the *structural* gap by collapsing the batch
 loop into the program-id space:
@@ -70,7 +71,9 @@ BLOCK_SIZE_{M,N,K} are passed in by the host. The host wrapper picks them
 through `_select_batched_tile()` in `tritonblas.kernels.batched_dispatch`,
 which chooses larger tiles when total_grid >> num_CUs (i.e. when the batch
 dimension already saturates the GPU and arithmetic intensity is the
-limiter rather than tile count). This is the K-684 small-MN fix.
+limiter rather than tile count). This addresses the small-MN regression
+that the per-element loop suffered from when Z was large enough that the
+batch dimension already saturated the GPU.
 """
 
 import triton

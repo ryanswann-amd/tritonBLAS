@@ -392,20 +392,56 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+@functools.lru_cache(maxsize=2048)
+def _cached_batched_tile(M, N, K, Z, bytes_a, bytes_b, num_cus):
+    """LRU-cached BatchedTile lookup keyed on shape+dtype.
+
+    select_batched_config is pure (no Triton/CUDA), so caching the (M,N,K,Z,
+    bytes,num_cus) → BatchedTile result avoids recomputing the heuristic on
+    every call. Hot-path matters: a single batched matmul kernel takes ~60us
+    on small batched shapes (R2 1024³ bf16), so any per-call overhead in the
+    100us-1ms range becomes the dominant cost. The OrigamiMatmulSelector
+    walk that the rank-2 path uses is ~180us per call (measured), which is
+    why we deliberately bypass it here and call the heuristic directly with
+    sensible defaults.
+    """
+    return select_batched_config(
+        M=M, N=N, K=K, Z=Z,
+        base_block_m=128, base_block_n=128, base_block_k=64,
+        base_group_m=8, base_num_xcds=8, base_num_stages=2,
+        bytes_a=bytes_a, bytes_b=bytes_b, num_cus=num_cus,
+    )
+
+
+# Cached device-properties lookup — torch.cuda.get_device_properties is not
+# free (~5us+); cache once per device index.
+@functools.lru_cache(maxsize=8)
+def _num_cus_for(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
 def batched_persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
-    selector,
+    selector,            # kept in signature for API compat; unused
     bias: Optional[torch.Tensor] = None,
 ):
     """
-    Single-launch batched GEMM host wrapper (K-684).
+    Single-launch batched GEMM host wrapper.
 
     Inputs are rank-3: a is (Z, M, K), b is (Z, K, N), c is (Z, M, N).
-    All batches must share the same (M, N, K). Block sizes are picked by
-    `select_batched_config` (in `batched_dispatch.py`) which adjusts the
-    per-batch tile UP when the batch dimension already saturates the GPU.
+    All batches must share the same (M, N, K). Tile/warp/stage choice goes
+    through the cached `_cached_batched_tile()` heuristic (see
+    batched_dispatch.select_batched_config) which was tuned on MI300X over
+    a 152-config × 8-shape sweep.
+
+    The `selector` arg is kept in the signature for API symmetry with the
+    rank-2 path (`persistent_matmul_lt`), but for batched we do not consult
+    OrigamiMatmulSelector — its ~180us per-call overhead consumes 3× the
+    kernel time on small batched shapes. The heuristic operates directly on
+    (M, N, K, Z, dtype) which is enough information to make a good tile
+    choice without the extra selector walk.
     """
     assert a.dim() == 3 and b.dim() == 3 and c.dim() == 3, "rank-3 expected"
     Z, M, K = a.shape
@@ -415,24 +451,11 @@ def batched_persistent_matmul_lt(
     assert K == Kb, "Incompatible Inner Dimensions"
     assert M == Mc and N == Nc, "Inconsistent output shape"
 
-    # ─── batched-aware tile selection ────────────────────────────────────
-    # Origami picked tiles for a single GEMM of (M, N, K). For a batched
-    # launch we typically want LARGER tiles when total grid >> num_CUs.
+    # ─── batched-aware tile selection (cached) ───────────────────────────
     bytes_a = a.element_size()
     bytes_b = b.element_size()
-    num_cus = torch.cuda.get_device_properties(a.device).multi_processor_count
-    btile = select_batched_config(
-        M=M, N=N, K=K, Z=Z,
-        base_block_m=selector.block_m,
-        base_block_n=selector.block_n,
-        base_block_k=selector.block_k,
-        base_group_m=selector.group_m,
-        base_num_xcds=selector.num_sms,
-        base_num_stages=getattr(selector, "num_stages", 2),
-        bytes_a=bytes_a,
-        bytes_b=bytes_b,
-        num_cus=num_cus,
-    )
+    num_cus = _num_cus_for(a.device.index)
+    btile = _cached_batched_tile(M, N, K, Z, bytes_a, bytes_b, num_cus)
 
     BLK_M = btile.block_m
     BLK_N = btile.block_n
@@ -441,15 +464,15 @@ def batched_persistent_matmul_lt(
     num_xcds = btile.num_xcds
     num_stages = btile.num_stages
     num_warps = btile.num_warps
+    kpack = btile.kpack
+    waves_per_eu = btile.waves_per_eu
+    mfmaInstrSize = btile.matrix_instr_nonkdim
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     tiles_per_batch = total_blocks_M * total_blocks_N
     even_k = (K % BLK_K == 0)
 
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -511,7 +534,10 @@ def _bmm(
     True batched matmul (rank-3 inputs).
 
     Dispatches a single fused-batch Triton launch instead of looping per batch
-    on the host (closes the Tcold gap surfaced by K-654/K-659).
+    on the host (avoids per-element Tcold launch overhead). The tile heuristic
+    in `batched_dispatch.select_batched_config` consumes (M, N, K, Z, dtype)
+    directly — we do NOT call OrigamiMatmulSelector here because its per-call
+    cost is 3× the kernel time on small batched shapes.
     """
     assert a.dim() == 3 and b.dim() == 3, "tritonblas.bmm expects rank-3 inputs"
     assert a.shape[0] == b.shape[0], "Incompatible Batch Dimensions"
@@ -520,9 +546,7 @@ def _bmm(
     _, _, N = b.shape
 
     out = a.new_empty(Z, M, N)
-
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
-    return batched_persistent_matmul_lt(a, b, out, selector)
+    return batched_persistent_matmul_lt(a, b, out, selector=None)
 
 
 def _setup_context_bmm_backwards(ctx, inputs, output):
@@ -551,11 +575,7 @@ def _bmm_out(
     assert a.dim() == 3 and b.dim() == 3, "tritonblas.bmm expects rank-3 inputs"
     assert a.shape[0] == b.shape[0], "Incompatible Batch Dimensions"
     assert a.shape[2] == b.shape[1], "Incompatible Inner Dimensions"
-    Z, M, K = a.shape
-    _, _, N = b.shape
-
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
-    batched_persistent_matmul_lt(a, b, out, selector)
+    batched_persistent_matmul_lt(a, b, out, selector=None)
     return None
 
 
@@ -676,8 +696,8 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # K-684: rank-3 inputs route through the fused-batch entrypoint so we do
-    # not pay Tcold launch overhead per batch element. The dispatch decision
+    # rank-3 inputs route through the fused-batch entrypoint so we don't
+    # pay Tcold launch overhead per batch element. The dispatch decision
     # is centralized in `batched_dispatch.should_dispatch_batched(a, b)` so
     # extending to rank-N or mixed broadcasting is a one-line change there
     # rather than another branch grafted onto this public wrapper.

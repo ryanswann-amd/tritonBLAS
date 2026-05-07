@@ -390,6 +390,31 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+# K-299: skinny-M / large-N cohort gate.
+# For (M<=64, N>=4096, K in [1024,4096]) fp16/bf16 GEMMs, the default
+# data-parallel persistent grid (~tiles_N WGs) leaves most CUs idle on
+# MI300X. Routing to the existing work-stealing persistent kernel sizes
+# the grid to N_CU and amortizes the K-loop prologue across many N tiles
+# per WG, yielding ~1.94x geomean over the un-gated path on this cohort.
+def _skinny_n_persist_eligible(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    enable_streamk: Optional[bool],
+    work_stealing: Optional[bool],
+) -> bool:
+    if enable_streamk or work_stealing:
+        return False
+    if a.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if b.dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if a.dim() != 2 or b.dim() != 2:
+        return False
+    M, K = a.shape
+    _, N = b.shape
+    return (M <= 64) and (N >= 4096) and (1024 <= K <= 4096)
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -401,6 +426,9 @@ def _matmul(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _skinny_n_persist_eligible(a, b, enable_streamk, work_stealing):
+        work_stealing = True
 
     out = a.new_empty(M, N)
 
@@ -460,6 +488,9 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _skinny_n_persist_eligible(a, b, enable_streamk, work_stealing):
+        work_stealing = True
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

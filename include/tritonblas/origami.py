@@ -109,11 +109,13 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
+        batch: int = 1,
     ):
         # Save tensor sizes
         self._m = m
         self._n = n
         self._k = k
+        self._batch = max(1, int(batch))
         self.streamk = streamk
         self._num_stages = num_stages
         # Save tensor dtypes as strings
@@ -475,7 +477,7 @@ class OrigamiMatmulSelector:
         # Create and set new problem_t values
         problem = origami.problem_t()
         problem.size = size
-        problem.batch = 1
+        problem.batch = getattr(self, "_batch", 1)
         problem.a_transpose = origami.transpose_t.T
         problem.b_transpose = origami.transpose_t.N
         problem.a_dtype = a_origami_dtype

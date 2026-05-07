@@ -10,6 +10,7 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.batched_gemm import batched_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
@@ -480,6 +481,11 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Rank-3 inputs: dispatch to true batched matmul (single kernel launch
+    # over BATCH * tiles instead of a Python-level batch loop).
+    if a.dim() == 3 and b.dim() == 3:
+        return bmm(a, b, out)
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
@@ -750,4 +756,125 @@ def addmm(
             "automatic differentiation, but one of the arguments requires grad."
         )
     return _addmm_out(bias, a, b, out, enable_streamk, sk_grid, work_stealing)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Batched matmul (rank-3 inputs)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _batched_matmul_launch(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+):
+    """
+    Single-launch batched GEMM dispatcher.
+
+    Inputs:
+        a:   (BATCH, M, K)
+        b:   (BATCH, K, N)
+        out: (BATCH, M, N)
+    Returns:
+        out (mutated in-place; also returned for chaining)
+    """
+    assert a.dim() == 3 and b.dim() == 3, "bmm expects rank-3 inputs"
+    assert a.shape[0] == b.shape[0], f"Batch mismatch: {a.shape[0]} vs {b.shape[0]}"
+    assert a.shape[2] == b.shape[1], f"Inner dim mismatch: {a.shape[2]} vs {b.shape[1]}"
+
+    BATCH, M, K = a.shape
+    _, _, N = b.shape
+
+    # Origami picks the per-shape tile config; batch GEMM reuses the same
+    # tile across all batch entries (problem.batch=BATCH is recorded for
+    # heuristics but tile selection is M/N/K-driven).
+    selector = OrigamiMatmulSelector(
+        M, N, K, a.dtype, b.dtype, out.dtype, a.device, batch=BATCH
+    )
+
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    BLK_K = selector.block_k
+    gsize_m = selector.group_m
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    tiles_per_batch = total_blocks_M * total_blocks_N
+    grids = (BATCH * tiles_per_batch,)
+    even_k = K % BLK_K == 0
+
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+
+    _maybe_wrap(batched_matmul, probe_tensor=a)[grids](
+        a,
+        b,
+        out,
+        M,
+        N,
+        K,
+        BATCH,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        EVEN_K=even_k,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return out
+
+
+def bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Batched matrix multiply: ``out[b] = a[b] @ b[b]`` for b in [0, BATCH).
+
+    Args:
+        a:   (BATCH, M, K) tensor
+        b:   (BATCH, K, N) tensor
+        out: optional (BATCH, M, N) output tensor.  Allocated if None.
+
+    Returns:
+        ``out`` with shape (BATCH, M, N) and dtype matching ``a``.
+
+    Notes:
+        Dispatches a single Triton grid over (BATCH * M_tiles * N_tiles)
+        instead of looping host-side, eliminating per-batch launch overhead
+        that previously made small batched shapes (e.g. b=8, 1024^3)
+        ~14× slower than hipBLASLt.
+    """
+    assert a.dim() == 3, f"bmm: a must be rank-3, got {a.dim()}"
+    assert b.dim() == 3, f"bmm: b must be rank-3, got {b.dim()}"
+    BATCH, M, K = a.shape
+    _, K2, N = b.shape
+    assert K == K2, f"bmm: inner dims disagree (a.K={K}, b.K={K2})"
+    assert a.shape[0] == b.shape[0], "bmm: batch dims disagree"
+
+    if out is None:
+        out = a.new_empty(BATCH, M, N)
+    else:
+        assert out.shape == (BATCH, M, N), f"bmm: out shape {tuple(out.shape)} != {(BATCH, M, N)}"
+
+    return _batched_matmul_launch(a, b, out)
 

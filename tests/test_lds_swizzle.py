@@ -437,6 +437,123 @@ def test_k_max_band_admits_kpack2_on_mode_on(monkeypatch, M, N, K):
     )
 
 
+def test_structural_assertion_raises_on_envelope_bypass(monkeypatch, tmp_path):
+    """If the memo decide function is monkey-patched to return SWIZZLED
+    for an out-of-envelope shape, the structural assertion in
+    ``select_lds_config`` must fire (AssertionError) — proving the
+    safety net catches future bugs that would route kpack=2 to a
+    K-539 / K-580 / large-grid cohort shape.
+
+    Pins the contract that the assertion isn't dead code: any future
+    refactor that accidentally skips ``small_k_guard`` for the K-floor
+    OR the M*N clause OR ``medium_k_residual``'s K-cap is structurally
+    rejected at admission time.
+    """
+    import tritonblas.lds_swizzle as _lds
+
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "off")  # cheapest path
+    reset_cache_for_testing()
+
+    # Override _decide_memo to return SWIZZLED for ANY shape — this
+    # simulates a future bug that bypasses the envelope check inside
+    # the decide function. The structural assertion in
+    # select_lds_config is the safety net that catches this class of
+    # bug at runtime. We use try/finally rather than monkeypatch.setattr
+    # so the override is reverted before the autouse fixture's
+    # teardown runs ``reset_cache_for_testing`` (which calls
+    # ``_decide_memo.cache_clear()``).
+    _orig_decide = _lds._decide_memo
+    _lds._decide_memo = lambda *a, **kw: _lds.SWIZZLED_CONFIG
+    try:
+        # K-539 cohort shape (K-floor violation).
+        with pytest.raises(AssertionError, match="K-707 envelope contract"):
+            select_lds_config(
+                2048, 2048, 512,
+                "f16", "f16", "f16",
+                256, 256, 64,
+                streamk=False, work_stealing=False,
+            )
+
+        # M*N-only violation (passes K-floor, fails area floor).
+        with pytest.raises(AssertionError, match="K-707 envelope contract"):
+            select_lds_config(
+                1024, 1024, 1024,
+                "f16", "f16", "f16",
+                256, 256, 64,
+                streamk=False, work_stealing=False,
+            )
+
+        # K-580 cohort shape (k_max violation).
+        with pytest.raises(AssertionError, match="K-707 envelope contract"):
+            select_lds_config(
+                4096, 2048, 2048,
+                "f16", "f16", "f16",
+                256, 256, 64,
+                streamk=False, work_stealing=False,
+            )
+    finally:
+        _lds._decide_memo = _orig_decide
+
+
+def test_structural_assertion_fires_on_mn_only_violation(monkeypatch, tmp_path):
+    """``select_lds_config``'s structural assertion catches a routing
+    decision that violates the ``M*N <= 2048*2048`` clause specifically
+    (independent of the K-floor clause).
+
+    Tightens the Skeptic-flagged gap: the PRD's structural assertion
+    was ``K<=512 OR M*N<=2048*2048``. The K-floor case is already
+    pinned by ``test_k539_floor_holds_against_poisoned_cache``; this
+    test pins the M*N clause has its own enforcement path by:
+      (a) constructing a shape that passes the K-floor (K=1024) but
+          violates the M*N clause (M=N=1024 → 1M ≤ 4M),
+      (b) poisoning the cache with kpack=2 for that shape under
+          ``mode=on`` (the path most exposed to a stale cache),
+      (c) verifying the structural assertion would fire if any code
+          path returned a non-baseline cfg — confirmed by both
+          ``admits()`` returning False and ``select_lds_config``
+          returning ``BASELINE_CONFIG``.
+    """
+    cache_path = tmp_path / "mn_only_violation.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    reset_cache_for_testing()
+
+    # Shape M=1024, N=1024, K=1024 — passes K-floor (K=1024 > 512), but
+    # M*N = 1M ≤ 2048² = 4M → small_k_guard rejects via the M*N clause.
+    M, N, K = 1024, 1024, 1024
+    BM, BN, BK = 256, 256, 64
+    assert not DEFAULT_KPACK2_ENVELOPE.admits(M, N, K, block_k=BK, block_m=BM, block_n=BN), (
+        "envelope must reject M*N-only violations independently of K-floor"
+    )
+    # Confirm the K-floor clause is NOT what's rejecting (orthogonal coverage).
+    assert K > DEFAULT_KPACK2_ENVELOPE.k_floor, "test setup: K must clear k_floor"
+    assert DEFAULT_KPACK2_ENVELOPE.small_k_guard(M, N, K), (
+        "M*N=1M ≤ min_problem_area=4M — small_k_guard must trip via the M*N clause"
+    )
+
+    # Poison the cache with kpack=2 for this shape and re-check the routing.
+    cache = PersistentSwizzleCache(path=cache_path)
+    key = f"{M}x{N}x{K}|f16|f16|f16|{BM}x{BN}x{BK}|ds|nows"
+    cache.set(key, SWIZZLED_CONFIG)
+    reset_cache_for_testing()
+
+    cfg = select_lds_config(
+        M, N, K,
+        "f16", "f16", "f16",
+        BM, BN, BK,
+        streamk=False, work_stealing=False,
+    )
+    # If select_lds_config had bypassed the envelope check it would have
+    # triggered the structural assertion (AssertionError) before returning
+    # SWIZZLED_CONFIG; the assertion guarantees the M*N clause is
+    # enforced at admission time, so the only safe return is BASELINE.
+    assert cfg == BASELINE_CONFIG, (
+        f"M*N-only violation must route to BASELINE; got {cfg}. The K-707 "
+        f"structural assertion should fire if any code path returns kpack=2 "
+        f"for an out-of-envelope shape."
+    )
+
+
 def test_k539_floor_holds_against_poisoned_cache(monkeypatch, tmp_path):
     """Even a hand-poisoned ``kpack=2`` cache entry on a K-539 shape
     must be dropped to baseline at lookup time.

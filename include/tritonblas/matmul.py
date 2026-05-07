@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -9,9 +10,22 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import split_k_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# Set TRITONBLAS_DISABLE_SPLIT_K=1 to opt out of the auto-engaged SPLIT_K
+# small-M / large-K path (useful for A/B testing).
+_SPLIT_K_DISABLED = os.environ.get("TRITONBLAS_DISABLE_SPLIT_K", "").lower() in ("1", "true", "yes")
+
+
+def _should_use_split_k(selector) -> bool:
+    """True when the Origami selector picked SPLIT_K > 1 and the env hasn't opted out."""
+    if _SPLIT_K_DISABLED:
+        return False
+    return getattr(selector, "split_k", 1) > 1
 
 
 
@@ -365,6 +379,83 @@ def streamk_matmul_lt(
 
     return c
 
+def split_k_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    bias: Optional[torch.Tensor] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+):
+    """Launch the SPLIT_K data-parallel kernel for under-utilized shapes.
+
+    Caller MUST zero-initialise ``c`` first when ``selector.split_k > 1`` —
+    the split-K kernel uses ``tl.atomic_add`` to merge per-shard partials
+    into the output tile.
+    """
+    assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+    M, K = a.shape
+    _, N = b.shape
+
+    BLK_M   = selector.block_m
+    BLK_N   = selector.block_n
+    BLK_K   = selector.block_k
+    gsize_m = selector.group_m
+    SPLIT_K = max(1, int(selector.split_k))
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    even_k = (K % (BLK_K * SPLIT_K)) == 0
+
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    grid = (total_tiles, SPLIT_K)
+    _maybe_wrap(split_k_matmul, probe_tensor=a)[grid](
+        a,
+        b,
+        c,
+        a_scale if quantized else None,
+        b_scale if quantized else None,
+        bias if bias is not None else None,
+        M,
+        N,
+        K,
+        a.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        bias.stride(0) if bias is not None else 0,
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        SPLIT_K=SPLIT_K,
+        BIAS=bias is not None,
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        QUANTIZED=quantized,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+    return c
+
+
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
@@ -374,8 +465,12 @@ def matmul_lt(
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
-    else:
-        return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+    if _should_use_split_k(selector):
+        # Atomic-accumulating SPLIT_K requires C to start at 0.
+        c.zero_()
+        return split_k_matmul_lt(a, b, c, selector)
+    return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
+
 
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
@@ -386,8 +481,13 @@ def matmul_a8w8_lt(
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
-    else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+    if _should_use_split_k(selector):
+        c.zero_()
+        return split_k_matmul_lt(
+            a, b, c, selector,
+            a_scale=a_scale, b_scale=b_scale, quantized=True,
+        )
+    return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})
@@ -408,8 +508,10 @@ def _matmul(
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
-    else:
-        return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
+    if _should_use_split_k(selector):
+        out.zero_()
+        return split_k_matmul_lt(a, b, out, selector)
+    return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
 
 def _setup_context_matmul_backwards(
@@ -466,6 +568,9 @@ def _matmul_out(
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
+    elif _should_use_split_k(selector):
+        out.zero_()
+        split_k_matmul_lt(a, b, out, selector)
     else:
         persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
 
@@ -513,8 +618,10 @@ def matmul_a8w8(
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
-    else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+    if _should_use_split_k(selector):
+        c.zero_()
+        return split_k_matmul_lt(a, b, c, selector, a_scale=a_scale, b_scale=b_scale, quantized=True)
+    return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 def matmul_fp4(
     a: torch.Tensor,
@@ -647,8 +754,10 @@ def _addmm(
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
-    else:
-        return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
+    if _should_use_split_k(selector):
+        out.zero_()
+        return split_k_matmul_lt(a, b, out, selector, bias=bias)
+    return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
 
 
 def _setup_context_addmm_backwards(
@@ -716,6 +825,9 @@ def _addmm_out(
 
     if enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
+    elif _should_use_split_k(selector):
+        out.zero_()
+        split_k_matmul_lt(a, b, out, selector, bias=bias)
     else:
         persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
 

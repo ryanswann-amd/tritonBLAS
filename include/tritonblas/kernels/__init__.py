@@ -36,9 +36,13 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# Split-K kernel (auto-engaged when output tile count under-fills the device)
+from .split_k_gemm import split_k_matmul
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
+           'split_k_matmul',
            'fp4_matmul', 'stages']

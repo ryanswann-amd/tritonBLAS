@@ -262,6 +262,75 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+        # Choose a SPLIT_K factor for under-utilized small-M / large-K shapes.
+        self._split_k = self._select_split_k()
+
+    # ────────────────────────────────────────────────────────────────────
+    # SPLIT_K selection
+    # ────────────────────────────────────────────────────────────────────
+    # Candidate SPLIT_K factors searched in descending order; the first
+    # value that (a) keeps total launched programs under the device CU
+    # count and (b) leaves at least one BLOCK_K of work per program wins.
+    SPLIT_K_CANDIDATES = (16, 8, 4, 2, 1)
+
+    def _select_split_k(self) -> int:
+        """Pick a SPLIT_K factor in {1,2,4,8,16}.
+
+        Gating rule:
+
+            output_tiles = cdiv(M, BM) * cdiv(N, BN)
+            engage SPLIT_K only when ``output_tiles < num_CUs``
+
+        Otherwise the standard data-parallel grid already saturates the device
+        and SPLIT_K's atomic-add overhead is pure loss.
+
+        Among candidate factors we additionally require:
+          * ``sk * output_tiles <= num_CUs``        (one wave fits the device)
+          * ``cdiv(K, BLOCK_K) >= sk``              (at least one K-chunk per shard)
+          * ``cdiv(K, BLOCK_K) % sk == 0`` preferred (even split, no straggler)
+
+        Stream-K already does its own K-splitting via ``_compute_sk_grid`` and
+        owns that path, so we leave SPLIT_K = 1 when ``streamk`` is True.
+        """
+        if self.streamk:
+            return 1
+
+        bm = self._result.config.mt.m
+        bn = self._result.config.mt.n
+        bk = self._result.config.mt.k
+        output_tiles = (
+            ((self._m + bm - 1) // bm) * ((self._n + bn - 1) // bn)
+        )
+        num_cus = self._N_CU
+
+        # Gate: only consider SPLIT_K when the output grid under-fills the device.
+        if output_tiles == 0 or output_tiles >= num_cus:
+            return 1
+
+        k_tiles = max(1, (self._k + bk - 1) // bk)
+
+        # Prefer factors that divide the K-tile count evenly so every program
+        # owns the same chunk count (no straggler).
+        even = [
+            sk for sk in self.SPLIT_K_CANDIDATES
+            if sk <= k_tiles
+            and (k_tiles % sk == 0)
+            and (sk * output_tiles <= num_cus)
+        ]
+        if even:
+            return even[0]
+
+        # Fallback: allow uneven split but still respect the saturation gate
+        # and require at least 2 K-chunks per shard so atomics aren't wasted.
+        for sk in self.SPLIT_K_CANDIDATES:
+            if sk <= k_tiles and sk * output_tiles <= num_cus and (k_tiles // sk) >= 2:
+                return sk
+        return 1
+
+    @property
+    def split_k(self) -> int:
+        """Number of K-slices per output tile (1 = standard data-parallel)."""
+        return self._split_k
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

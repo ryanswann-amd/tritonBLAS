@@ -78,11 +78,18 @@ def test_recognized_modes(monkeypatch, mode):
 
 
 def test_envelope_default_is_singleton():
-    """The module-level default envelope is shared across callers."""
+    """The module-level default envelope is shared across callers.
+
+    K-707: ``k_max`` is now ``1024`` (down from 2048) — the empirical
+    K-654 re-sweep on MI300X / current ROCm + Triton stack measured the
+    K=2048 cohort regressing −12% under kpack=2, so the upper K bound
+    has been tightened to exclude that cohort. See the
+    :class:`KPack2Envelope` class docstring for the calibration trail.
+    """
     assert isinstance(DEFAULT_KPACK2_ENVELOPE, KPack2Envelope)
     # Default values match the published calibration.
     assert DEFAULT_KPACK2_ENVELOPE.k_min == 256
-    assert DEFAULT_KPACK2_ENVELOPE.k_max == 2048
+    assert DEFAULT_KPACK2_ENVELOPE.k_max == 1024
     assert DEFAULT_KPACK2_ENVELOPE.min_mn == 1024
     assert DEFAULT_KPACK2_ENVELOPE.max_block_k == 64
     assert DEFAULT_KPACK2_ENVELOPE.mainloop_iters_min == 16
@@ -94,9 +101,6 @@ def test_envelope_admits_in_band():
     # K=1024, BK=64 → mainloop_iters=16 (>= mainloop_iters_min). Tile check
     # skipped when block_m/n omitted, so the legacy 2-arg form still admits.
     assert is_medium_k_residual(4096, 4096, 1024, block_k=64)
-    # K=2048, BK=64 → mainloop_iters=32 (== mainloop_iters_max, still admitted
-    # since the upper bound is inclusive).
-    assert is_medium_k_residual(8192, 8192, 2048, block_k=64)
 
 
 def test_envelope_rejects_out_of_band_low_k():
@@ -104,7 +108,16 @@ def test_envelope_rejects_out_of_band_low_k():
 
 
 def test_envelope_rejects_out_of_band_high_k():
+    """K-707: K > 1024 is now out-of-band (was 2048 pre-K-707).
+
+    K=2048 cohort (the original K-580 calibration target) is rejected
+    because the K-654 re-sweep showed it regressing −12% on the
+    current MI300X / current ROCm + Triton stack stack.
+    """
     assert not is_medium_k_residual(4096, 4096, 4096, block_k=64)
+    # K-707-specific: K=2048 is now above k_max=1024 → rejected.
+    assert not is_medium_k_residual(8192, 8192, 2048, block_k=64)
+    assert not is_medium_k_residual(4096, 2048, 2048, block_k=64)
 
 
 def test_envelope_rejects_small_mn():
@@ -141,13 +154,37 @@ def test_envelope_rejects_large_grids():
     )
 
 
-def test_envelope_admits_benefit_cohort():
-    """Mainline benefit cohort: K/BK=32 AND tiles<=128 → admit."""
-    # All three benefit-cohort shapes at the autotuner-selected BM=BN=256, BK=64.
+def test_envelope_admits_in_band_at_k_max():
+    """In-band shape at the K-707 ``k_max=1024`` upper bound is admitted.
+
+    With BM=BN=256 and ``M*N`` above ``min_problem_area`` (=4M) and
+    tile-count ≤ ``tiles_max``, a K=1024 / BK=64 shape sits squarely
+    inside the post-K-707 envelope: mainloop_iters = 16
+    (== ``mainloop_iters_min``, inclusive lower bound).
+    """
+    # 4096x2048x1024 at BM=BN=256 → tiles = 16*8 = 128 (== tiles_max,
+    # inclusive). M*N = 8M > 4M (== min_problem_area, strict).
+    # mainloop_iters = 1024/64 = 16 (== mainloop_iters_min, inclusive).
+    assert is_medium_k_residual(
+        4096, 2048, 1024, block_k=64, block_m=256, block_n=256
+    )
+
+
+def test_envelope_rejects_k580_cohort_post_k707():
+    """K-580 cohort (K=2048) is now REJECTED post-K-707.
+
+    K-707 lowered ``k_max`` from 2048 to 1024 after the K-654 re-sweep
+    showed the K-580 cohort regressing −12% on the current stack. The
+    routing decision flips from ``SWIZZLED`` → ``BASELINE`` (kpack=1)
+    so the regression is structurally eliminated.
+    """
     for M, N, K in [(4096, 2048, 2048), (8192, 1024, 2048), (2048, 4096, 2048)]:
-        assert is_medium_k_residual(
+        assert not is_medium_k_residual(
             M, N, K, block_k=64, block_m=256, block_n=256
-        ), f"benefit shape {M}x{N}x{K} must remain admitted"
+        ), (
+            f"K-580 cohort shape {M}x{N}x{K} must be REJECTED post-K-707 "
+            f"(was admitted pre-K-707; current stack regresses −12% on this cohort)"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -210,17 +247,22 @@ def test_small_k_guard_rejects_small_problem_area():
     assert not is_medium_k_residual(2048, 2048, 1024, block_k=64)
 
 
-def test_small_k_guard_admits_k580_cohort():
-    """K-580 medium-K benefit cohort must NOT be flagged by small_k_guard.
+def test_small_k_guard_does_not_apply_to_k580_cohort():
+    """K-580 cohort (K=2048) must NOT be flagged by ``small_k_guard``.
 
-    All three benefit shapes have K=2048 (>512) AND M*N >> 2048*2048,
-    so the small-K floor does not fire and the kpack=2 routing remains
-    available.
+    K-707 rejects this cohort via ``medium_k_residual`` (k_max=1024
+    excludes K=2048), NOT via ``small_k_guard``. The small-K floor is
+    a structural guard for the K=512 cohort only — keeping the
+    sub-predicates orthogonal so each named reject rule retains a
+    single, unambiguous owner. (The K-580 cohort still has K=2048>512
+    and M*N >> 2048², so the small-K floor does not fire.)
     """
     for M, N, K in [(4096, 2048, 2048), (8192, 1024, 2048), (2048, 4096, 2048)]:
         assert not small_k_guard(M, N, K), (
-            f"K-580 benefit shape M={M} N={N} K={K} must NOT trip the "
-            f"small_k_guard (would erase the medium-K kpack=2 lift)"
+            f"K-580 cohort shape M={M} N={N} K={K} must NOT trip the "
+            f"small_k_guard — the K-707 rejection of this cohort lives "
+            f"in ``medium_k_residual`` (k_max=1024) so each sub-predicate "
+            f"owns a single named reject cohort"
         )
 
 
@@ -266,8 +308,10 @@ def test_admits_decomposes_into_subpredicates():
         # (M, N, K, BK, BM, BN, expected)
         # K-539 cohort — small_k_guard rejects.
         (2048, 2048, 512, 64, 256, 256, False),
-        # K-580 benefit shape — all three pass.
-        (4096, 2048, 2048, 64, 256, 256, True),
+        # K=1024 in-band benefit shape — admitted under post-K-707 envelope.
+        (4096, 2048, 1024, 64, 256, 256, True),
+        # K-580 cohort (K=2048) — REJECTED post-K-707 (k_max=1024).
+        (4096, 2048, 2048, 64, 256, 256, False),
         # Large-square loser — batched_skip rejects.
         (8192, 8192, 1024, 64, 128, 128, False),
         # Out-of-band high K — medium_k_residual rejects.
@@ -333,12 +377,51 @@ def test_k539_cohort_never_swizzles(monkeypatch, M, N, K, mode):
         (2048, 4096, 2048),
     ],
 )
-def test_k580_medium_k_cohort_swizzles_on_mode_on(monkeypatch, M, N, K):
-    """K-580 medium-K benefit cohort returns SWIZZLED on mode=on.
+@pytest.mark.parametrize("mode", ["off", "auto", "on"])
+def test_k580_cohort_routes_baseline_post_k707(monkeypatch, M, N, K, mode):
+    """K-580 cohort (K=2048) now routes BASELINE on every mode.
 
-    Companion to ``test_k539_cohort_never_swizzles``: the K-580 lift
-    is preserved (the K-707 floor does not over-reject the benefit
-    cohort).
+    K-707 lowered ``k_max`` from 2048 to 1024 after the K-654 PRD-guard
+    re-sweep on MI300X / current ROCm + Triton stack measured this cohort
+    regressing −12% under kpack=2 vs kpack=1. The PRD success criterion
+    "K-580 medium-K lift preserved" is now interpreted as "do not route
+    to kpack=2 when the lift no longer exists" — preserving timing
+    parity with the K-578 baseline rather than preserving an outdated
+    routing decision that empirically harms performance.
+
+    Pinned per-(shape, mode) so a regression on any single combination
+    is caught individually.
+    """
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", mode)
+    cfg = select_lds_config(
+        M, N, K,
+        "f16", "f16", "f16",
+        block_m=256, block_n=256, block_k=64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg == BASELINE_CONFIG, (
+        f"K-580 cohort shape M={M} N={N} K={K} on mode={mode} got "
+        f"{cfg}; must be BASELINE_CONFIG (kpack=1) post-K-707 because "
+        f"the kpack=2 path empirically regresses by −12% on this stack"
+    )
+
+
+@pytest.mark.parametrize(
+    "M,N,K",
+    [
+        (4096, 2048, 1024),
+        (2048, 4096, 1024),
+        (8192, 1024, 1024),
+    ],
+)
+def test_k_max_band_admits_kpack2_on_mode_on(monkeypatch, M, N, K):
+    """In-band shape at the K-707 ``k_max=1024`` upper bound is still
+    admitted to ``kpack=2`` under ``mode=on``.
+
+    Verifies the envelope hasn't been over-tightened — shapes inside
+    the new band (K ≤ 1024, mainloop_iters ≥ 16, M*N > 4M, tiles ≤ 128)
+    can still receive the swizzled config so autotune retains a
+    discoverable kpack=2 path for shapes that may benefit.
     """
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
     cfg = select_lds_config(
@@ -348,8 +431,9 @@ def test_k580_medium_k_cohort_swizzles_on_mode_on(monkeypatch, M, N, K):
         streamk=False, work_stealing=False,
     )
     assert cfg == SWIZZLED_CONFIG, (
-        f"K-580 benefit shape M={M} N={N} K={K} on mode=on got "
-        f"{cfg}; must be SWIZZLED_CONFIG (kpack=2)"
+        f"In-band K=1024 shape M={M} N={N} K={K} on mode=on got "
+        f"{cfg}; must be SWIZZLED_CONFIG (kpack=2) — envelope is "
+        f"over-tightened if this fails"
     )
 
 
@@ -423,9 +507,12 @@ def test_on_mode_returns_swizzled_only_inside_envelope(monkeypatch):
     ``auto``-mode envelope so a single routing contract holds.
     """
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
-    # In-envelope benefit shape → swizzled.
-    assert _select(M=4096, N=2048, K=2048, block_m=256, block_n=256, block_k=64) \
+    # In-envelope benefit shape (K=1024 post-K-707; was K=2048 pre-K-707).
+    assert _select(M=4096, N=2048, K=1024, block_m=256, block_n=256, block_k=64) \
         == SWIZZLED_CONFIG
+    # K-707: K=2048 is now out of envelope → baseline.
+    assert _select(M=4096, N=2048, K=2048, block_m=256, block_n=256, block_k=64) \
+        == BASELINE_CONFIG
     # Out-of-envelope small-K cohort → baseline (was buggy SWIZZLED pre-fix).
     assert _select(M=2048, N=2048, K=512, block_m=256, block_n=256, block_k=64) \
         == BASELINE_CONFIG
@@ -548,21 +635,23 @@ def test_cached_kpack2_preserved_for_in_envelope_shape_on_mode(monkeypatch, tmp_
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
     reset_cache_for_testing()
 
-    # Mainline-benefit shape: K=2048, BK=64 → 32 iters; M=4096, N=2048
-    # → tiles = 16*8 = 128 (== tiles_max, admitted); M*N = 8M >
-    # min_problem_area (=2048²); M, N ≥ min_mn — fully inside envelope.
-    # (Was 2048×2048×2048 pre-K-707, which sits exactly on the
-    # ``M*N <= 2048*2048`` floor and is rejected by ``small_k_guard``.)
+    # In-envelope shape post-K-707: K=1024 (== k_max, inclusive),
+    # BK=64 → 16 iters (== mainloop_iters_min, inclusive); M=4096,
+    # N=2048 → tiles = 16*8 = 128 (== tiles_max, admitted); M*N = 8M >
+    # min_problem_area (=4M); M, N ≥ min_mn (1024). Fully inside the
+    # post-K-707 envelope. (Was 4096×2048×2048 pre-K-707; K-707 lowered
+    # ``k_max`` from 2048 to 1024 after the K-654 re-sweep showed the
+    # K=2048 cohort regressing −12% under kpack=2.)
     cache = PersistentSwizzleCache(path=cache_path)
     key = (
-        "4096x2048x2048|f16|f16|f16|"
+        "4096x2048x1024|f16|f16|f16|"
         "256x256x64|ds|nows"
     )
     cache.set(key, SWIZZLED_CONFIG)
     reset_cache_for_testing()
 
     cfg = select_lds_config(
-        4096, 2048, 2048,
+        4096, 2048, 1024,
         "f16", "f16", "f16",
         256, 256, 64,
         streamk=False, work_stealing=False,
@@ -624,9 +713,9 @@ def test_warm_dispatch_is_consistent_after_autotune_cache_write(monkeypatch, tmp
     monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
     reset_cache_for_testing()
 
-    # Cold call (auto, empty cache) → baseline.
+    # In-envelope shape post-K-707 (K=1024; was K=2048 pre-K-707).
     args = dict(
-        M=4096, N=2048, K=2048,
+        M=4096, N=2048, K=1024,
         a_dtype="f16", b_dtype="f16", c_dtype="f16",
         block_m=256, block_n=256, block_k=64,
     )
@@ -658,10 +747,12 @@ def test_autotune_picks_faster_and_persists(monkeypatch, tmp_path):
     def timing(cfg: LDSSwizzleConfig) -> float:
         return 1.0 if cfg == SWIZZLED_CONFIG else 2.0
 
-    # Use an in-envelope benefit shape (BM=BN=256, BK=64, K=2048) so the
-    # autotuner is allowed to consider the swizzled candidate at all.
+    # Use an in-envelope benefit shape post-K-707 (BM=BN=256, BK=64, K=1024)
+    # so the autotuner is allowed to consider the swizzled candidate at all.
+    # K-707 lowered ``k_max`` from 2048 to 1024; K=2048 shapes are now out
+    # of the envelope and would be restricted to baseline-only candidates.
     cfg = select_lds_config(
-        4096, 2048, 2048,
+        4096, 2048, 1024,
         "f16", "f16", "f16",
         256, 256, 64,
         streamk=False, work_stealing=False,

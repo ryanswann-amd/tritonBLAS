@@ -135,6 +135,18 @@ class KPack2Envelope:
     * ``k_min`` / ``k_max`` — outer K-axis admittance window. Below
       ``k_min`` the bank-conflict win is too small to matter; above
       ``k_max`` the per-LDS-issue dependency chain dominates.
+      ``k_max = 1024`` was tightened from the original K-580 calibration
+      (2048) in K-707 after the K-654 PRD-guard re-sweep on
+      MI300X / current ROCm + Triton stack measured the K=2048 cohort
+      (``M, N`` ∈ {(4096,2048), (8192,1024), (2048,4096)}) regressing
+      −12% under ``mode=on`` (kpack=2 swizzled) versus ``mode=off``
+      (kpack=1 baseline). The kpack=2 prologue/epilogue overhead is no
+      longer amortized by the LDS bank-conflict savings on the K=2048
+      mainloop on this stack, so ``kpack=2`` is empirically a net loss
+      on the very cohort it was originally calibrated for. Tightening
+      ``k_max`` to ``1024`` excludes the regressing cohort while
+      keeping the K ∈ (512, 1024] band reachable for autotune
+      discovery on shapes that may still benefit.
     * ``k_floor`` — strict lower bound enforced by
       :meth:`small_k_guard` regardless of ``block_k``. Calibrated to
       ``512`` from the K-539 small-K cohort regression sweep:
@@ -183,7 +195,7 @@ class KPack2Envelope:
     """
 
     k_min: int = 256
-    k_max: int = 2048
+    k_max: int = 1024
     k_floor: int = 512
     min_problem_area: int = 2048 * 2048
     min_mn: int = 1024
@@ -649,15 +661,22 @@ def select_lds_config(
         block_m, block_n, block_k, streamk, work_stealing,
     )
 
-    # Structural assertion: the K-539 small-K / small-MN cohort must
-    # NEVER receive kpack=2 routing, regardless of mode, cache state,
-    # or any future bug in the envelope. This is the load-bearing
-    # invariant the K-707 PR enforces (cf. K-654 −27..−28% regression).
+    # Structural assertion: any non-baseline routing decision must lie
+    # inside the envelope at admission time. This catches every regression
+    # cohort the K-707 PR addresses in a single check:
+    #   * K-539 small-K / small-MN cohort (K<=512 or M*N<=2048²) is
+    #     rejected by ``small_k_guard`` (K-654: −27..−28%).
+    #   * K-580 cohort (K=2048) is rejected by ``medium_k_residual``
+    #     (k_max=1024 post-K-707; K-654 re-sweep: −12% on this stack).
+    #   * Large-grid cohort is rejected by ``batched_skip``.
+    # Mode/cache state cannot route a non-admitted shape to kpack=2.
     if cfg.kpack != BASELINE_CONFIG.kpack:
-        assert not DEFAULT_KPACK2_ENVELOPE.small_k_guard(M, N, K), (
-            f"lds_swizzle (kpack={cfg.kpack}) returned for K-539-cohort "
-            f"shape M={M} N={N} K={K} (K<=512 OR M*N<=2048*2048); "
-            f"this violates the K-707 small-K guard contract"
+        assert DEFAULT_KPACK2_ENVELOPE.admits(
+            M, N, K, block_k=block_k, block_m=block_m, block_n=block_n,
+        ), (
+            f"lds_swizzle (kpack={cfg.kpack}) returned for out-of-envelope "
+            f"shape M={M} N={N} K={K} (BK={block_k}, BM={block_m}, BN={block_n}); "
+            f"this violates the K-707 envelope contract"
         )
 
     return cfg

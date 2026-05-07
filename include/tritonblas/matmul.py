@@ -56,6 +56,17 @@ SMALL_M_BLOCK_K = 64
 # of the device idle.  At 0.5 we divert any shape that would otherwise use
 # fewer than half the CUs, which is the regime where K-splitting clearly wins.
 SMALL_M_GRID_FILL_RATIO = 0.5
+# Don't divert when M >= this — measurements show M=32 regresses on the
+# Stream-K path because the data-parallel persistent kernel already gets
+# good per-CU efficiency at M=32 (the 32-row MFMA accumulator dominates).
+SMALL_M_NO_DIVERT_M = 32
+# Stream-K splits K across CUs; with K below this, per-CU iteration count
+# is too low for the atomic-aggregation overhead to pay back.
+SMALL_M_MIN_K = 4096
+# When M=32, only divert if K and N are both above these (the only regime
+# where Stream-K wins for M=32 in measurements).
+SMALL_M_LARGE_K = 8192
+SMALL_M_LARGE_N = 4096
 
 
 def _next_pow2(x: int) -> int:
@@ -85,15 +96,42 @@ def _small_m_block_shape(M: int, N: int, K: int, selector) -> Tuple[int, int, in
     return blk_m, blk_n, blk_k
 
 
-def _should_route_small_m(M: int, N: int, selector) -> bool:
+def _should_route_small_m(M: int, N: int, K: int, selector) -> bool:
     """Return True when (M, N, K, selector) is a small-M shape that benefits
-    from being routed through the persistent-CTA Stream-K path."""
+    from being routed through the persistent-CTA Stream-K path.
+
+    Empirical gating (validated on MI300X, gfx942, fp16/bf16):
+
+      * ``M > SMALL_M_THRESHOLD``: data-parallel path already covers enough
+        tiles, the Stream-K overhead is not worth it.
+      * ``M == 32``: skipped — measurements show 0.4-0.5x regressions vs the
+        data-parallel persistent kernel at K <= 4096 and only flat/marginal
+        wins at K = 8192, so the diversion is net-negative.  The 32-row
+        accumulator already reaches ~37 TF/s on the data-parallel path for
+        N=K=8192, leaving little headroom for Stream-K to pay back its
+        atomic-aggregation cost.
+      * ``K < SMALL_M_MIN_K``: Stream-K splits K across CUs, so without
+        enough K work per CU the per-tile aggregation overhead dominates
+        and the diversion regresses.  The empirical break-even on MI300X
+        is around K=4096 for M<=16.
+      * Tile-fill check: when the data-parallel grid (with the small-M
+        tile shape) would already fill more than half the CUs, we leave
+        the shape on the original path.
+    """
     if M > SMALL_M_THRESHOLD:
+        return False
+    if M >= SMALL_M_NO_DIVERT_M:
+        # M=32 is broadly slower with Stream-K than with the data-parallel
+        # persistent kernel; only divert when K is huge AND N is huge (the
+        # only regime where measurements show net wins).
+        if not (K >= SMALL_M_LARGE_K and N >= SMALL_M_LARGE_N):
+            return False
+    if K < SMALL_M_MIN_K:
         return False
     # Use the *override* tile shape (not the origami pick) when judging fill
     # fraction — origami often picks BLOCK_N <= 64 for tiny M, which would
     # already pass the threshold but miss the bigger win from BLOCK_N=256.
-    BLK_M, BLK_N, _ = _small_m_block_shape(M, N, getattr(selector, "_k", 0), selector)
+    BLK_M, BLK_N, _ = _small_m_block_shape(M, N, K, selector)
     total_tiles = ((M + BLK_M - 1) // BLK_M) * ((N + BLK_N - 1) // BLK_N)
     num_cu = selector._hardware.N_CU
     return total_tiles < int(num_cu * SMALL_M_GRID_FILL_RATIO)
@@ -165,7 +203,7 @@ def persistent_matmul_lt(
     # We deliberately keep this gated to non-quantised, non-work-stealing
     # callers to limit the blast radius of the change.
     # ─────────────────────────────────────────────────────────────────────
-    if (not work_stealing) and (not quantized) and _should_route_small_m(M, N, selector):
+    if (not work_stealing) and (not quantized) and _should_route_small_m(M, N, K, selector):
         num_cu = selector._hardware.N_CU
         # Persistent-CTA tile shape: BLOCK_N up to 256 to spread N work across
         # CUs, BLOCK_M scaled to M (16/32/64), BLOCK_K=64 (or smaller for

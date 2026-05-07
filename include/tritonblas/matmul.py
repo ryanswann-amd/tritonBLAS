@@ -26,6 +26,37 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ---------------------------------------------------------------------------
+# Small-M dispatch
+# ---------------------------------------------------------------------------
+# Shapes with small M (e.g. M=1..32) generate very few output tiles in the
+# data-parallel persistent kernel.  For an MI300X (304 CUs) a shape like
+# M=16,N=1024,K=1024 produces only ~8 (M,N) tiles, leaving ~37x of the device
+# idle.  Routing such shapes through the Stream-K kernel with the program
+# grid pinned to the CU count fills the device by splitting K across CUs;
+# small num_warps keeps register pressure low for the skinny accumulator and
+# avoids spills.  The threshold is intentionally generous so we cover both
+# decoding-style (M=1..16) and small-batch attention (M=32).
+SMALL_M_THRESHOLD = 32
+SMALL_M_NUM_WARPS = 4
+# Only divert when the data-parallel grid would leave at least this fraction
+# of the device idle.  At 0.5 we divert any shape that would otherwise use
+# fewer than half the CUs, which is the regime where K-splitting clearly wins.
+SMALL_M_GRID_FILL_RATIO = 0.5
+
+
+def _should_route_small_m(M: int, N: int, selector) -> bool:
+    """Return True when (M, N, K, selector) is a small-M shape that benefits
+    from being routed through Stream-K to fill the device."""
+    if M > SMALL_M_THRESHOLD:
+        return False
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    total_tiles = ((M + BLK_M - 1) // BLK_M) * ((N + BLK_N - 1) // BLK_N)
+    num_cu = selector._hardware.N_CU
+    return total_tiles < int(num_cu * SMALL_M_GRID_FILL_RATIO)
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -81,6 +112,40 @@ def persistent_matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Small-M dispatch: divert under-utilised shapes (M<=32 with a
+    # data-parallel tile count well below NUM_CU) to the Stream-K kernel.
+    # The Stream-K loop already iterates over (N, K) splits internally and,
+    # when the program grid is pinned to the CU count, fills every CU even
+    # when only a handful of (M, N) tiles exist.  num_warps=4 keeps register
+    # pressure low for the skinny accumulator (BLOCK_M is typically 16 here).
+    # We deliberately keep this gated to non-quantised, non-work-stealing
+    # callers to limit the blast radius of the change.
+    # ─────────────────────────────────────────────────────────────────────
+    if (not work_stealing) and (not quantized) and _should_route_small_m(M, N, selector):
+        num_cu = selector._hardware.N_CU
+        # Clamp grid to the maximum useful program count.  In Stream-K, each
+        # program is responsible for at least one (tile, k_iter) pair; if the
+        # grid exceeds total_tiles * iters_per_tile, the surplus programs do
+        # no work, never set their lock, and the tile-owner aggregation loop
+        # hangs waiting on a lock that will never flip to 1.
+        BLK_M_ = selector.block_m
+        BLK_N_ = selector.block_n
+        BLK_K_ = selector.block_k
+        total_tiles_ = ((M + BLK_M_ - 1) // BLK_M_) * ((N + BLK_N_ - 1) // BLK_N_)
+        iters_per_tile_ = max(1, (K + BLK_K_ - 1) // BLK_K_)
+        max_useful_grid = total_tiles_ * iters_per_tile_
+        sm_grid = min(num_cu, max_useful_grid)
+        return streamk_matmul_lt(
+            a, b, c, selector,
+            config=None,
+            bias=bias,
+            sk_grid=sm_grid,
+            quantized=False,
+            work_stealing=False,
+            num_warps_override=SMALL_M_NUM_WARPS,
+        )
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n
@@ -200,10 +265,10 @@ def persistent_matmul_lt(
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
@@ -211,6 +276,7 @@ def streamk_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    num_warps_override: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -241,7 +307,7 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = num_warps_override if num_warps_override is not None else 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -250,6 +316,15 @@ def streamk_matmul_lt(
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
+        # When the caller forces a specific grid (e.g. small-M dispatch routes
+        # through Stream-K with grid=NUM_CU to fill the device), recompute the
+        # tail count against that grid.  Without this the value derived above
+        # from selector.sk_grid is stale and the kernel writes through the
+        # wrong path (often producing zero output for grid > total_tiles).
+        total_tiles_streamk = total_tiles % total_programs_streamk
+        if total_programs_streamk > total_tiles:
+            # All tiles are split across the K dimension, no full-tile prologue.
+            total_tiles_streamk = total_tiles
 
     grids = total_programs_streamk
     block_size = BLK_M * BLK_N

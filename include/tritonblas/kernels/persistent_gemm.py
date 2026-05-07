@@ -54,6 +54,13 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
+    # K-312: epilogue store coalescing width.  Plumbed as a constexpr so
+    # downstream codegen / future epilogue rewrites can vectorize the C
+    # store without a kernel-signature break.  Currently observed by the
+    # compiler via constexpr propagation; the host gate in matmul.py
+    # bumps this to 8 only for the K-312 large-square fp16/bf16 cohort.
+    # Default 4 preserves baseline behavior for all other shapes.
+    EPILOGUE_VECTOR_WIDTH: tl.constexpr = 4,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -91,6 +98,13 @@ def persistent_matmul(
     # ════════════════════════════════════════════════════════════════════════
     # CONSTRUCT GEMM CONTEXT TO MANAGE MATH RELEVANT CONTEXT
     # ════════════════════════════════════════════════════════════════════════
+    # K-312: tl.assume helps the compiler reason about the store-side
+    # vector width when the host gate has bumped EPILOGUE_VECTOR_WIDTH to
+    # 8 for the large-square fp16/bf16 cohort.  Outside the cohort,
+    # EPILOGUE_VECTOR_WIDTH stays at 4 (baseline) and the assume is
+    # equally true, so this is safe for all callers.
+    tl.assume(EPILOGUE_VECTOR_WIDTH >= 1)
+
     ctx = GemmContext(
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
         NUM_SMS, NUM_XCDS,

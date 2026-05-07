@@ -1,3 +1,4 @@
+import os
 import torch
 
 # 256-byte separation between atomic counters to avoid false sharing
@@ -5,6 +6,86 @@ import torch
 COUNTER_STRIDE = 64
 
 MAX_SK_TILES = 512
+
+
+# ---------------------------------------------------------------------------
+# K-312 large-square fp16/bf16 cohort overrides.
+#
+# Background: K-268 measured a 0.838x geomean on M,N in {4096,8192},
+# K in {4096,8192,16384} for fp16/bf16 vs hipBLASLt; K-250 ATT traces
+# attributed the residual to (a) epilogue store coalescing, (b) L2 hit-rate,
+# and (c) occupancy lost to register spills - NOT mainloop MFMA throughput.
+#
+# This helper centralises the cohort gate.  Per the K-654 lesson, the
+# gating predicate MUST live in select_*_config() itself (not be merely
+# consulted by the autotuner) so that:
+#   (a) mode=on cannot regress shapes outside the envelope,
+#   (b) cache hits on out-of-envelope shapes fall back to baseline,
+#   (c) sister cohorts (e.g. K-539 small-K) are not poisoned.
+#
+# The gate is conservative:
+#   - dtype must be fp16 or bf16 (fp8 / int8 / fp4 take dispatch paths
+#     with different epilogues; out of scope here),
+#   - M*N >= 16M (covers 4096*4096 and larger; rejects 2048-square),
+#   - K     >= 4096  (rejects K-539 small-K cohort that K-654 protected).
+#
+# IMPORTANT — the K-312 BUG_FIX initial measurement (24-shape MI300X
+# sweep, 2026-05-07, container rocm/pytorch:rocm7.2_ubuntu24.04, c42
+# node g09u19) showed that the proposed (waves_per_eu=2, kpack=2,
+# EPILOGUE_VECTOR_WIDTH=8) lever REGRESSES this cohort:
+#
+#     geomean tb_on / tb_off = 0.9352  over 24 shapes
+#     22 / 24 shapes regress 3.2% – 10.9%
+#     ratio vs torch falls 0.6310 -> 0.5922
+#
+# This corroborates K-895's NEGATIVE_RESULT_VERIFIED finding for the
+# sister kpack=2 + num_warps=4 lever on the same anchor shape
+# (1024×8192×8192 bf16, –16.3 pp). The rerouted plan in
+# project_context/tritonblas/persistent_residuals.md is K-633 upstream
+# codegen OR per-shape Triton autotune — neither lands in this PR.
+#
+# So this gate ships **OFF by default** (opt-in via
+# TRITONBLAS_ENABLE_K312_OVERRIDES=1) so the cohort detection,
+# kernel-side EPILOGUE_VECTOR_WIDTH constexpr, and override plumbing
+# are all in place for the future autotune-driven landing without
+# regressing production today.  The K-654 anti-pattern is "knob
+# applied unconditionally" — opt-in OFF-by-default is the safe form.
+# ---------------------------------------------------------------------------
+
+_K312_FP_DTYPES = (torch.float16, torch.bfloat16)
+_K312_MN_MIN = 16 * 1024 * 1024  # 16M elements (4096*4096)
+_K312_K_MIN = 4096
+_K312_DEFAULT_OVERRIDES = {
+    "waves_per_eu": 2,           # K-250 ATT: recover occupancy from register spills
+    "kpack": 2,                  # K-580/K-654: pair LDS reads, akin to lds_swizzle ON
+    "epilogue_vector_width": 8,  # K-250 epilogue store coalescing (currently 4)
+}
+
+
+def large_square_cohort_overrides(M, N, K, a_dtype, b_dtype):
+    """Return kernel knob overrides for the K-312 cohort, else None.
+
+    Returns a dict with keys ``waves_per_eu``, ``kpack``,
+    ``epilogue_vector_width`` ONLY if (M,N,K,dtype) is in the K-312
+    envelope AND the opt-in env var ``TRITONBLAS_ENABLE_K312_OVERRIDES``
+    is set.  Returns None otherwise (default: baseline behavior).
+
+    Default is OFF because the initial measurement (see module docstring
+    above) showed a ~6.5% geomean regression on the cohort.  Land the
+    plumbing now; opt-in stays OFF until a per-shape autotune table
+    (K-895 reroute) supplies a measured-positive override set.
+    """
+    if os.environ.get("TRITONBLAS_ENABLE_K312_OVERRIDES", "").lower() not in ("1", "true", "yes"):
+        return None
+    if a_dtype not in _K312_FP_DTYPES or b_dtype not in _K312_FP_DTYPES:
+        return None
+    try:
+        mn = int(M) * int(N)
+    except (TypeError, ValueError):
+        return None
+    if mn < _K312_MN_MIN or int(K) < _K312_K_MIN:
+        return None
+    return dict(_K312_DEFAULT_OVERRIDES)
 
 
 class MatmulConfig:

@@ -11,7 +11,12 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
-from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .config import (
+    MatmulConfig,
+    matmul_preamble,
+    COUNTER_STRIDE,
+    large_square_cohort_overrides,
+)
 
 
 
@@ -102,6 +107,17 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # K-312 cohort gate: large-square fp16/bf16 epilogue + occupancy lift.
+    # See include/tritonblas/config.py for the predicate and rationale.
+    # The gate is enforced HERE (not in the autotuner) so that mode=on
+    # cannot regress shapes outside the envelope - K-654 anti-pattern.
+    epilogue_vector_width = 4  # baseline; upper bound for store coalescing
+    _k312 = large_square_cohort_overrides(M, N, K, a.dtype, b.dtype)
+    if _k312 is not None and not quantized:
+        waves_per_eu = _k312["waves_per_eu"]
+        kpack = _k312["kpack"]
+        epilogue_vector_width = _k312["epilogue_vector_width"]
+
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     if num_xcds > 0:
@@ -189,6 +205,7 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            EPILOGUE_VECTOR_WIDTH=epilogue_vector_width,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,

@@ -9,6 +9,7 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import batched_persistent_matmul
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
@@ -390,6 +391,181 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+def batched_persistent_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    bias: Optional[torch.Tensor] = None,
+):
+    """
+    Single-launch batched GEMM host wrapper.
+
+    Inputs are rank-3: a is (Z, M, K), b is (Z, K, N), c is (Z, M, N).
+    All batches must share the same (M, N, K). Block sizes come from the
+    Origami selector chosen for the per-batch (M, N, K). The grid fuses
+    BATCH into the program-id space so a Python loop is not required.
+    """
+    assert a.dim() == 3 and b.dim() == 3 and c.dim() == 3, "rank-3 expected"
+    Z, M, K = a.shape
+    Zb, Kb, N = b.shape
+    Zc, Mc, Nc = c.shape
+    assert Z == Zb == Zc, "Inconsistent batch dim"
+    assert K == Kb, "Incompatible Inner Dimensions"
+    assert M == Mc and N == Nc, "Inconsistent output shape"
+
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
+    BLK_K = selector.block_k
+    gsize_m = selector.group_m
+    num_xcds = selector.num_sms
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    tiles_per_batch = total_blocks_M * total_blocks_N
+    even_k = (K % BLK_K == 0)
+
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    chunk_size = gsize_m * gsize_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, tiles_per_batch // num_xcds))
+    else:
+        num_xcds = 1
+
+    grid = (Z * tiles_per_batch,)
+
+    _maybe_wrap(batched_persistent_matmul, probe_tensor=a)[grid](
+        a,
+        b,
+        c,
+        bias if bias is not None else None,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        c.stride(2),
+        bias.stride(0) if bias is not None else 0,
+        BATCH=Z,
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=tiles_per_batch,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        BIAS=bias is not None,
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return c
+
+
+@triton_op("tritonblas::_bmm", mutates_args={})
+def _bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> torch.Tensor:
+    """
+    True batched matmul (rank-3 inputs).
+
+    Dispatches a single fused-batch Triton launch instead of looping per batch
+    on the host (closes the Tcold gap surfaced by K-654/K-659).
+    """
+    assert a.dim() == 3 and b.dim() == 3, "tritonblas.bmm expects rank-3 inputs"
+    assert a.shape[0] == b.shape[0], "Incompatible Batch Dimensions"
+    assert a.shape[2] == b.shape[1], "Incompatible Inner Dimensions"
+    Z, M, K = a.shape
+    _, _, N = b.shape
+
+    out = a.new_empty(Z, M, N)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
+    return batched_persistent_matmul_lt(a, b, out, selector)
+
+
+def _setup_context_bmm_backwards(ctx, inputs, output):
+    a, b = inputs
+    ctx.save_for_backward(a, b)
+
+
+def _bmm_backwards(ctx, grad_output):
+    a, b = ctx.saved_tensors
+    grad_output_cont = grad_output.contiguous()
+    # grad_a = grad_output @ b^T, grad_b = a^T @ grad_output (batched)
+    grad_a = bmm(grad_output_cont, b.transpose(-1, -2).contiguous())
+    grad_b = bmm(a.transpose(-1, -2).contiguous(), grad_output_cont)
+    return grad_a, grad_b
+
+
+_bmm.register_autograd(_bmm_backwards, setup_context=_setup_context_bmm_backwards)
+
+
+@triton_op("tritonblas::_bmm_out", mutates_args={'out'})
+def _bmm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    assert a.dim() == 3 and b.dim() == 3, "tritonblas.bmm expects rank-3 inputs"
+    assert a.shape[0] == b.shape[0], "Incompatible Batch Dimensions"
+    assert a.shape[2] == b.shape[1], "Incompatible Inner Dimensions"
+    Z, M, K = a.shape
+    _, _, N = b.shape
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
+    batched_persistent_matmul_lt(a, b, out, selector)
+    return None
+
+
+def bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
+    """
+    Batched matrix multiply: out[z] = a[z] @ b[z].
+
+    Args:
+      a: (Z, M, K) tensor
+      b: (Z, K, N) tensor
+      out: optional (Z, M, N) destination tensor.
+
+    Returns:
+      (Z, M, N) result; None if `out` was supplied.
+    """
+    if out is None:
+        return _bmm(a, b)
+
+    if torch.is_grad_enabled() and (a.requires_grad or b.requires_grad or out.requires_grad):
+        raise RuntimeError(
+            "tritonblas.bmm(): functions with out=... arguments don't support "
+            "automatic differentiation, but one of the arguments requires grad."
+        )
+    return _bmm_out(a, b, out)
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -480,6 +656,11 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Rank-3 inputs go through the true batched-GEMM single-launch entrypoint
+    # to avoid paying Tcold launch overhead per batch element (K-684).
+    if a.dim() == 3 and b.dim() == 3:
+        return bmm(a, b, out=out)
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

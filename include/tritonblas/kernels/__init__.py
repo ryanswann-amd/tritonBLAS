@@ -36,9 +36,13 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# Batched persistent kernel — single-launch BMM (K-684)
+from .batched_persistent_gemm import batched_persistent_matmul
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
+           'batched_persistent_matmul',
            'fp4_matmul', 'stages']

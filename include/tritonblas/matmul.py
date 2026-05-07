@@ -26,6 +26,144 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ---------------------------------------------------------------------------
+# CUDA-graph-replay fast path for tiny shapes
+# ---------------------------------------------------------------------------
+#
+# Post-K-186 the dispatch overhead dropped from ~225us to ~1us, but K-146 shape
+# decomposition shows tiny shapes (M=16, N<=128) still spend the majority of
+# wall time in residual host-side work: arg-binding through triton_op, grid
+# computation, kernel-launch latency.  hipBLASLt amortizes this with a
+# precompiled launch descriptor; we do the equivalent here by capturing the
+# kernel launch into a torch.cuda.CUDAGraph (HIP graph on ROCm) and replaying
+# it on subsequent calls.
+#
+# The cache key captures everything that affects the captured launch: shape,
+# dtype, layout, and dispatch flags.  Static input/output tensors stay alive
+# for the lifetime of the cache entry so graph.replay() always touches the
+# same device pointers.  copy_() into the static buffers is a single 16-byte
+# DMA for the M=16,N=128,K=128 fp16 case -- much cheaper than the residual
+# Python tail it replaces.
+#
+# Default gate (M*N*K < 20_000_000) targets the K-146 tiny cohort
+# (M<=32, including M=16,N=1024,K=1024 which has work=16.8M) while leaving
+# medium/large shapes on the existing path where dispatch cost is already
+# amortized by GPU compute.  20M is well below medium 1024^3 (~1.07G work).
+_TINY_PROBLEM_THRESHOLD = 20_000_000
+_graph_cache: Dict[Tuple, Any] = {}
+
+
+def _graph_cache_key(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
+                    enable_streamk: bool, work_stealing: bool) -> Tuple:
+    return (
+        tuple(a.shape), tuple(b.shape), tuple(out.shape),
+        a.dtype, b.dtype, out.dtype,
+        tuple(a.stride()), tuple(b.stride()), tuple(out.stride()),
+        a.device.index,
+        bool(enable_streamk), bool(work_stealing),
+    )
+
+
+def _build_graph_entry(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
+                      enable_streamk: bool, work_stealing: bool) -> Dict[str, Any]:
+    """Capture {persistent,streamk}_matmul_lt into a CUDAGraph.
+
+    Allocates persistent static input/output buffers that live for the
+    lifetime of the cache entry, performs warmup launches on a side stream
+    to avoid contaminating the default stream, then captures the kernel
+    launch into a torch.cuda.CUDAGraph.
+    """
+    M, K = a.shape
+    _, N = b.shape
+    selector = _make_matmul_selector(
+        M, N, K, a.dtype, b.dtype, out.dtype, a.device,
+        streamk=enable_streamk,
+    )
+    config = matmul_preamble(selector) if work_stealing else None
+
+    device = a.device
+    static_a = torch.empty_like(a)
+    static_b = torch.empty_like(b)
+    static_out = torch.empty_like(out)
+    static_a.copy_(a)
+    static_b.copy_(b)
+
+    def _launch():
+        if enable_streamk:
+            streamk_matmul_lt(static_a, static_b, static_out, selector, config,
+                              work_stealing=work_stealing)
+        else:
+            persistent_matmul_lt(static_a, static_b, static_out, selector, config,
+                                 work_stealing=work_stealing)
+
+    # Warmup on a side stream -- compiles the kernel and does any first-call
+    # initialization before we begin capture.
+    s = torch.cuda.Stream(device=device)
+    s.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(s):
+        for _ in range(3):
+            _launch()
+    torch.cuda.current_stream(device).wait_stream(s)
+    torch.cuda.synchronize(device)
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        _launch()
+
+    return {
+        "graph": g,
+        "static_a": static_a,
+        "static_b": static_b,
+        "static_out": static_out,
+        "selector": selector,
+        "config": config,
+    }
+
+
+def _graph_replay_matmul(a: torch.Tensor, b: torch.Tensor,
+                         out: Optional[torch.Tensor],
+                         enable_streamk: bool, work_stealing: bool) -> torch.Tensor:
+    """Run matmul via cached CUDAGraph replay.  Falls back to allocation
+    if `out` is None, in which case we allocate a fresh result tensor each
+    call (matching the standard matmul() contract)."""
+    M, K = a.shape
+    _, N = b.shape
+    if out is None:
+        out = a.new_empty(M, N)
+
+    key = _graph_cache_key(a, b, out, enable_streamk, work_stealing)
+    entry = _graph_cache.get(key)
+    if entry is None:
+        entry = _build_graph_entry(a, b, out, enable_streamk, work_stealing)
+        _graph_cache[key] = entry
+
+    # Copy live inputs into the captured static buffers, then replay.
+    entry["static_a"].copy_(a)
+    entry["static_b"].copy_(b)
+    entry["graph"].replay()
+    out.copy_(entry["static_out"])
+    return out
+
+
+def _should_use_graph(a: torch.Tensor, b: torch.Tensor, use_cuda_graph: bool) -> bool:
+    """Gate: only enable the graph path for opt-in tiny problems where the
+    host tail dominates compute."""
+    if not use_cuda_graph:
+        return False
+    if a.requires_grad or b.requires_grad:
+        return False
+    if torch.is_grad_enabled() and (a.requires_grad or b.requires_grad):
+        return False
+    M, K = a.shape
+    _, N = b.shape
+    return (M * N * K) < _TINY_PROBLEM_THRESHOLD
+
+
+def clear_graph_cache() -> None:
+    """Clear the CUDA-graph cache (useful for tests / memory pressure)."""
+    _graph_cache.clear()
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -479,7 +617,14 @@ def matmul(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
+    use_cuda_graph: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Opt-in CUDA-graph fast path for tiny shapes (gated on M*N*K).
+    # Bypasses the triton_op wrapper -- no autograd, no fake-tensor probing,
+    # no per-call grid math: just copy_() into static buffers and graph.replay().
+    if _should_use_graph(a, b, bool(use_cuda_graph)):
+        return _graph_replay_matmul(a, b, out, bool(enable_streamk), bool(work_stealing))
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

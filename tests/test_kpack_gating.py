@@ -180,13 +180,16 @@ class TestKpackGatingGPU:
             sel2 = _make_selector(M, N, _SMALL_K, kpack=2)
             c2 = torch.empty(M, N, device="cuda", dtype=_DTYPE)
 
-            # Reach past the gate: monkey-patch _kpack_for_selector for
-            # this single benchmark loop so we can measure raw kpack=2.
-            from tritonblas import matmul as _mm
+            # Reach past the gate: monkey-patch ``_kpack_for_selector`` in
+            # the matmul submodule so we can measure raw kpack=2 latency
+            # without rewiring the gate logic itself.  ``tritonblas.matmul``
+            # resolves to the public matmul function, so we walk sys.modules.
+            import sys
 
-            orig = _mm._kpack_for_selector
+            mm = sys.modules["tritonblas.matmul"]
+            orig = mm._kpack_for_selector
             try:
-                _mm._kpack_for_selector = lambda sel, K: 2
+                mm._kpack_for_selector = lambda sel, K: 2
                 for _ in range(10):
                     persistent_matmul_lt(a, b, c2, sel2)
                 torch.cuda.synchronize()
@@ -201,7 +204,7 @@ class TestKpackGatingGPU:
                     samples.append(s.elapsed_time(e))
                 t2 = statistics.median(samples)
             finally:
-                _mm._kpack_for_selector = orig
+                mm._kpack_for_selector = orig
 
             assert torch.allclose(c2, ref, atol=2e-2, rtol=2e-2), (
                 f"kpack=2 numerically wrong at M={M} N={N}"

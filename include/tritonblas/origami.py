@@ -60,53 +60,20 @@ def check_triton_lds_capacity(
 
 
 # ---------------------------------------------------------------------------
-# Batched-GEMM dispatch policy
+# Batched-GEMM tile policy lives in OrigamiMatmulSelector
 # ---------------------------------------------------------------------------
 #
-# The single-launch batched kernel (``tritonblas.bmm``) wins when each per-batch
-# GEMM is small enough that per-call dispatch overhead dominates and there is
-# spare CU capacity to co-issue many batches.  Once each per-batch GEMM is
-# already large enough to saturate the whole GPU on its own, the well-tuned
-# single-shot ``matmul`` path beats the batched kernel because
-#  (a) the batched kernel cannot use Stream-K / work-stealing optimisations,
-#  (b) co-issuing many large grids only thrashes the L2 between batches.
+# Earlier iterations of the batched-matmul work split the policy across two
+# places: a "select_bmm_strategy" function here that decided whether to fuse
+# launches, plus an out-of-band tile fixup applied after Origami had already
+# returned a tile.  Code review (S-002 iter 2) flagged that as a layering
+# violation — the next batched residual would need yet another out-of-band
+# override.
 #
-# This threshold expresses the crossover as a per-batch output-tile area.
-# Empirically calibrated on MI300X across a batched-GEMM residual cohort
-# (B in {2,4,8,16,32}, square shapes 256..4096): per-batch output area
-# >= 4096*4096 elements (~16 Mi output values) is where the loop variant
-# becomes faster.  Below it the single-launch BMM is a clear win, above
-# it the loop wins.
-#
-# Exposed as a module-level constant + named function so the policy lives next
-# to the rest of the tile-selection heuristic rather than as a magic number
-# inside ``matmul.py``.
-BMM_SATURATION_PER_BATCH_AREA = 4096 * 4096
-
-
-def select_bmm_strategy(M: int, N: int, K: int, B: int) -> str:
-    """Return the dispatch strategy for a (B, M, K) x (B, K, N) batched GEMM.
-
-    Keyed on ``(M, N, K, B)`` per the project requirement.  ``K`` is accepted
-    so the policy can be extended in future to weigh K-direction work, but is
-    not currently consulted (Stream-K is the right tool for K-bound shapes
-    and is not engaged through this path).
-
-    Returns either:
-      * ``"single_launch"`` — call the batched persistent kernel once over all
-        ``B`` slices,
-      * ``"per_batch_loop"`` — fall back to ``B`` independent single-shot
-        ``matmul`` calls (preserves the heavily-tuned non-batched kernel for
-        large-per-batch problems).
-    """
-    if B <= 1:
-        # No batching to amortise; the single-launch path degenerates to the
-        # non-batched kernel.  Either is fine; keep the single-launch path so
-        # the kernel doesn't change behaviour at the B==1 boundary.
-        return "single_launch"
-    if (M * N) >= BMM_SATURATION_PER_BATCH_AREA:
-        return "per_batch_loop"
-    return "single_launch"
+# The selector now owns the entire batched-vs-rank-2 tile policy through the
+# ``batch=B`` constructor argument, and the dispatcher always issues exactly
+# one fused launch (no Python-side fallback to a per-batch loop).  See the
+# ``_apply_batched_tile_policy`` method below for the empirical thresholds.
 
 
 class OrigamiMatmulSelector:
@@ -159,6 +126,7 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
+        batch: int = 1,
     ):
         # Save tensor sizes
         self._m = m
@@ -166,6 +134,12 @@ class OrigamiMatmulSelector:
         self._k = k
         self.streamk = streamk
         self._num_stages = num_stages
+        # ``batch`` is part of the input contract so the tile policy can be
+        # batch-aware without callers monkey-patching the result from the
+        # outside.  ``batch == 1`` is the rank-2 baseline; ``batch >= 2``
+        # opts in to the batched-GEMM tile heuristic in
+        # ``_apply_batched_tile_policy``.
+        self._batch = batch
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -312,6 +286,43 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+        # Batched-aware tile policy.  When ``batch >= 2`` the selector picks
+        # tile shapes that keep the MFMA pipes saturated across many small
+        # batched problems (see ``_apply_batched_tile_policy`` for the
+        # empirical thresholds and the calibration data).
+        if self._batch >= 2:
+            self._apply_batched_tile_policy()
+
+    def _apply_batched_tile_policy(self):
+        """Override the per-shape tile when running a batched (B>=2) GEMM.
+
+        Origami's per-shape selection is calibrated for one-shot rank-2
+        GEMMs.  For the batched residuals identified in the MI300X full
+        sweep (B=2 2048^3 fp16, B=8 1024^3 bf16, plus the wider B={4,8,16,32}
+        cohort up to 1024 per side) it picks 64x64 tiles with BLK_K=256
+        which leave the MFMA pipes under-fed when N batched grids are
+        co-issued.
+
+        Tile-size sweeps on MI300X (the per-shape numbers shown in the
+        bench CSV) show that for ``M, N >= 512`` with Origami picking
+        either dim < 128, bumping to ``128x128`` (BLK_K=64, GROUP_M=4)
+        wins by 1.4-1.8x with no regression on smaller per-batch shapes.
+        For shapes where Origami already picks >= 128 (e.g. 4096^3) we
+        trust its selection — that's the boundary case where the rank-2
+        and batched paths converge.
+
+        The policy lives on the selector (rather than as a post-selection
+        patch in ``bmm.py``) so the next batched residual that needs a
+        different tile knob can be expressed in one place.
+        """
+        if self._m >= 512 and self._n >= 512 and (
+            self._result.config.mt.m < 128 or self._result.config.mt.n < 128
+        ):
+            self._result.config.mt.m = 128
+            self._result.config.mt.n = 128
+            self._result.config.mt.k = 64
+            self._workgroup_mapping = 4
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

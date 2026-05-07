@@ -102,6 +102,23 @@ def check_triton_lds_capacity(
     return usage <= lds_capacity
 
 
+# Small-M cohort threshold: problems with M <= SMALL_M_THRESHOLD waste most of
+# the M-dim work in tiles with BM>=64 (e.g. M=16 with BM=64 fills only 25% of
+# the tile rows). For these shapes we restrict BM to the smallest power of two
+# that covers M (16 or 32) and bias BN toward 128/256/512 so the kernel still
+# has enough N work per tile to keep the matrix-instruction pipeline full. We
+# also auto-enable StreamK so the grid scales along K-dim and recovers the wave
+# parallelism that pure data-parallel mode loses when total tiles << N_CU.
+SMALL_M_THRESHOLD = 32
+
+
+def _round_up_pow2(x: int) -> int:
+    """Smallest power of two >= max(x, 1)."""
+    if x <= 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
 class OrigamiMatmulSelector:
     @staticmethod
     def estimate_triton_lds(
@@ -153,7 +170,15 @@ class OrigamiMatmulSelector:
         self._m = m
         self._n = n
         self._k = k
-        self.streamk = streamk
+        # Small-M cohort: skinny-M GEMMs where the tile selector would otherwise
+        # pick BM>=64 and waste most of the M-dim work. We force StreamK so the
+        # grid can split along K when the data-parallel grid (M_tiles * N_tiles)
+        # is much smaller than N_CU. The kernel-routing layer (matmul.py) reads
+        # `use_streamk` to decide which kernel to launch, even if the caller
+        # passed enable_streamk=False.
+        self._small_m = m <= SMALL_M_THRESHOLD
+        self._user_streamk = streamk
+        self.streamk = streamk or self._small_m
         self._num_stages = num_stages
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
@@ -297,6 +322,15 @@ class OrigamiMatmulSelector:
     def sk_grid(self):
         return self._grid
 
+    @property
+    def use_streamk(self):
+        """True when kernel dispatch should route to streamk_matmul_lt.
+
+        Set whenever the user requested StreamK *or* when the small-M cohort
+        is active and we need StreamK's K-split grid to recover wave parallelism.
+        """
+        return bool(self.streamk)
+
     def _compute_sk_grid(self):
         # Grid model constants for StreamK
         split_factors = [8, 6, 4, 3, 2, 1]
@@ -392,9 +426,34 @@ class OrigamiMatmulSelector:
 
         mi = self._infer_matrix_instruction_dimensions()
 
+        # Default candidate ranges
+        bm_range = list(self._block_mn_range)
+        bn_range = list(self._block_mn_range)
+
+        # Small-M cohort: BM>=64 wastes M-dim threads (e.g. M=16 with BM=64
+        # only fills 25% of the tile rows, halving effective TFLOPS even at
+        # 100% CU occupancy). Cap BM at the smallest power of two covering M
+        # (16 or 32). At the same time, prefer BN>=128 — with BM<=32 the M
+        # dimension only feeds one MFMA row per warp, so we need wide N tiles
+        # to amortize the K-loop and keep waves resident. Smaller BNs are
+        # still kept as fallbacks for tiny N.
+        if self._small_m:
+            small_m_cap = max(16, _round_up_pow2(self._m))
+            small_m_cap = min(small_m_cap, SMALL_M_THRESHOLD)
+            bm_range = [b for b in self._block_mn_range if b <= small_m_cap]
+            if not bm_range:
+                bm_range = [16]
+            preferred_bn = [b for b in self._block_mn_range if b >= 128]
+            if preferred_bn:
+                bn_range = preferred_bn
+            # If the problem's N is smaller than the smallest preferred BN,
+            # let the original range back in so we still have valid configs.
+            if self._n < min(bn_range):
+                bn_range = list(self._block_mn_range)
+
         for blk_m, blk_n, blk_k, occupancy in itertools.product(
-            self._block_mn_range,
-            self._block_mn_range,
+            bm_range,
+            bn_range,
             self._block_k_range,
             self._kernel_occupancy_range,
         ):

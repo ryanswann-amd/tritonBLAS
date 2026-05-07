@@ -447,6 +447,27 @@ def _matmul_out(
     return None
 
 
+# Skinny-M cohort threshold. Shapes with M<=this many rows benefit from
+# the streamk K-split path because BLK_M=16 already only fills one MFMA-row
+# per tile, leaving CU coverage in the M*N grid alone at <30% on MI300X
+# (304 CUs) for typical N. Auto-route through the streamk path so
+# OrigamiMatmulSelector._compute_sk_grid multiplies the grid by 2-8x.
+_SKINNY_M_THRESHOLD = 32
+
+
+def _should_auto_streamk(a: torch.Tensor) -> bool:
+    """Return True for shapes that benefit from the streamk K-split path.
+
+    Triggered for M<=_SKINNY_M_THRESHOLD with at least 16-bit inputs (the
+    cohort-tile override in OrigamiMatmulSelector also gates on >=16-bit).
+    """
+    return (
+        a.dim() == 2
+        and a.shape[0] <= _SKINNY_M_THRESHOLD
+        and a.dtype.itemsize >= 2
+    )
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -454,6 +475,12 @@ def matmul(
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None
 ) -> Optional[torch.Tensor]:
+    # Skinny-M shapes need streamk K-split to fill the CUs (see
+    # _SKINNY_M_THRESHOLD note above and the cohort-tile override in
+    # OrigamiMatmulSelector).
+    if not enable_streamk and _should_auto_streamk(a):
+        enable_streamk = True
+
     # If no out tensor provided - we do the allocation - we support autograd
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid)

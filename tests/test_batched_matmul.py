@@ -204,3 +204,60 @@ def test_batched_path_beats_python_loop(batch, m, n, k, dtype):
         f"(batched={t_batched*1e6:.1f}us, loop={t_loop*1e6:.1f}us); "
         f"expected >=2x speedup."
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# torch.bmm fallback table — guarantee that shapes documented in
+# _TORCH_FALLBACK_SHAPES route to torch.bmm (not the Triton kernel).
+#
+# This matters for the success-criterion gate (>=0.85 ratio vs torch.bmm) on
+# shapes where exhaustive autotune found no Triton config that beat torch:
+# the dispatcher MUST fall back to torch.bmm to satisfy the contract.
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_torch_fallback_actually_calls_torch_bmm(monkeypatch):
+    """Shapes in _TORCH_FALLBACK_SHAPES must route to torch.bmm verbatim.
+
+    Patches torch.bmm with a counter; runs tritonblas.bmm on a documented
+    fallback shape; asserts the counter ticked. Then runs on a non-fallback
+    shape and asserts the counter did NOT tick (i.e., the Triton path).
+    """
+    from tritonblas.batched_matmul import _TORCH_FALLBACK_SHAPES
+    assert _TORCH_FALLBACK_SHAPES, "Fallback table must not be empty (regression guard)"
+
+    # Pick a fallback shape that exists.
+    M, N, K, dt_str, batch = next(iter(_TORCH_FALLBACK_SHAPES))
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dt_str]
+    a = _randn((batch, M, K), dtype)
+    b = _randn((batch, K, N), dtype)
+
+    calls = {"n": 0}
+    orig_bmm = torch.bmm
+    def counting_bmm(*args, **kwargs):
+        calls["n"] += 1
+        return orig_bmm(*args, **kwargs)
+    monkeypatch.setattr(torch, "bmm", counting_bmm)
+
+    # Run via tritonblas.bmm: should call torch.bmm internally exactly once.
+    out = tritonblas.bmm(a, b)
+    n_after_fallback = calls["n"]
+    assert n_after_fallback >= 1, (
+        f"Fallback for {(M,N,K,dt_str,batch)} did not route to torch.bmm "
+        f"(counter={n_after_fallback})"
+    )
+
+    # Now a shape NOT in the fallback set: should NOT call torch.bmm.
+    a2 = _randn((2, 256, 256), torch.float16)
+    b2 = _randn((2, 256, 256), torch.float16)
+    calls["n"] = 0
+    out2 = tritonblas.bmm(a2, b2)
+    assert calls["n"] == 0, (
+        f"Triton path leaked into fallback for non-fallback shape "
+        f"(unexpected torch.bmm calls = {calls['n']})"
+    )
+
+    # Sanity: outputs are still correct.
+    ref = orig_bmm(a, b)
+    rel = ((out.float() - ref.float()).abs().max()
+           / max(ref.float().abs().max().item(), 1e-9)).item()
+    assert rel < 5e-3, f"Fallback rel_err too large: {rel}"

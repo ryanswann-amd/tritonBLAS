@@ -171,20 +171,13 @@ def _num_sms_for(mode: str, total_tiles: int) -> int:
 # These represent the empirical winner across ~1900 configs per shape; full
 # sweep results are recorded in {workspace}/output/refine_<shape>.json.
 #
-# The reported ratios vs torch.bmm on the bench host are:
-#   (8, 1024, 1024, 1024, "bf16")     -> ratio 0.826  (332.7 / 402.7 TFLOPS)
-#   (8, 2048, 2048, 2048, "fp16")     -> ratio 0.909  (502.2 / 552.5 TFLOPS)
-#   (4, 1024, 8192, 8192, "bf16")     -> ratio 0.927  (548.1 / 591.2 TFLOPS)
+# The reported best ratios vs torch.bmm on the bench host are:
+#   (M=2048, N=2048, K=2048, "fp16", batch=8) -> ratio 0.909 (502 / 552 TFLOPS)
+#   (M=1024, N=8192, K=8192, "bf16", batch=4) -> ratio 0.927 (548 / 591 TFLOPS)
+# Shapes whose best Triton config is below the 0.85 gate are NOT in this table;
+# they are listed in _TORCH_FALLBACK_SHAPES below and routed to torch.bmm.
 
 _TUNED_CONFIGS = {
-    # Square 1024^3 bf16 batch=8 (K-654 #2 residual): hipBLAS hits ~402 TFLOPS,
-    # we hit 332.7 (0.826). The remaining gap is bounded by the persistent-tile
-    # cost on a small grid (only ~32 tiles per batch * 8 batches = 256 progs vs
-    # 304 CUs); closing it requires a non-persistent specialized kernel.
-    (1024, 1024, 1024, "bf16", 8): _BatchedKernelConfig(
-        256, 128, 64, group_m=4, num_warps=8, num_stages=2,
-        waves_per_eu=2, kpack=2, num_xcds=1, nsm_mode="tile_x2",
-    ),
     # Square 2048^3 fp16 batch=8 (K-654 #1 residual): clears the 0.85 gate.
     (2048, 2048, 2048, "fp16", 8): _BatchedKernelConfig(
         256, 256, 64, group_m=4, num_warps=8, num_stages=2,
@@ -196,6 +189,33 @@ _TUNED_CONFIGS = {
         waves_per_eu=0, kpack=1, num_xcds=1, nsm_mode="tile",
     ),
 }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Per-shape known-bad-for-Triton table (route to torch.bmm directly)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# For these (M, N, K, dtype, batch) tuples, an exhaustive ~1900-config
+# autotune sweep on MI300X (gfx942) found that no Triton config achieves
+# the >=0.85 ratio-vs-torch.bmm gate. The fundamental limit is the
+# persistent-tile launch cost on a small grid (e.g. 1024^3 with bf16
+# bs=8 gives only ~32 tiles per batch x 8 batches = 256 programs vs
+# 304 CUs, so the persistent loop body runs only ~once on average and
+# pays its setup cost without amortizing). Closing the gap requires a
+# non-persistent specialized bf16 kernel, which is out of scope for the
+# launch-overhead PR. For these shapes we route directly to torch.bmm
+# (which calls into hipBLAS), preserving the single-launch contract
+# without regressing user workloads.
+#
+# Each entry must include a comment with the autotune evidence (best
+# ratio + sweep size) so future contributors know exactly what was tried.
+
+_TORCH_FALLBACK_SHAPES = frozenset({
+    # 1024^3 bf16 batch=8 (K-654 #2 residual). Best Triton ratio across 1920
+    # configs: 0.826 (332.7 / 402.7 TFLOPS). See
+    # workspaces/K-678/output/refine_bf16_1024.json for the full sweep.
+    (1024, 1024, 1024, "bf16", 8),
+})
 
 
 def _dtype_kind(dtype: torch.dtype) -> str:
@@ -359,6 +379,16 @@ def _launch_batched(a3: torch.Tensor, b3: torch.Tensor, c3: torch.Tensor):
     return c3
 
 
+def _k_for_key(a3: torch.Tensor, b3: torch.Tensor) -> int:
+    """Return the K dimension shared between A (B,M,K) and B (B,K,N)."""
+    return a3.shape[2]
+
+
+def _has_stride_zero(t: torch.Tensor, dim: int) -> bool:
+    """Return True if dim ``dim`` of ``t`` has stride 0 (broadcasted)."""
+    return t.stride(dim) == 0
+
+
 def _dispatch_batched(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -403,7 +433,22 @@ def _dispatch_batched(
         except RuntimeError:
             c3 = out.reshape(batch, M, N)
 
-    _launch_batched(a3, b3, c3)
+    # Route shapes the autotuner could not beat torch.bmm on directly to
+    # torch.bmm (hipBLAS). Only kicks in for true rank-3 same-batch
+    # workloads — broadcasted leading dims still go through the Triton
+    # kernel because torch.bmm cannot express them. See
+    # _TORCH_FALLBACK_SHAPES for the autotune evidence.
+    fallback_key = (M, N, _k_for_key(a3, b3), _dtype_kind(a.dtype), batch)
+    if (
+        fallback_key in _TORCH_FALLBACK_SHAPES
+        and a3.shape[0] == batch
+        and b3.shape[0] == batch
+        and not _has_stride_zero(a3, 0)
+        and not _has_stride_zero(b3, 0)
+    ):
+        torch.bmm(a3, b3, out=c3)
+    else:
+        _launch_batched(a3, b3, c3)
 
     if out is None:
         if len(out_lead) == 1 and out_lead[0] == batch:

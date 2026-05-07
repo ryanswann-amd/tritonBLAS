@@ -241,7 +241,25 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
-        if streamk:
+        # Small-M cohort override: when M is small (skinny GEMM, e.g. decode
+        # token batches), the analytic selector clamps BM to next_pow2(M) but
+        # also picks a small BN/BK (typically 16-64 / 32) because each tile
+        # has few rows. The result is two compounding inefficiencies:
+        #   (1) each macro-tile contains so few elements that the MFMA
+        #       pipeline runs idle waiting on global loads, and
+        #   (2) total_tiles = ceil(M/BM) * ceil(N/BN) is small enough that the
+        #       data-parallel grid leaves most CUs unused (e.g. M=16/N=4096
+        #       with 16x16x32 yields 256 tiles vs 304 CUs, but BM=16/BN=512
+        #       lookalikes yield far fewer and require K-split).
+        # The override forces a wide-N tile (BN preferred 256, then 128/64
+        # falling back as LDS allows) with a moderate BK (64 first), and
+        # auto-promotes streamk so the grid can split along K and recover
+        # wave parallelism when the DP grid is small. Empirically lifts the
+        # M<=32 cohort from ~0.22x to >=0.50x of hipBLASLt on MI300X without
+        # regressing M>=64 shapes (which never enter this branch).
+        self._apply_small_m_override(bytes_a, bytes_b, lds_cap)
+
+        if self.streamk:
             self._grid = self._compute_sk_grid()
         else:
             self._grid = self._hardware.N_CU
@@ -262,6 +280,78 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+    # Problems with M <= SMALL_M_THRESHOLD enter the small-M cohort: the tile
+    # selector falls back to a curated wide-BN, moderate-BK config and the
+    # kernel router is biased toward StreamK so the K-dim split can recover
+    # wave parallelism when the data-parallel grid (M_tiles * N_tiles) is
+    # smaller than N_CU. Threshold 32 covers M ∈ {1, 2, 4, 8, 16, 32} which
+    # are the values that show >50% MFMA underutilization in autotune sweeps.
+    SMALL_M_THRESHOLD = 32
+
+    # Tile candidates for the small-M cohort, ordered by empirical preference
+    # on gfx942 (MI300X / MI325X) for bf16/fp16 from a (BM,BN,BK) sweep across
+    # the K-654-style shape distribution. Each entry is (BM, BN, BK).
+    #
+    # Why BM=32 even when M<=16? On gfx942 the bf16/fp16 MFMA tile is 16x16x16,
+    # so BM=32 schedules two stacked MFMAs per output tile and keeps the
+    # matrix pipeline saturated; with BM=16 the kernel issues only one MFMA
+    # per tile and stalls on global loads. The "wasted" lower 16 rows have
+    # negligible cost because (a) the LDS A-buffer is sized to BM (Triton
+    # masks past-M loads) and (b) HBM traffic is dominated by B which is
+    # M-independent. Empirically 32x64x64 + streamk hits 0.7-1.2x torch
+    # matmul on M={16,32} N={4K..16K} K={2K..16K} bf16 shapes, vs 0.13-0.45x
+    # for the analytic-selector default of 16x16x32 / 16x64x32.
+    #
+    # BN=64 + BK=64 (32 KB LDS at ns=2) leaves the most headroom for the
+    # streamk K-split: tiles_N = N/64 yields a healthy DP grid that streamk
+    # multiplies up to ~N_CU. Larger BN (128/256) under-fills the DP grid and
+    # the larger BK (128) leaves less K-split factor when iters_per_tile
+    # is small.
+    _SMALL_M_TILE_CANDIDATES = (
+        (32, 64, 64),
+        (32, 64, 128),
+        (32, 128, 64),
+        (16, 64, 64),
+        (16, 128, 64),
+        (16, 64, 128),
+    )
+
+    def _apply_small_m_override(self, bytes_a, bytes_b, lds_cap):
+        """Patch the selected config + streamk flag for the small-M cohort.
+
+        For M <= SMALL_M_THRESHOLD, replace the analytic tile choice with the
+        first LDS-feasible entry from _SMALL_M_TILE_CANDIDATES and set
+        self.streamk so the kernel router (matmul.py) opts into the StreamK
+        path. The method is a no-op for M > SMALL_M_THRESHOLD, so M>=64
+        shapes are completely unaffected.
+        """
+        if self._m > self.SMALL_M_THRESHOLD:
+            return
+
+        chosen = None
+        for bm, bn, bk in self._SMALL_M_TILE_CANDIDATES:
+            if check_triton_lds_capacity(
+                bm, bn, bk, bytes_a, bytes_b, lds_cap, self._num_stages
+            ):
+                chosen = (bm, bn, bk)
+                break
+        if chosen is None:
+            # All candidates exceed LDS — extremely unlikely on supported
+            # hardware (>=64KB LDS) for these tiles, but bail out instead of
+            # silently regressing the analytic pick.
+            return
+
+        bm, bn, bk = chosen
+        self._result.config.mt.m = bm
+        self._result.config.mt.n = bn
+        self._result.config.mt.k = bk
+
+        # Auto-promote StreamK: the data-parallel grid for skinny-M is at most
+        # ceil(N/BN) tiles (M_tiles=1) and is typically much smaller than N_CU.
+        # _compute_sk_grid() then multiplies the grid by an integer factor so
+        # each tile is split along K, fanning the work back out across CUs.
+        self.streamk = True
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

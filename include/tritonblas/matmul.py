@@ -365,6 +365,18 @@ def streamk_matmul_lt(
 
     return c
 
+def _selector_wants_streamk(selector, enable_streamk: bool) -> bool:
+    """Return True when the dispatch should route to streamk_matmul_lt.
+
+    Honors both the explicit caller flag and any selector-level override
+    (e.g. the small-M cohort auto-enables StreamK so the K-split grid can
+    recover wave parallelism on skinny problems where M_tiles*N_tiles << N_CU).
+    """
+    if enable_streamk:
+        return True
+    return bool(getattr(selector, "use_streamk", False))
+
+
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
@@ -372,7 +384,7 @@ def matmul_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
@@ -384,7 +396,7 @@ def matmul_a8w8_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
@@ -404,9 +416,11 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # Query Origami for solution. Selector may auto-enable StreamK for the
+    # small-M cohort even if the caller passed enable_streamk=False.
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
@@ -464,7 +478,7 @@ def _matmul_out(
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
@@ -511,7 +525,7 @@ def matmul_a8w8(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
@@ -645,7 +659,7 @@ def _addmm(
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
@@ -714,7 +728,7 @@ def _addmm_out(
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if _selector_wants_streamk(selector, enable_streamk):
         streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)

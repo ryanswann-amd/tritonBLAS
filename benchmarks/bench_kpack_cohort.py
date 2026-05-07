@@ -2,8 +2,10 @@
 
 For each (M,N,K) and each kpack request in {1, 2}, we measure
 ``persistent_matmul_lt`` end-to-end latency on MI300X.  The gate guarantees
-that a request for kpack=2 only takes effect when K >= TRITONBLAS_KPACK2_K_MIN
-(default 1024).  We use a wide K-sweep so the boundary is visible.
+that a request for kpack=2 only takes effect when K >= 1024 (the empirical
+small-K boundary, see ``include/tritonblas/matmul.py``).  We use a wide
+K-sweep so the boundary is visible AND include K>=4096 shapes so the
+"no large-K regression" requirement is demonstrable in the same CSV.
 
 For every shape we report:
   - kpack=1 latency (always-safe baseline that the gate guarantees for small K)
@@ -75,10 +77,10 @@ def main():
     args = ap.parse_args()
 
     # Small-K cohort: M,N in {512..2048}, K=512.
-    # We also include K in {768, 1024, 1536, 2048} so the boundary
-    # the task asked us to confirm (1024) is visible in the data.
+    # K-sweep crosses the gate boundary (1024) and extends to 8192 so
+    # "no large-K regression" is demonstrable in the same CSV.
     mn_sweep = [512, 1024, 1536, 2048]
-    k_sweep = [512, 768, 1024, 1536, 2048]
+    k_sweep = [512, 768, 1024, 1536, 2048, 4096, 8192]
     dtype = torch.bfloat16
 
     rows = []

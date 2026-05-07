@@ -1,5 +1,4 @@
 import functools
-import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -30,63 +29,30 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 #   - K >= 1024 : kpack=2 wins or matches
 #
 # The default threshold (1024) keeps the small-K cohort on kpack=1 while
-# allowing kpack=2 for any future caller that opts in by passing
-# ``selector`` with a ``kpack`` override or by setting
-# ``TRITONBLAS_KPACK2_K_MIN`` to lower the threshold.
-#
-# The current matmul entry points always run kpack=1 (preserving the previous
-# baseline for every shape) until a tile/dtype-aware policy promotes a shape
-# to kpack=2 by passing an explicit override on the selector.  Even with the
-# override, this gate guarantees that small-K shapes never silently fall
-# into the kpack=2 path again.
+# allowing kpack=2 for any future caller that opts in by passing a selector
+# with a ``kpack`` override.  The current matmul entry points always run
+# kpack=1 (preserving the previous baseline for every shape) until a
+# tile/dtype-aware policy promotes a shape by setting ``selector.kpack``.
+# Even with that override, this gate guarantees that small-K shapes never
+# silently fall into the kpack=2 path again.
 _DEFAULT_KPACK2_K_MIN = 1024
 
 
-def _env_kpack2_k_min(default: int = _DEFAULT_KPACK2_K_MIN) -> int:
-    """Read TRITONBLAS_KPACK2_K_MIN, fall back to the default if unset/invalid."""
-    raw = os.environ.get("TRITONBLAS_KPACK2_K_MIN")
-    if raw is None:
-        return default
-    try:
-        v = int(raw)
-        return v if v > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
-def select_kpack(
-    K: int,
-    requested_kpack: int = 1,
-    k_min_for_kpack2: Optional[int] = None,
-) -> int:
+def select_kpack(K: int, requested_kpack: int = 1) -> int:
     """Return the kpack value to pass to the underlying Triton kernel.
 
     kpack=2 is only emitted when the caller explicitly asked for it AND the
-    K-dimension is large enough to amortize the LDS-swizzle prologue.  All
-    other cases collapse to kpack=1, which is the safe baseline.
-
-    Args:
-        K: GEMM K-dimension (length of the contracted axis).
-        requested_kpack: kpack the caller would prefer (1 or 2).  Values
-            outside {1, 2} are clamped to 1.
-        k_min_for_kpack2: minimum K to allow kpack=2.  ``None`` means consult
-            ``TRITONBLAS_KPACK2_K_MIN`` then fall back to the empirical default.
-
-    Returns:
-        Either 1 (always safe) or 2 (only on large-K when requested).
+    K-dimension is at least ``_DEFAULT_KPACK2_K_MIN``.  All other cases
+    collapse to kpack=1, which is the safe baseline.
     """
-    if requested_kpack not in (1, 2):
+    if requested_kpack != 2:
         return 1
-    if requested_kpack == 1:
-        return 1
-    threshold = _env_kpack2_k_min() if k_min_for_kpack2 is None else int(k_min_for_kpack2)
-    return 2 if K >= threshold else 1
+    return 2 if K >= _DEFAULT_KPACK2_K_MIN else 1
 
 
 def _kpack_for_selector(selector, K: int) -> int:
     """Resolve kpack from an optional ``selector.kpack`` attribute and gate it."""
-    requested = getattr(selector, "kpack", 1)
-    return select_kpack(K, requested_kpack=requested)
+    return select_kpack(K, requested_kpack=getattr(selector, "kpack", 1))
 
 
 

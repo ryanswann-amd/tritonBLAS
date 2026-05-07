@@ -1,9 +1,24 @@
 from __future__ import annotations
 import itertools
+import os
 import torch
 import origami
 import math
 from math import ceil
+
+# K-231: env-var kill-switch for the small-M (M<=16) tile override.
+#
+# The override forces (BLOCK_M=16, BLOCK_N=256, BLOCK_K=64, num_warps=4) for
+# any M<=16 shape, replacing the (BLOCK_M=16, BLOCK_N=16, BLOCK_K=32) tile
+# that Origami otherwise selects. Set TRITONBLAS_DISABLE_K231_SMALLM=1 to
+# fall back to Origami's choice. Default = override ON.
+#
+# A/B sweep (300 shapes, fp16+bf16, MI300X) shows the override is roughly
+# neutral (M=16 sub-cohort 0.303x -> 0.299x vs torch.matmul). It helps
+# high-K (K=8192) modestly and slightly regresses low/mid-K. The kill switch
+# is left in place so the override can be disabled without a code change
+# while autotuning the small-M cohort further.
+_K231_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K231_SMALLM", "0") == "1"
 
 
 def estimate_triton_lds_bytes(
@@ -241,6 +256,29 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-231: small-M (M<=16) wave-quantization fix.
+        # Origami's selector picks BLOCK_M=32 for some M=16 shapes (smallest
+        # MN tile in the default range that maximizes occupancy). With MFMA
+        # 16x16x{16,32} on gfx942, BLOCK_M=32 means a single 32-row macro-tile
+        # contains the only 16 real rows of A — half the MFMA M-lanes are
+        # masked, halving effective compute throughput. K-198 attribution
+        # showed the residual small-M gap is VALU-bound on padded MFMA (100%
+        # VALU, <1% MemBusy, 0 LDS conflicts), so cutting BLOCK_M to 16
+        # directly removes the masked-row penalty without changing memory
+        # traffic. Gate strictly to M<=16 so the M=32 sub-cohort (which uses
+        # the full 32-row macro-tile) is untouched. (BLOCK_N=256, BLOCK_K=64)
+        # is the widest N tile that keeps LDS within capacity and preserves
+        # the K-loop pipeline depth.
+        if (not _K231_DISABLED) and self._m <= 16 and check_triton_lds_capacity(
+            16, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages
+        ):
+            self._result.config.mt.m = 16
+            self._result.config.mt.n = 256
+            self._result.config.mt.k = 64
+            self._smallm_blockm16 = True
+        else:
+            self._smallm_blockm16 = False
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -333,6 +371,16 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def num_warps(self):
+        # K-231: BLOCK_M=16 macro-tile only needs 4 warps for the (16x256)
+        # output tile (each warp owns a 16x64 MFMA fragment). Using 8 warps
+        # halves the per-warp work and increases dispatch/sync overhead with
+        # no occupancy gain (no spare LDS or registers to amortize).
+        if getattr(self, "_smallm_blockm16", False):
+            return 4
+        return 8
 
     @property
     def waves_per_eu(self):

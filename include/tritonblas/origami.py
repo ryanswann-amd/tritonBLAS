@@ -59,6 +59,56 @@ def check_triton_lds_capacity(
     return usage <= lds_capacity
 
 
+# ---------------------------------------------------------------------------
+# Batched-GEMM dispatch policy
+# ---------------------------------------------------------------------------
+#
+# The single-launch batched kernel (``tritonblas.bmm``) wins when each per-batch
+# GEMM is small enough that per-call dispatch overhead dominates and there is
+# spare CU capacity to co-issue many batches.  Once each per-batch GEMM is
+# already large enough to saturate the whole GPU on its own, the well-tuned
+# single-shot ``matmul`` path beats the batched kernel because
+#  (a) the batched kernel cannot use Stream-K / work-stealing optimisations,
+#  (b) co-issuing many large grids only thrashes the L2 between batches.
+#
+# This threshold expresses the crossover as a per-batch output-tile area.
+# Empirically calibrated on MI300X across a batched-GEMM residual cohort
+# (B in {2,4,8,16,32}, square shapes 256..4096): per-batch output area
+# >= 4096*4096 elements (~16 Mi output values) is where the loop variant
+# becomes faster.  Below it the single-launch BMM is a clear win, above
+# it the loop wins.
+#
+# Exposed as a module-level constant + named function so the policy lives next
+# to the rest of the tile-selection heuristic rather than as a magic number
+# inside ``matmul.py``.
+BMM_SATURATION_PER_BATCH_AREA = 4096 * 4096
+
+
+def select_bmm_strategy(M: int, N: int, K: int, B: int) -> str:
+    """Return the dispatch strategy for a (B, M, K) x (B, K, N) batched GEMM.
+
+    Keyed on ``(M, N, K, B)`` per the project requirement.  ``K`` is accepted
+    so the policy can be extended in future to weigh K-direction work, but is
+    not currently consulted (Stream-K is the right tool for K-bound shapes
+    and is not engaged through this path).
+
+    Returns either:
+      * ``"single_launch"`` — call the batched persistent kernel once over all
+        ``B`` slices,
+      * ``"per_batch_loop"`` — fall back to ``B`` independent single-shot
+        ``matmul`` calls (preserves the heavily-tuned non-batched kernel for
+        large-per-batch problems).
+    """
+    if B <= 1:
+        # No batching to amortise; the single-launch path degenerates to the
+        # non-batched kernel.  Either is fine; keep the single-launch path so
+        # the kernel doesn't change behaviour at the B==1 boundary.
+        return "single_launch"
+    if (M * N) >= BMM_SATURATION_PER_BATCH_AREA:
+        return "per_batch_loop"
+    return "single_launch"
+
+
 class OrigamiMatmulSelector:
     @staticmethod
     def estimate_triton_lds(

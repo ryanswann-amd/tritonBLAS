@@ -11,7 +11,7 @@ import triton
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels import batched_persistent_matmul
 from .kernels.fp4_matmul import fp4_matmul
-from .origami import OrigamiMatmulSelector
+from .origami import OrigamiMatmulSelector, select_bmm_strategy
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
@@ -797,11 +797,23 @@ def _normalize_bmm_strides(t: torch.Tensor, want_b: int):
 
 # LRU-cached selector for the bmm path.  The non-batched matmul path has an
 # explicit policy of NOT caching the selector (see ``_make_matmul_selector``),
-# but bmm callers reissue identical (M,N,K,dtype) problems for every step of a
-# training/inference loop — caching turns a ~185 µs Origami pass into a dict
+# but bmm callers reissue identical (M,N,K,B,dtype) problems for every step of
+# a training/inference loop — caching turns a ~185 µs Origami pass into a dict
 # lookup, which dominates the per-call cost for small per-batch problems.
+#
+# The cache key follows the project requirement of keying on ``(M, N, K, B)``.
+# In the current implementation the ``OrigamiMatmulSelector`` itself is
+# B-independent (the optimal tile shape does not change with batch count) so
+# ``B`` does not change the returned object — but it IS part of the key so
+# that future B-sensitive policy changes (e.g. tile-fixup decisions that
+# depend on total grid size) flow through this cache cleanly without callers
+# accidentally hitting a stale entry from a different B.  ``a_dtype/b_dtype/
+# c_dtype`` participate because the selector branches on dtype bitsize for
+# matrix-instruction selection; ``device_str`` participates because Origami
+# queries hardware properties keyed on device index.
 @functools.lru_cache(maxsize=1024)
-def _bmm_selector_cached(M, N, K, a_dtype, b_dtype, c_dtype, device_str):
+def _bmm_selector_cached(M, N, K, B, a_dtype, b_dtype, c_dtype, device_str):
+    del B  # see docstring — included in the cache key for forward-compat
     return OrigamiMatmulSelector(
         M, N, K, a_dtype, b_dtype, c_dtype,
         torch.device(device_str),
@@ -839,7 +851,7 @@ def _bmm_dispatch(
         )
 
     selector = _bmm_selector_cached(
-        M, N, K, a.dtype, b.dtype, out.dtype, str(a.device)
+        M, N, K, B, a.dtype, b.dtype, out.dtype, str(a.device)
     )
 
     BLK_M = selector.block_m
@@ -849,10 +861,10 @@ def _bmm_dispatch(
     num_xcds = selector.num_sms
 
     # Batched-aware tile fixup.  Origami's per-shape selection is calibrated
-    # for single-shot GEMMs; on the K-654 batched residuals it picks 64x64
-    # tiles with BLK_K=256 which leave MFMA pipes under-fed.  Tile-size
-    # sweeps on MI300X (see workspace/output/tile_sweep.txt) show BLK
-    # 128x128 with BLK_K=64 and GROUP_M=4 wins by 1.4-1.8x for B>=2 and
+    # for single-shot GEMMs; on the batched residuals identified in the
+    # MI300X full sweep it picks 64x64 tiles with BLK_K=256 which leave
+    # MFMA pipes under-fed.  Tile-size sweeps on MI300X show BLK 128x128
+    # with BLK_K=64 and GROUP_M=4 wins by 1.4-1.8x for B>=2 and
     # M,N>=256 with no regression on smaller shapes.  We only override when
     # both Origami's M and N tiles fall below 128 — for shapes where it
     # already picks >=128 (e.g. 4096^3) we trust its selection.
@@ -1035,36 +1047,31 @@ def bmm(
     out_dtype = (out.dtype if out is not None
                  else torch.promote_types(a.dtype, b.dtype))
 
-    # Fallback heuristic: when each per-batch GEMM is already large enough to
-    # saturate the GPU, the existing single-shot ``matmul`` path beats us
-    # because (a) it gets to use the heavily-tuned non-batched kernel and
-    # (b) co-issuing many large grids only thrashes the L2.  We gate on the
-    # output-tile area M*N: the K-611/K-654 sweep on MI300X showed the
-    # crossover at roughly per-batch output area of 4096*4096 elements (≈16M);
-    # below it the single-launch BMM is a clear win, above it the loop is.
-    _PER_BATCH_AREA_FALLBACK = 4096 * 4096
-    if batch > 1 and (M * N) >= _PER_BATCH_AREA_FALLBACK:
-            # Each batch is large; fall back to per-batch matmul to preserve
-            # the well-tuned single-shot kernel quality.
-            if out is None:
-                out_buf = torch.empty(
-                    (batch, M, N), dtype=out_dtype, device=a3.device
-                )
-            else:
-                out_buf = out if out.dim() == 3 else out.unsqueeze(0)
-            # Materialize broadcast inputs into per-batch slices.
-            for i in range(batch):
-                a_i = a3[i] if a3.dim() == 3 else a3
-                b_i = b3[i] if b3.dim() == 3 else b3
-                matmul(a_i, b_i, out=out_buf[i])
-            if out is None:
-                result = out_buf
-                if squeeze_a:
-                    result = result.squeeze(-2)
-                if squeeze_b:
-                    result = result.squeeze(-1)
-                return result
-            return out
+    # Dispatch policy lives in origami.select_bmm_strategy (keyed on M,N,K,B).
+    # When that returns "per_batch_loop", each per-batch GEMM is already
+    # large enough to saturate the GPU and the well-tuned single-shot
+    # ``matmul`` path beats the batched kernel.  See the docstring in
+    # ``origami.select_bmm_strategy`` for the calibration data and threshold.
+    if select_bmm_strategy(M, N, K, batch) == "per_batch_loop":
+        if out is None:
+            out_buf = torch.empty(
+                (batch, M, N), dtype=out_dtype, device=a3.device
+            )
+        else:
+            out_buf = out if out.dim() == 3 else out.unsqueeze(0)
+        # Materialize broadcast inputs into per-batch slices.
+        for i in range(batch):
+            a_i = a3[i] if a3.dim() == 3 else a3
+            b_i = b3[i] if b3.dim() == 3 else b3
+            matmul(a_i, b_i, out=out_buf[i])
+        if out is None:
+            result = out_buf
+            if squeeze_a:
+                result = result.squeeze(-2)
+            if squeeze_b:
+                result = result.squeeze(-1)
+            return result
+        return out
 
     if out is None:
         # Use a 3D buffer internally; squeeze before returning if needed.

@@ -241,6 +241,45 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # Skinny-GEMM (M<=32) tile-selection override.
+        #
+        # For M<=32 (LLM token-decode and similar) Origami's analytical model
+        # picks small (BLOCK_M, BLOCK_N) tiles -- typically BLOCK_M=16 with
+        # BLOCK_N <= 128 and BLOCK_K=32.  Two problems with that on MI300X /
+        # gfx942 with the persistent kernel (num_warps=8, 512 threads):
+        #
+        #  1. *Intra-workgroup thread occupancy*.  The workgroup of 512
+        #     threads processes BLOCK_M * BLOCK_N output elements per K
+        #     iteration.  With BLOCK_M=16 BLOCK_N=32 that is 512 elements
+        #     -- one element per thread, leaving most of the MFMA pipeline
+        #     idle.  Raising BLOCK_N to 256 lifts per-thread work to >= 8
+        #     elements, which is what the MFMA throughput model expects.
+        #
+        #  2. *Per-launch arithmetic intensity*.  BLOCK_K=32 doubles the
+        #     K-loop iteration count vs. BLOCK_K=64 and halves the LDS-load
+        #     -to-MFMA ratio inside the kernel body.
+        #
+        # The override picks (BLOCK_M, BLOCK_N, BLOCK_K) = (16|32, 256, 64).
+        # This trades the persistent-kernel per-call CU coverage for higher
+        # in-workgroup utilisation; the CU coverage is meant to be recovered
+        # by enabling the Stream-K code path on the call site
+        # (matmul(..., enable_streamk=True)) which splits along K.  Adding
+        # SPLIT_K to the data-parallel kernel itself is a separate follow-up.
+        #
+        # Falls back to the Origami-picked tile if (16|32, 256, 64) exceeds
+        # LDS capacity (e.g. fp32 inputs or 3-stage pipelines).
+        if self._m <= 32 and self._b_dtype_bitsize >= 16:
+            target_bm = 16 if self._m <= 16 else 32
+            target_bn = 256
+            target_bk = 64
+            if check_triton_lds_capacity(
+                target_bm, target_bn, target_bk,
+                bytes_a, bytes_b, lds_cap, self._num_stages,
+            ):
+                self._result.config.mt.m = target_bm
+                self._result.config.mt.n = target_bn
+                self._result.config.mt.k = target_bk
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -396,9 +435,17 @@ class OrigamiMatmulSelector:
                     sk_grid = split_grid
                     break
 
-        # Final check: if the chosen grid leaves a remainder AND
-        # workspace exceeds what the problem allows, fall back to no split
-        if tiles % sk_grid != 0:
+        # Final check: if the chosen grid leaves a remainder AND workspace
+        # exceeds what the problem allows, fall back to no split.
+        #
+        # The original predicate was `tiles % sk_grid != 0`, which is the
+        # right "uneven split" check when `sk_grid <= tiles` (the
+        # `tiles > cu_count` branch above), but it always trips for the
+        # K-split branch where `sk_grid = tiles * factor > tiles` and so
+        # `tiles % sk_grid == tiles != 0`.  That silently disabled the
+        # K-split for every small-tile-count problem (skinny GEMMs, low M).
+        # Constrain the rollback to the case it was meant for.
+        if sk_grid <= tiles and tiles % sk_grid != 0:
             sk_grid = tiles
 
         if tiles >= cu_count:

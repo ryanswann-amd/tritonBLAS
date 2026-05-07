@@ -25,6 +25,11 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+# Hot-path constant cached at import time (looked up once per call otherwise).
+# Falls back to a recheck on selector miss so that callers toggling this knob
+# get the new value at the same cadence as a heuristic recomputation.
+_ALLOW_TF32 = torch.backends.cuda.matmul.allow_tf32
+
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -36,9 +41,11 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# K-186 added an LRU cache here that was lost in the refactor that landed
+# OrigamiMatmulSelector.  Re-enable it: the heuristic is a pure function of
+# its inputs so caching the result saves ~200-300us on the cache-hit path
+# (see K-176 / K-146 latency decomposition for tiny shapes).
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -51,8 +58,8 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    # Run Heuristic Results (Only if key has not been seen before).
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +71,40 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+
+    # Pre-compute & memo derived launch parameters as plain int attributes so
+    # the hot dispatch path skips @property descriptor calls + nested attribute
+    # lookups on every invocation.  These are pure functions of the cache key
+    # (M, N, K, dtypes), so they are safe to bake into the cached selector.
+    blk_m = sel._result.config.mt.m
+    blk_n = sel._result.config.mt.n
+    blk_k = sel._result.config.mt.k
+    gsize_m = sel._workgroup_mapping
+    num_xcds = sel._xcc_workgroup_mapping
+
+    total_blocks_m = (M + blk_m - 1) // blk_m
+    total_blocks_n = (N + blk_n - 1) // blk_n
+    total_tiles = total_blocks_m * total_blocks_n
+    even_k = (K % blk_k) == 0
+
+    # chunk_size formula from persistent_matmul_lt
+    chunk_size = gsize_m * gsize_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+        eff_xcds = num_xcds
+    else:
+        eff_xcds = 1
+
+    sel._dp_blk_m = blk_m
+    sel._dp_blk_n = blk_n
+    sel._dp_blk_k = blk_k
+    sel._dp_gsize_m = gsize_m
+    sel._dp_num_xcds = eff_xcds
+    sel._dp_total_tiles = total_tiles
+    sel._dp_even_k = even_k
+    sel._dp_chunk_size = chunk_size
+
+    return sel
 
 
 def persistent_matmul_lt(
@@ -82,17 +123,36 @@ def persistent_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M    = selector.block_m
-    BLK_N    = selector.block_n
-    BLK_K    = selector.block_k
-    gsize_m  = selector.group_m
-    num_xcds = selector.num_sms
-
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
+    # Fast path: read precomputed launch params directly from the cached
+    # selector (set by _make_matmul_selector).  Falls back to the @property
+    # descriptors when the selector wasn't produced via the cache path
+    # (e.g. external callers constructing OrigamiMatmulSelector directly).
+    BLK_M = getattr(selector, "_dp_blk_m", None)
+    if BLK_M is not None:
+        BLK_N    = selector._dp_blk_n
+        BLK_K    = selector._dp_blk_k
+        gsize_m  = selector._dp_gsize_m
+        num_xcds = selector._dp_num_xcds
+        total_tiles = selector._dp_total_tiles
+        total_programs = total_tiles
+        even_k = selector._dp_even_k
+        chunk_size = selector._dp_chunk_size
+    else:
+        BLK_M    = selector.block_m
+        BLK_N    = selector.block_n
+        BLK_K    = selector.block_k
+        gsize_m  = selector.group_m
+        num_xcds = selector.num_sms
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = K % BLK_K == 0
+        chunk_size = gsize_m * gsize_m
+        if num_xcds > 0:
+            chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+        else:
+            num_xcds = 1
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -101,13 +161,6 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
-
-    # Set chunk size to same area as L2 tiles.
-    chunk_size = gsize_m * gsize_m
-    if num_xcds > 0:
-        chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
-    else:
-        num_xcds = 1
 
     if work_stealing and config is not None:
         grids = selector._hardware.N_CU
@@ -144,7 +197,7 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
-            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ALLOW_TF32=_ALLOW_TF32,
             GLOBAL_ATOMIC=config.global_atomic,
             HIERARCHICAL=False,
             LOCAL_TILES_PER_XCD=0,
@@ -194,7 +247,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ALLOW_TF32=_ALLOW_TF32,
         )
 
     return c
@@ -313,7 +366,7 @@ def streamk_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
-            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ALLOW_TF32=_ALLOW_TF32,
             GLOBAL_ATOMIC=config.global_atomic,
             mask_ptr=config.mask,
             num_stages=num_stages,
@@ -355,7 +408,7 @@ def streamk_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
-            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            ALLOW_TF32=_ALLOW_TF32,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -472,6 +525,11 @@ def _matmul_out(
     return None
 
 
+# Cached reference to the @torch.no_grad context (avoids per-call attribute
+# walk through torch -> no_grad on the eager fast path).
+_NO_GRAD = torch.no_grad
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -481,6 +539,46 @@ def matmul(
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
     if out is None:
+        # Eager fast path: when we're not under torch.compile (no fake tensors)
+        # and no input requires grad, the @triton_op dispatch + autograd
+        # machinery (~80-150us per call on tiny shapes per K-176 profiling) is
+        # pure overhead.  Bypass it and call the kernel launcher directly.
+        # The slow path (autograd / torch.compile / torch.export tracing) is
+        # preserved for correctness.
+        # Skip the fast path under torch.compile/torch.export tracing — the
+        # @triton_op wrapper integrates with dynamo and is required for
+        # fullgraph compilation.  `torch.compiler.is_compiling()` is
+        # dynamo-aware (no graph break), unlike `is_fake()`.
+        grad_on = torch.is_grad_enabled()
+        if (not torch.compiler.is_compiling()
+                and not (grad_on and (a.requires_grad or b.requires_grad))):
+            M, K = a.shape
+            _, N = b.shape
+            out_t = a.new_empty(M, N)
+            selector = _make_matmul_selector(
+                M, N, K, a.dtype, b.dtype, out_t.dtype, a.device,
+                streamk=enable_streamk,
+            )
+            config = matmul_preamble(selector) if work_stealing else None
+            # Only enter no_grad() when we actually need to suppress autograd
+            # tracking; saves ~4us/call when grad is already disabled.
+            if grad_on:
+                with _NO_GRAD():
+                    if enable_streamk:
+                        streamk_matmul_lt(a, b, out_t, selector, config,
+                                          sk_grid=sk_grid,
+                                          work_stealing=work_stealing)
+                    else:
+                        persistent_matmul_lt(a, b, out_t, selector, config,
+                                             work_stealing=work_stealing)
+            elif enable_streamk:
+                streamk_matmul_lt(a, b, out_t, selector, config,
+                                  sk_grid=sk_grid,
+                                  work_stealing=work_stealing)
+            else:
+                persistent_matmul_lt(a, b, out_t, selector, config,
+                                     work_stealing=work_stealing)
+            return out_t
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 
     if torch.is_grad_enabled() and (

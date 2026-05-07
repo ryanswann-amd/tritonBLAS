@@ -247,12 +247,23 @@ def streamk_matmul_lt(
 def _selector_wants_streamk(selector, enable_streamk: bool) -> bool:
     """Return True when the dispatch should route to streamk_matmul_lt.
 
-    Honors both the explicit caller flag and any selector-level override
-    (e.g. the small-M cohort auto-enables StreamK so the K-split grid can
-    recover wave parallelism on skinny problems where M_tiles*N_tiles << N_CU).
+    Two — and only two — paths can promote a call onto the StreamK kernel:
+
+      1. The caller passed ``enable_streamk=True`` (legacy behaviour).
+      2. The selector belongs to the small-M cohort (``selector.is_small_m``)
+         and exposes ``use_streamk=True``. The cohort gate is pinned at
+         ``__init__`` from M alone; it cannot be flipped post-construction
+         by mutating ``selector.streamk``.
+
+    The explicit ``is_small_m`` check is the invariant that prevents this
+    helper from silently re-routing arbitrary M >= 64 problems if some
+    other code path ever sets ``selector.streamk = True`` for a non-cohort
+    reason.
     """
     if enable_streamk:
         return True
+    if not getattr(selector, "is_small_m", False):
+        return False
     return bool(getattr(selector, "use_streamk", False))
 
 

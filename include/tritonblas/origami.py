@@ -326,10 +326,24 @@ class OrigamiMatmulSelector:
     def use_streamk(self):
         """True when kernel dispatch should route to streamk_matmul_lt.
 
-        Set whenever the user requested StreamK *or* when the small-M cohort
-        is active and we need StreamK's K-split grid to recover wave parallelism.
+        Strictly the OR of two pinned-at-construction signals:
+
+          * ``_user_streamk`` — the caller passed ``streamk=True``.
+          * ``_small_m``     — the small-M cohort gate is active.
+
+        Notably this does **not** derive from ``self.streamk``. ``self.streamk``
+        is consumed by Origami's grid-selection enum and may be flipped by
+        future internal logic; routing must remain pinned to the intent set
+        when the selector was built so a downstream mutation cannot silently
+        promote an arbitrary M >= 64 problem onto the StreamK kernel.
         """
-        return bool(self.streamk)
+        return bool(self._user_streamk or self._small_m)
+
+    @property
+    def is_small_m(self):
+        """True if this selector falls into the small-M (M <= SMALL_M_THRESHOLD)
+        cohort. Exposed for tests and for the dispatch layer's explicit guard."""
+        return bool(self._small_m)
 
     def _compute_sk_grid(self):
         # Grid model constants for StreamK

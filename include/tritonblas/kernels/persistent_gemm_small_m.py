@@ -6,7 +6,7 @@
 The default persistent kernel sizes its grid at one program per output
 tile.  When M is tiny the M-dimension contributes a single tile, so
 ``grid == cdiv(N, BLOCK_N)`` — typically 4-32 programs — which leaves
-~270 of MI300X's 304 CUs idle and starves the device.
+~90% of the device idle and starves it.
 
 This variant maps one program per CU and splits each output tile along K
 so every CU has work.  Programs accumulate partial sums into ``C`` via

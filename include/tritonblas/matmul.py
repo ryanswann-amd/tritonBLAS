@@ -25,8 +25,8 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 # Small-M dispatch tunables.
 # ────────────────────────────────────────────────────────────────────────
 # When M <= SMALL_M_THRESHOLD the default heuristic launches only
-# ``cdiv(N, BLOCK_N)`` programs, which leaves most CUs idle on MI300X
-# (304 CUs).  ``persistent_matmul_small_m`` instead launches one program
+# ``cdiv(N, BLOCK_N)`` programs, which leaves most CUs idle on the device.
+# ``persistent_matmul_small_m`` instead launches one program
 # per CU and splits each output tile along K.  Set the env var
 # ``TBLAS_DISABLE_SMALL_M=1`` to fall back to the legacy persistent path.
 SMALL_M_THRESHOLD = 32

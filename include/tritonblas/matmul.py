@@ -396,13 +396,22 @@ def matmul_a8w8_lt(
 # MI300X. Routing to the existing work-stealing persistent kernel sizes
 # the grid to N_CU and amortizes the K-loop prologue across many N tiles
 # per WG, yielding ~1.94x geomean over the un-gated path on this cohort.
+#
+# Important: the gate only fires when the user did NOT pass work_stealing
+# explicitly. We use `None` as the sentinel for "unset" in the public/op
+# entry points so an explicit `work_stealing=False` from the user is
+# preserved (no silent override).
 def _skinny_n_persist_eligible(
     a: torch.Tensor,
     b: torch.Tensor,
     enable_streamk: Optional[bool],
     work_stealing: Optional[bool],
 ) -> bool:
-    if enable_streamk or work_stealing:
+    # Respect explicit user override: if the user passed work_stealing as
+    # True or False, do not touch it. Only fire when sentinel-unset (None).
+    if work_stealing is not None:
+        return False
+    if enable_streamk:
         return False
     if a.dtype not in (torch.float16, torch.bfloat16):
         return False
@@ -421,7 +430,7 @@ def _matmul(
     b: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    work_stealing: Optional[bool] = False,
+    work_stealing: Optional[bool] = None,
 ) -> torch.Tensor:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -429,6 +438,8 @@ def _matmul(
 
     if _skinny_n_persist_eligible(a, b, enable_streamk, work_stealing):
         work_stealing = True
+    # Normalize sentinel-unset to False for downstream calls.
+    work_stealing = bool(work_stealing)
 
     out = a.new_empty(M, N)
 
@@ -483,7 +494,7 @@ def _matmul_out(
     out: torch.Tensor,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    work_stealing: Optional[bool] = False,
+    work_stealing: Optional[bool] = None,
 ) -> None:
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
@@ -491,6 +502,8 @@ def _matmul_out(
 
     if _skinny_n_persist_eligible(a, b, enable_streamk, work_stealing):
         work_stealing = True
+    # Normalize sentinel-unset to False for downstream calls.
+    work_stealing = bool(work_stealing)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -509,7 +522,7 @@ def matmul(
     out: Optional[torch.Tensor] = None,
     enable_streamk: Optional[bool] = False,
     sk_grid: Optional[int] = None,
-    work_stealing: Optional[bool] = False,
+    work_stealing: Optional[bool] = None,
 ) -> Optional[torch.Tensor]:
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)

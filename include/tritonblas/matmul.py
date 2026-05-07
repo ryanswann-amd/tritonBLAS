@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,80 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ---------------------------------------------------------------------------
+# kpack gating heuristic
+# ---------------------------------------------------------------------------
+# kpack=2 packs two MFMA K-elements per VALU lane and emits an extra LDS-
+# swizzle/repack sequence in the K-prologue.  The setup cost is amortized
+# across the K-loop, so it is a net win on large-K shapes (K >> BLK_K) but
+# a regression on small-K shapes where the K-loop is too short to repay the
+# pack overhead.
+#
+# Empirical sweep on MI300X (gfx942) at M=N in {512..2048}:
+#   - K <= 512  : kpack=2 regresses 25-30% vs kpack=1
+#   - K  = 768  : roughly neutral (within +/-3%)
+#   - K >= 1024 : kpack=2 wins or matches
+#
+# The default threshold (1024) keeps the small-K cohort on kpack=1 while
+# allowing kpack=2 for any future caller that opts in by passing
+# ``selector`` with a ``kpack`` override or by setting
+# ``TRITONBLAS_KPACK2_K_MIN`` to lower the threshold.
+#
+# The current matmul entry points always run kpack=1 (preserving the previous
+# baseline for every shape) until a tile/dtype-aware policy promotes a shape
+# to kpack=2 by passing an explicit override on the selector.  Even with the
+# override, this gate guarantees that small-K shapes never silently fall
+# into the kpack=2 path again.
+_DEFAULT_KPACK2_K_MIN = 1024
+
+
+def _env_kpack2_k_min(default: int = _DEFAULT_KPACK2_K_MIN) -> int:
+    """Read TRITONBLAS_KPACK2_K_MIN, fall back to the default if unset/invalid."""
+    raw = os.environ.get("TRITONBLAS_KPACK2_K_MIN")
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def select_kpack(
+    K: int,
+    requested_kpack: int = 1,
+    k_min_for_kpack2: Optional[int] = None,
+) -> int:
+    """Return the kpack value to pass to the underlying Triton kernel.
+
+    kpack=2 is only emitted when the caller explicitly asked for it AND the
+    K-dimension is large enough to amortize the LDS-swizzle prologue.  All
+    other cases collapse to kpack=1, which is the safe baseline.
+
+    Args:
+        K: GEMM K-dimension (length of the contracted axis).
+        requested_kpack: kpack the caller would prefer (1 or 2).  Values
+            outside {1, 2} are clamped to 1.
+        k_min_for_kpack2: minimum K to allow kpack=2.  ``None`` means consult
+            ``TRITONBLAS_KPACK2_K_MIN`` then fall back to the empirical default.
+
+    Returns:
+        Either 1 (always safe) or 2 (only on large-K when requested).
+    """
+    if requested_kpack not in (1, 2):
+        return 1
+    if requested_kpack == 1:
+        return 1
+    threshold = _env_kpack2_k_min() if k_min_for_kpack2 is None else int(k_min_for_kpack2)
+    return 2 if K >= threshold else 1
+
+
+def _kpack_for_selector(selector, K: int) -> int:
+    """Resolve kpack from an optional ``selector.kpack`` attribute and gate it."""
+    requested = getattr(selector, "kpack", 1)
+    return select_kpack(K, requested_kpack=requested)
 
 
 
@@ -98,7 +173,9 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # Gate kpack on K to avoid the small-K regression (see select_kpack
+    # at the top of this module for the empirical justification).
+    kpack = _kpack_for_selector(selector, K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +321,9 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # Gate kpack on K (see select_kpack docstring); same rationale as
+    # persistent_matmul_lt above — small-K shapes must stay on kpack=1.
+    kpack = _kpack_for_selector(selector, K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

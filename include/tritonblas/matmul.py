@@ -26,6 +26,117 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ---------------------------------------------------------------------------
+# K-212: Skinny-N (N <= 32) wave-quantization + tile-selection fix.
+#
+# Origami's analytical selector targets square-ish problems and chooses tiles
+# (typically BLOCK_M >= 128, BLOCK_N >= 64, num_warps=8) that under-fill
+# MI300X's 304 CUs when N is tiny.  For N=16, M=8192, BLOCK_M=128, BLOCK_N=128
+# the data-parallel grid is `ceil(8192/128) * ceil(16/128) = 64 * 1 = 64`
+# tiles -- only 64 of 304 CUs busy (21% occupancy).  The other 240 CUs sit
+# idle every wave.  num_warps=8 = 512 threads per CTA on a 128x16 tile is
+# also massively over-warped: a 128x16 tile is one MFMA fragment column, so
+# ~96% of the threads have nothing to do.
+#
+# Fix: when N <= 32, dispatch to the StreamK kernel with a tight skinny-N
+# recipe -- BLOCK_M=64, BLOCK_N in {16, 32}, BLOCK_K=128, num_warps=2 --
+# and grid = N_CU (304 on MI300X).  StreamK splits along K and spreads work
+# across all 304 CUs regardless of the data-parallel grid; the small tile +
+# low warp count eliminates partial-warp / partial-wave waste.
+#
+# Empirical (K-212 sweep, 72 (M,N,K) shapes, MI300X FP16, c42):
+#   default tritonblas geomean ratio vs hipBLASLt = 0.110x
+#   skinny-N gate     geomean ratio vs hipBLASLt = 0.622x  (5.6x lift)
+# Window: M >= 256 and K >= 1024 keeps the gate off launch-bound shapes
+# where the StreamK reduction overhead would dominate.
+# ---------------------------------------------------------------------------
+_SKINNY_N_BLK_M     = 64
+_SKINNY_N_BLK_K     = 128
+_SKINNY_N_NUM_WARPS = 2
+_SKINNY_N_NUM_STAGES = 2
+
+
+def _resolve_skinny_n(M: int, N: int, K: int, enable_streamk):
+    """Decide whether to take the skinny-N StreamK fast path and, if so,
+    return the (BLK_M, BLK_N, BLK_K, num_warps) recipe.  Returns None to
+    fall through to the Origami-selected default path.
+
+    `enable_streamk=True`  : caller explicitly forces StreamK -> respect it.
+    `enable_streamk=False` : caller explicitly forces persistent -> respect it.
+    `enable_streamk=None`  : dispatcher decides; consult shape predicate.
+    """
+    if enable_streamk is True or enable_streamk is False:
+        return None  # caller is explicit; do not override
+    if not (0 < N <= 32 and M >= 256 and K >= 1024):
+        return None
+    # BLOCK_N=16 covers N in [1..16]; for N in (16..32] use BLOCK_N=32 so a
+    # single N-tile still covers the row (avoids a wasted second N-iteration).
+    blk_n = 32 if N > 16 else 16
+    return (_SKINNY_N_BLK_M, blk_n, _SKINNY_N_BLK_K, _SKINNY_N_NUM_WARPS)
+
+
+def _skinny_n_streamk(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: torch.Tensor,
+    BLK_M: int,
+    BLK_N: int,
+    BLK_K: int,
+    num_warps: int,
+    bias: Optional[torch.Tensor] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+):
+    """Direct StreamK dispatch with the skinny-N recipe.  Bypasses Origami;
+    grid = MAX_SMS (real CU count) so all CUs participate."""
+    M, K = a.shape
+    _, N = b.shape
+    even_k = K % BLK_K == 0
+    grids = MAX_SMS  # use full CU complement (304 on MI300X)
+    num_xcds = 8
+    gsize_m = 8
+    block_size = BLK_M * BLK_N
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    streamk_tiles = total_tiles % grids if grids > 0 else 0
+
+    # Reuse globally-allocated lock + P workspace when small enough.
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+    locks.zero_()  # Stream-K requires a clean lock array per call
+
+    chunk_size = max(1, min(gsize_m * gsize_m, grids // num_xcds))
+
+    _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
+        a, b, out,
+        a_scale if quantized else None,
+        b_scale if quantized else None,
+        bias if bias is not None else None,
+        P, locks,
+        M, N, K,
+        a.stride(0), b.stride(1), out.stride(0), out.stride(1),
+        bias.stride(0) if bias is not None else 0,
+        stride_ak=a.stride(1), stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m, NUM_SMS=grids, NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size, STREAMK_TILES=streamk_tiles,
+        BIAS=bias is not None, EVEN_K=even_k,
+        CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
+        QUANTIZED=quantized,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=_SKINNY_N_NUM_STAGES, num_warps=num_warps,
+        waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+    )
+    return out
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -394,7 +505,7 @@ def matmul_a8w8_lt(
 def _matmul(
     a: torch.Tensor,
     b: torch.Tensor,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
@@ -404,9 +515,15 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-212 skinny-N (N<=32) wave-quantization fast path.
+    skinny = _resolve_skinny_n(M, N, K, enable_streamk)
+    if skinny is not None and not work_stealing and a.dtype == b.dtype:
+        return _skinny_n_streamk(a, b, out, *skinny)
+
+    es = bool(enable_streamk) if enable_streamk is not None else False
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=es)
     config = matmul_preamble(selector) if work_stealing else None
-    if enable_streamk:
+    if es:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
@@ -453,7 +570,7 @@ def _matmul_out(
     a: torch.Tensor,
     b: torch.Tensor,
     out: torch.Tensor,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> None:
@@ -461,10 +578,17 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-212 skinny-N (N<=32) wave-quantization fast path.
+    skinny = _resolve_skinny_n(M, N, K, enable_streamk)
+    if skinny is not None and not work_stealing and a.dtype == b.dtype:
+        _skinny_n_streamk(a, b, out, *skinny)
+        return None
+
+    es = bool(enable_streamk) if enable_streamk is not None else False
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=es)
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if es:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
@@ -476,7 +600,7 @@ def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
@@ -630,7 +754,7 @@ def _addmm(
     bias: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> torch.Tensor:
@@ -638,14 +762,19 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
-    config = matmul_preamble(selector) if work_stealing else None
-
     # Allocate an output tensor
     out = a.new_empty(M, N)
 
-    if enable_streamk:
+    # K-212 skinny-N (N<=32) wave-quantization fast path.
+    skinny = _resolve_skinny_n(M, N, K, enable_streamk)
+    if skinny is not None and not work_stealing and a.dtype == b.dtype:
+        return _skinny_n_streamk(a, b, out, *skinny, bias=bias)
+
+    es = bool(enable_streamk) if enable_streamk is not None else False
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=es)
+    config = matmul_preamble(selector) if work_stealing else None
+
+    if es:
         return streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
@@ -702,7 +831,7 @@ def _addmm_out(
     a: torch.Tensor,
     b: torch.Tensor,
     out: torch.Tensor,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> None:
@@ -710,11 +839,17 @@ def _addmm_out(
     M, K = a.shape
     _, N = b.shape
 
-    # Query Origami for solution
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
+    # K-212 skinny-N (N<=32) wave-quantization fast path.
+    skinny = _resolve_skinny_n(M, N, K, enable_streamk)
+    if skinny is not None and not work_stealing and a.dtype == b.dtype:
+        _skinny_n_streamk(a, b, out, *skinny, bias=bias)
+        return None
+
+    es = bool(enable_streamk) if enable_streamk is not None else False
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=es)
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if es:
         streamk_matmul_lt(a, b, out, selector, config, bias=bias, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, bias=bias, work_stealing=work_stealing)
@@ -729,7 +864,7 @@ def addmm(
     a: torch.Tensor,
     b: torch.Tensor,
     out: Optional[torch.Tensor] = None,
-    enable_streamk: Optional[bool] = False,
+    enable_streamk: Optional[bool] = None,
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:

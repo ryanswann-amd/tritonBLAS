@@ -258,6 +258,17 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # Select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
+    _lds_cfg = select_lds_config(
+        M, N, K,
+        a_dtype=str(a.dtype), b_dtype=str(b.dtype), c_dtype=str(c.dtype),
+        block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+        streamk=False, work_stealing=work_stealing,
+    )
+    num_warps = _lds_cfg.num_warps
+    kpack = _lds_cfg.kpack
+
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     if num_xcds > 0:
@@ -413,6 +424,17 @@ def streamk_matmul_lt(
     kpack = kpack_for_tile(BLK_M, BLK_N)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # Select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
+    # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
+    _lds_cfg = select_lds_config(
+        M, N, K,
+        a_dtype=str(a.dtype), b_dtype=str(b.dtype), c_dtype=str(c.dtype),
+        block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+        streamk=True, work_stealing=work_stealing,
+    )
+    num_warps = _lds_cfg.num_warps
+    kpack = _lds_cfg.kpack
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

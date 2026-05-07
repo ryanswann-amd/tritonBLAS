@@ -90,10 +90,18 @@ def _should_auto_streamk(M: int, N: int, K: int, num_cus: int = MAX_SMS) -> bool
         return False
     # Conservative grid estimate (real selector picks block sizes after this
     # heuristic; here we use representative values to gate the decision).
+    #
+    # Stream-K only beats persistent when the data-parallel grid is *much*
+    # smaller than the CU count -- otherwise persistent's per-tile L2 reuse
+    # along K dominates the K-split + reduction overhead.  Empirically on
+    # MI325X (gfx942, 304 CUs, ROCm 7.2) the break-even is around grid=12:
+    #   grid=4-8  : Stream-K wins by 1.06x .. 1.34x
+    #   grid=16   : Stream-K REGRESSES by 0.78x
+    # so we require grid * 32 <= num_CUs (i.e. grid<=9 on a 304-CU device).
     est_block_m = 16 if M <= 16 else 32
     est_block_n = 128
     grid = ((M + est_block_m - 1) // est_block_m) * ((N + est_block_n - 1) // est_block_n)
-    return grid * 4 < num_cus
+    return grid * 32 <= num_cus
 
 
 def _resolve_streamk(M: int, N: int, K: int,

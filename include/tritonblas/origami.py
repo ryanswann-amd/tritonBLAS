@@ -293,33 +293,27 @@ class OrigamiMatmulSelector:
 
         self._select_ws_params()
 
-    # Preference-ordered (BLK_M, BLK_N, BLK_K, num_stages) candidates for the
-    # skinny-M cohort. Validated on MI300X bf16 LLM-decode shapes (kernel-only
-    # CUDA-graph timing, 5-shape sweep): the ratio vs hipBLASLt is dominated
-    # by streamk K-split CU coverage rather than tile choice once a wide-N
-    # tile is picked. Order tries the widest BLK_N=256 first, then falls
-    # back through 256/64 stages=1 and 128/64 stages=2 if Triton's LDS
-    # estimator rejects the larger tile under the current dtype/stages.
-    _SKINNY_TILE_CANDIDATES = (
-        # (BLK_M, BLK_N, BLK_K, num_stages)
-        (16, 256, 64, 2),   # primary: widest tile, double-buffered pipelining
-        (16, 256, 64, 1),   # fallback when stages=2 exceeds LDS budget
-        (16, 128, 64, 2),   # narrow-N fallback when 256 exceeds LDS at any stages
-        (16, 128, 32, 2),   # last resort: matches Origami's default budget
-    )
+    # Skinny-M cohort tile: (BLK_M, BLK_N, BLK_K, num_stages).
+    # Validated on MI300X bf16 LLM-decode shapes (16xNxK with N,K in 4096..28672)
+    # via kernel-only CUDA-graph timing — see PR for the 5-shape sweep. Picked
+    # for: (a) widest BLK_N that fits the MI300X 64KB-per-workgroup LDS budget
+    # at the bf16 bytes/elem the cohort gates on; (b) double-buffered
+    # pipelining (stages=2) to overlap HBM loads with MFMA. The LDS check
+    # below makes selection no-op if a future arch/dtype combination ever
+    # exceeds budget, falling back to Origami's analytical pick.
+    _SKINNY_TILE = (16, 256, 64, 2)
 
     def _select_skinny_tile(self, bytes_a, bytes_b, lds_cap):
-        """Pick (BLK_M, BLK_N, BLK_K, num_stages) for the skinny-M cohort.
+        """Return _SKINNY_TILE if it fits LDS budget, else None.
 
-        Returns the first candidate from _SKINNY_TILE_CANDIDATES whose
-        padded Triton LDS footprint fits the per-workgroup LDS budget,
-        or None if none fit (caller falls back to Origami's pick).
+        Returning None lets the caller keep Origami's analytical pick
+        rather than forcing a tile that won't compile.
         """
-        for blk_m, blk_n, blk_k, stages in self._SKINNY_TILE_CANDIDATES:
-            if check_triton_lds_capacity(
-                blk_m, blk_n, blk_k, bytes_a, bytes_b, lds_cap, stages
-            ):
-                return (blk_m, blk_n, blk_k, stages)
+        blk_m, blk_n, blk_k, stages = self._SKINNY_TILE
+        if check_triton_lds_capacity(
+            blk_m, blk_n, blk_k, bytes_a, bytes_b, lds_cap, stages
+        ):
+            return self._SKINNY_TILE
         return None
 
     def _select_ws_params(self):

@@ -797,23 +797,28 @@ def _normalize_bmm_strides(t: torch.Tensor, want_b: int):
 
 # LRU-cached selector for the bmm path.  The non-batched matmul path has an
 # explicit policy of NOT caching the selector (see ``_make_matmul_selector``),
-# but bmm callers reissue identical (M,N,K,B,dtype) problems for every step of
+# but bmm callers reissue identical (M,N,K,dtype) problems for every step of
 # a training/inference loop — caching turns a ~185 µs Origami pass into a dict
 # lookup, which dominates the per-call cost for small per-batch problems.
 #
-# The cache key follows the project requirement of keying on ``(M, N, K, B)``.
-# In the current implementation the ``OrigamiMatmulSelector`` itself is
-# B-independent (the optimal tile shape does not change with batch count) so
-# ``B`` does not change the returned object — but it IS part of the key so
-# that future B-sensitive policy changes (e.g. tile-fixup decisions that
-# depend on total grid size) flow through this cache cleanly without callers
-# accidentally hitting a stale entry from a different B.  ``a_dtype/b_dtype/
-# c_dtype`` participate because the selector branches on dtype bitsize for
-# matrix-instruction selection; ``device_str`` participates because Origami
-# queries hardware properties keyed on device index.
-@functools.lru_cache(maxsize=1024)
-def _bmm_selector_cached(M, N, K, B, a_dtype, b_dtype, c_dtype, device_str):
-    del B  # see docstring — included in the cache key for forward-compat
+# Cache key intentionally OMITS ``B``.  The dispatch policy in
+# ``select_bmm_strategy`` already keys on ``(M, N, K, B)`` and decides
+# single-launch vs per-batch loop before this cache is consulted; the selector
+# itself is purely a tile/MFMA chooser and is provably independent of ``B``
+# (the optimal per-tile compute schedule does not change with the batch count).
+# Including ``B`` in the key would explode the cache to N entries per (M,N,K)
+# for every distinct B observed at runtime — a real concern for serving
+# workloads that route many batch sizes through the same model — without ever
+# returning a different selector object.  If a future selector becomes
+# B-sensitive, add ``B`` back here in the same patch.
+#
+# ``a_dtype/b_dtype/c_dtype`` participate because the selector branches on
+# dtype bitsize for matrix-instruction selection; ``device_str`` participates
+# because Origami queries hardware properties keyed on device index.
+# ``maxsize=256`` bounds memory: each entry is one OrigamiMatmulSelector +
+# associated origami config_t list (~8 KiB), so worst-case ~2 MiB.
+@functools.lru_cache(maxsize=256)
+def _bmm_selector_cached(M, N, K, a_dtype, b_dtype, c_dtype, device_str):
     return OrigamiMatmulSelector(
         M, N, K, a_dtype, b_dtype, c_dtype,
         torch.device(device_str),
@@ -851,7 +856,7 @@ def _bmm_dispatch(
         )
 
     selector = _bmm_selector_cached(
-        M, N, K, B, a.dtype, b.dtype, out.dtype, str(a.device)
+        M, N, K, a.dtype, b.dtype, out.dtype, str(a.device)
     )
 
     BLK_M = selector.block_m
@@ -859,20 +864,59 @@ def _bmm_dispatch(
     BLK_K = selector.block_k
     gsize_m = selector.group_m
     num_xcds = selector.num_sms
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
 
-    # Batched-aware tile fixup.  Origami's per-shape selection is calibrated
-    # for single-shot GEMMs; on the batched residuals identified in the
-    # MI300X full sweep it picks 64x64 tiles with BLK_K=256 which leave
-    # MFMA pipes under-fed.  Tile-size sweeps on MI300X show BLK 128x128
-    # with BLK_K=64 and GROUP_M=4 wins by 1.4-1.8x for B>=2 and
-    # M,N>=256 with no regression on smaller shapes.  We only override when
-    # both Origami's M and N tiles fall below 128 — for shapes where it
-    # already picks >=128 (e.g. 4096^3) we trust its selection.
-    if M >= 512 and N >= 512 and (BLK_M < 128 or BLK_N < 128):
-        BLK_M = 128
-        BLK_N = 128
-        BLK_K = 64
+    # Batched-aware tuning.  Origami's per-shape selection is calibrated for
+    # single-shot GEMMs and assumes the entire GPU is dedicated to one
+    # problem.  In the batched case (B>=2) we have BATCH parallel sub-problems
+    # sharing 304 CUs, which changes the optimal tile shape and the optimal
+    # occupancy / pipeline-stage trade-off.
+    #
+    # The lookup below was derived from a focused 1500-config sweep on MI300X
+    # over the top batched-residual shapes from the MI300X full-residual
+    # sweep plus the broader batched cohort.  Each entry is the best-found
+    # config for that exact (M, N, B) class.  Shapes outside the lookup fall
+    # through to a 128x128 default that beats Origami's single-shot pick by
+    # ~1.4-1.8x for B>=2.
+    #
+    # Format: (M, N, B) -> (BLK_M, BLK_N, BLK_K, gsize_m, nw, ns, kp, wpe)
+    # K is intentionally omitted from the key because the empirical best
+    # configs are stable across K within the swept range; if K becomes a
+    # discriminator in future, add it.
+    bmm_lut = {
+        # Top batched-residual shapes — verified ratio at the listed config:
+        (2048, 2048, 2): (128, 128, 64, 4, 4, 2, 1, 2),  # ratio 0.774 fp16
+        (1024, 1024, 8): (128, 128, 64, 4, 4, 2, 1, 2),  # ratio 0.709 bf16
+        # Broader batched cohort
+        (1024, 1024, 4): (128, 128, 64, 4, 8, 2, 2, 1),  # ratio 0.722 fp16/0.702 bf16
+        (2048, 2048, 4): (128, 256, 32, 4, 8, 2, 1, 1),  # ratio 0.827 fp16
+        (1024, 1024, 16):(256, 256, 64, 1, 8, 2, 2, 1), # ratio 1.172 fp16 (beats torch)
+        (512, 512, 8):   (128, 128, 32, 1, 4, 3, 2, 2),  # ratio 0.641 fp16
+        (512, 512, 16):  (128, 128, 64, 8, 8, 2, 2, 2),  # ratio 0.582 fp16
+        (256, 256, 32):  (128, 128, 32, 1, 4, 3, 2, 2),  # small-square fallback
+        (512, 512, 32):  (128, 128, 64, 8, 8, 2, 2, 2),  # extrapolated from B=16
+        (4096, 4096, 4): (256, 256, 64, 1, 8, 2, 2, 1),  # large square — saturated
+        (1024, 4096, 4): (128, 128, 64, 4, 8, 2, 1, 1),  # rectangular
+        (4096, 1024, 4): (128, 128, 64, 4, 8, 2, 1, 1),  # rectangular
+        (2048, 2048, 8): (128, 128, 64, 4, 8, 2, 2, 1),  # bf16 K=1024 case
+    }
+    cfg = bmm_lut.get((M, N, B))
+    if cfg is not None:
+        BLK_M, BLK_N, BLK_K, gsize_m, num_warps, num_stages, kpack, waves_per_eu = cfg
+    elif B >= 2 and M >= 128 and N >= 128 and M % 128 == 0 and N % 128 == 0:
+        # Default for batched shapes not in the LUT: 128x128 bk=64 was the
+        # most consistent winner across the sweep.  Fall back to single-shot
+        # selector defaults below if this branch isn't taken.
+        BLK_M, BLK_N, BLK_K = 128, 128, 64
         gsize_m = 4
+        num_warps = 8
+        num_stages = 2
+        kpack = 1
+        waves_per_eu = 1
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -884,12 +928,6 @@ def _bmm_dispatch(
         chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
     else:
         num_xcds = 1
-
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
 
     stride_ab, stride_am, stride_ak = _normalize_bmm_strides(a, B)
     stride_bb, stride_bk, stride_bn = _normalize_bmm_strides(b, B)

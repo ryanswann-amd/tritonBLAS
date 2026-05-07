@@ -12,6 +12,27 @@ both contiguous (B, M, K) layouts and broadcasted rank-2 inputs (stride==0).
 
 The intra-batch tile schedule mirrors the non-batched persistent kernel so the
 existing Origami tile-selection heuristic can be reused without modification.
+
+Stride-zero broadcasting (no separate code path required)
+---------------------------------------------------------
+The batched dispatcher in ``matmul.py:_normalize_bmm_strides`` returns
+``stride_b == 0`` for rank-2 operands that should be broadcast across the batch
+dimension (e.g. (M, K) x (B, K, N) — A is shared across all batches).  Inside
+this kernel the per-batch base pointer is computed as
+
+    A_BATCH = A + pid_b.to(tl.int64) * stride_ab
+
+When ``stride_ab == 0`` every batch reads from the same base pointer, which is
+exactly the broadcast semantics torch.matmul/torch.bmm define.  No explicit
+``if BROADCAST_A`` constexpr branch is needed: the multiplication just yields
+zero and the existing per-tile load addresses are correct.  This keeps the
+kernel monomorphic across the broadcast/non-broadcast cases — a single compiled
+kernel handles both, avoiding compile-time fan-out by 2^N where N is the number
+of broadcast-capable operands.
+
+The ``tl.assume(stride_ab >= 0)`` (vs ``> 0`` for the row/col strides) is the
+only acknowledgement of the stride-zero case; relaxing the assumption matters
+only for the address-generation simplifier, not for the schedule.
 """
 
 import triton

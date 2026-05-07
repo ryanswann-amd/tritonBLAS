@@ -279,7 +279,14 @@ class OrigamiMatmulSelector:
     # ------------------------------------------------------------------
     # K-149: small-M tile widening
     # ------------------------------------------------------------------
-    SMALL_M_THRESHOLD = 128          # M strictly under this is "small" (incl. 16/32/64)
+    # Tile widening + SPLIT_K only pays off when K is large enough that the
+    # K-loop dominates the per-tile runtime; below this K the SPLIT_K launch
+    # overhead and the lower per-tile occupancy of a wide tile lose to the
+    # original Origami pick.  Empirically calibrated on MI300X (PRD shape grid):
+    #   K=4096, K=8192:   orig wins
+    #   K=16384:          widen+SPLIT_K wins for M<=32 (M=64 ties)
+    SMALL_M_THRESHOLD = 64           # M strictly under this is "small"
+    SMALL_M_K_THRESHOLD = 12288      # need K of at least this much
     SMALL_M_BN_TARGETS = (256, 128)  # try larger BN tiles in this order
     SMALL_M_BK_TARGETS = (128, 64)   # try larger BK tiles in this order
 
@@ -300,6 +307,11 @@ class OrigamiMatmulSelector:
             # Stream-K owns its own grid; don't perturb its tile choice.
             return
         if self._m >= self.SMALL_M_THRESHOLD:
+            return
+        if self._k < self.SMALL_M_K_THRESHOLD:
+            # Below this K the K-loop is short enough that the original
+            # Origami tile + plain data-parallel kernel beats wide-tile +
+            # SPLIT_K (which carries fixed launch + atomic overhead).
             return
 
         bytes_a = self._a_dtype_bitsize / 8
@@ -354,6 +366,11 @@ class OrigamiMatmulSelector:
     # the second-wave benefit of K-splitting comfortably beats its overhead;
     # above that threshold the atomic-add tax wins.
     SPLIT_K_GATE_UTIL = 0.5
+    # Minimum K to consider SPLIT_K at all.  Below this the absolute K-loop
+    # work is too small for K-splitting to amortize the extra launch + atomic
+    # overhead vs the standard data-parallel kernel; matches the
+    # SMALL_M_K_THRESHOLD used by the tile-widening heuristic.
+    SPLIT_K_MIN_K = 12288
 
     def _select_split_k(self) -> int:
         """Pick a SPLIT_K factor in {1,2,4,8,16}.
@@ -380,6 +397,9 @@ class OrigamiMatmulSelector:
         owns that path, so we leave SPLIT_K = 1 when ``streamk`` is True.
         """
         if self.streamk:
+            return 1
+        if self._k < self.SPLIT_K_MIN_K:
+            # Short K → orig data-parallel path beats K-splitting overhead.
             return 1
 
         bm = self._result.config.mt.m

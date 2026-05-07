@@ -10,8 +10,136 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.skinny_gemv import skinny_gemv_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ----------------------------------------------------------------------------
+# Skinny-GEMV (undertile) shape-gated routing.
+#
+# When min(M, N) <= SKINNY_THRESHOLD the general persistent kernel wastes the
+# bulk of its 128x128 tile (M=16 fills 12.5% of the M dim, etc.).  We dispatch
+# a dedicated kernel sized for the small dim instead.  Disabled with the
+# environment variable TBLAS_DISABLE_SKINNY_GEMV=1 for A/B testing and the
+# debug variable TBLAS_DEBUG_SKINNY=1 prints the dispatch decision once per
+# call so an external grep can confirm the path is reachable.
+# ----------------------------------------------------------------------------
+SKINNY_THRESHOLD = 32
+
+
+def _skinny_block_dim(small):
+    """Pick the BLOCK size for the small dim: 16 for very-skinny, else 32.
+
+    Both choices match an MFMA M=16 fragment (the 32 case stacks two).
+    """
+    if small <= 16:
+        return 16
+    return 32
+
+
+def _should_use_skinny_gemv(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    bias,
+    quantized: bool,
+    enable_streamk: bool,
+    work_stealing: bool,
+) -> bool:
+    """Gate to the skinny-GEMV path.
+
+    Conservative: only handle the unquantized, no-bias, no-streamk, no-WS
+    fp16/bf16/fp32 case.  Quantized + bias + streamk fall through to the
+    general path.
+    """
+    import os
+    if os.environ.get("TBLAS_DISABLE_SKINNY_GEMV", "").lower() in ("1", "true", "yes"):
+        return False
+    if quantized or bias is not None or enable_streamk or work_stealing:
+        return False
+    if a_dtype != b_dtype:
+        return False
+    if a_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        return False
+    if min(M, N) > SKINNY_THRESHOLD:
+        return False
+    # K must be large enough to make the kernel reduction-bound; tiny K is
+    # better served by the persistent path's grouping.
+    if K < 64:
+        return False
+    return True
+
+
+def _skinny_gemv_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+):
+    """Launch the skinny-GEMV Triton kernel.
+
+    Caller must already have decided (via _should_use_skinny_gemv) that this
+    path applies.  Tile sizes:
+      - small dim:   16 (or 32 if 16 < small <= 32) — matches MFMA M=16
+      - other dim:   128 — single wave of bf16 lanes
+      - K:           32 (16 for fp32) — kpack=1, num_warps=2
+    """
+    import os
+    M, K = a.shape
+    _, N = b.shape
+
+    if M <= N:
+        block_m = _skinny_block_dim(M)
+        block_n = 128
+    else:
+        block_m = 128
+        block_n = _skinny_block_dim(N)
+
+    # K block: 32 is a good fit for fp16/bf16 MFMA(16,16,16) with kpack=1;
+    # fp32 wants a smaller K to keep LDS small and let num_warps=2 land.
+    if a.dtype == torch.float32:
+        block_k = 16
+    else:
+        block_k = 32
+
+    even_k = (K % block_k) == 0
+    grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
+
+    if os.environ.get("TBLAS_DEBUG_SKINNY", "").lower() in ("1", "true", "yes"):
+        # Single-line, grep-friendly trace for verification.
+        print(
+            f"[tritonblas] skinny_gemv dispatch M={M} N={N} K={K} "
+            f"block=({block_m},{block_n},{block_k}) grid={grid} dtype={a.dtype}"
+        )
+
+    _maybe_wrap(skinny_gemv_matmul, probe_tensor=a)[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        EVEN_K=even_k,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_warps=2,
+        num_stages=2,
+        waves_per_eu=0,
+        matrix_instr_nonkdim=16,
+        kpack=1,
+    )
+    return c
 
 
 
@@ -372,6 +500,16 @@ def matmul_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    M, K = a.shape
+    _, N = b.shape
+    if _should_use_skinny_gemv(
+        M, N, K, a.dtype, b.dtype, c.dtype,
+        bias=None, quantized=False,
+        enable_streamk=bool(enable_streamk),
+        work_stealing=bool(work_stealing),
+    ):
+        return _skinny_gemv_lt(a, b, c)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
@@ -403,6 +541,16 @@ def _matmul(
     _, N = b.shape
 
     out = a.new_empty(M, N)
+
+    # Skinny-GEMV undertile shape gate: bypass Origami/persistent path when one
+    # of the outer dimensions is too small to fill a 128x128 tile.
+    if _should_use_skinny_gemv(
+        M, N, K, a.dtype, b.dtype, out.dtype,
+        bias=None, quantized=False,
+        enable_streamk=bool(enable_streamk),
+        work_stealing=bool(work_stealing),
+    ):
+        return _skinny_gemv_lt(a, b, out)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -460,6 +608,15 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _should_use_skinny_gemv(
+        M, N, K, a.dtype, b.dtype, out.dtype,
+        bias=None, quantized=False,
+        enable_streamk=bool(enable_streamk),
+        work_stealing=bool(work_stealing),
+    ):
+        _skinny_gemv_lt(a, b, out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

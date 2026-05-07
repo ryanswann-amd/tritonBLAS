@@ -36,9 +36,12 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# Skinny-GEMV kernel (matvec / decode shapes where min(M, N) <= 32)
+from .skinny_gemv import skinny_gemv_matmul
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
-           'fp4_matmul', 'stages']
+           'fp4_matmul', 'skinny_gemv_matmul', 'stages']

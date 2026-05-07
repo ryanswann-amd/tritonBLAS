@@ -42,9 +42,10 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 # The cache key captures everything that affects the captured launch: shape,
 # dtype, layout, and dispatch flags.  Static input/output tensors stay alive
 # for the lifetime of the cache entry so graph.replay() always touches the
-# same device pointers.  copy_() into the static buffers is a single 16-byte
-# DMA for the M=16,N=128,K=128 fp16 case -- much cheaper than the residual
-# Python tail it replaces.
+# same device pointers.  Output is copied out of the static buffer into a
+# fresh allocation (or the caller's `out=`) -- one extra ~9 us copy_() that
+# avoids any possibility of silent corruption from buffer aliasing across
+# successive calls.
 #
 # Default gate (M*N*K < 20_000_000) targets the K-146 tiny cohort
 # (M<=32, including M=16,N=1024,K=1024 which has work=16.8M) while leaving
@@ -137,12 +138,12 @@ def _graph_replay_matmul(a: torch.Tensor, b: torch.Tensor,
                          enable_streamk: bool, work_stealing: bool) -> torch.Tensor:
     """Run matmul via cached CUDAGraph replay.
 
-    Caller-provided `out` semantics: if `out` is given we copy_() the captured
-    result into it (one extra device-side launch).  If `out` is None we return
-    the captured static buffer directly -- callers must consume / clone the
-    result before the next replay overwrites it.  This drops the residual
-    output-copy launch that otherwise re-introduces the host tail this fast
-    path is designed to eliminate.
+    Always copies the result out of the captured static buffer into either
+    the caller's `out` tensor or a fresh allocation.  This costs ~9 us
+    (one extra device-side `copy_()`) but eliminates the silent-corruption
+    risk of returning the captured buffer directly: any caller that holds
+    the result across a subsequent call (accumulating into a list, async
+    use, retaining for backward) would otherwise see their data mutated.
     """
     global _graph_replay_calls
     _graph_replay_calls += 1
@@ -166,10 +167,7 @@ def _graph_replay_matmul(a: torch.Tensor, b: torch.Tensor,
     entry["static_b"].copy_(b)
     entry["graph"].replay()
     if out is None:
-        # Return the captured buffer directly -- no extra launch.  Caller
-        # must consume before next replay.  This is the standard CUDAGraph
-        # alias-output pattern (cf. torch.cuda.make_graphed_callables).
-        return entry["static_out"]
+        out = torch.empty_like(entry["static_out"])
     out.copy_(entry["static_out"])
     return out
 

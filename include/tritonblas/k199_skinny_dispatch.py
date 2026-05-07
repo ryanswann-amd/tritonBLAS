@@ -49,6 +49,16 @@ NOT here — see ``output/verify_kernel_bf16.json`` and
 per-shape numbers and re-derivation if the production wrapper (K-180) or
 launch floor improves enough that more entries clear the noise floor.
 
+**Post-filter cohort A/B** (the SHIPPED 2-entry table A/B'd against the
+analytical default on the full 30-shape cohort):
+``output/verify_kernel_filtered_bf16.json`` — 2/30 cohort hits, geomean
+kernel speedup vs default = **1.006x** (≥ 1.00x — confirms the SHIPPED
+table does not regress the cohort, addressing reviewer concerns that
+selecting from a single noisy run could overfit).
+``output/verify_kernel_filtered_fp16.json`` — 0/30 hits, geomean 1.009x
+(noise on identical default kernels on both arms — confirms the dtype
+filter rejects all fp16 callers).
+
 Gating layers (per K-654: never apply a knob unconditionally):
 
 * **Exact (M, N, K, dtype) match** — the table only contains entries that

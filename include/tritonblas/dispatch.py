@@ -119,46 +119,124 @@ def small_m_grid(
     return grid, grid
 
 
-SPLIT_K_M_MAX = 16
-SPLIT_K_N_MAX = 2048
-SPLIT_K_K_MIN = 8192
+# --------------------------------------------------------------------------
+# Split-K dispatch (CU-starved corner)
+# --------------------------------------------------------------------------
+#
+# When the small-M block override still produces ``total_tiles < num_cus``
+# (e.g. M<=16 N<=4096 K>=4096, or any small-M shape with N<=2048), the
+# launch grid leaves >50% of MI300X's 304 CUs idle even at the smallest
+# legal MFMA tile (16x16).  The persistent grid-stride loop cannot recover
+# that capacity because there are simply not enough output tiles for one
+# workgroup-per-tile.
+#
+# Split-K shards the K dimension across SPLIT_K extra workgroups per tile,
+# each computing a partial sum and atomic-adding into an fp32 partial
+# output buffer; a tiny finaliser cast converts back to the user dtype.
+# Numerically this is the same K-summation error bound as the unsharded
+# path (fp16 loads, fp32 accum, fp32 atomic_add); operationally it lifts
+# the grid from ``total_tiles`` to ``total_tiles * SPLIT_K`` which we cap
+# at ``num_cus`` so we don't oversubscribe.
+#
+# SPLIT_K is chosen automatically so that:
+#   * launch grid <= num_cus (no oversubscription),
+#   * each shard has >= ``MIN_BK_ITERS_PER_SHARD`` BLOCK_K iterations
+#     (so the MFMA pipeline still fills inside each workgroup), and
+#   * SPLIT_K is a power of 2 (clean K-shard alignment).
+# Gate fires iff the resulting SPLIT_K would be >= 2.
+
+# Each K-shard needs enough BLOCK_K iterations for the 2-stage MFMA
+# pipeline to fill; below this threshold the per-launch overhead and
+# atomic_add contention eats the parallelism win.  Empirically (autotune
+# sweep over {4, 8, 16, 32}) 8 BK-iter floor wins the cohort geomean.
+MIN_BK_ITERS_PER_SHARD = 8
+
+# Hard cap on SPLIT_K.  Beyond 8 the fp32 atomic-add traffic into the
+# scratch buffer dominates and kills the parallelism win.
+MAX_SPLIT_K = 8
+
+# Split-K only fires when total_tiles is *aggressively* below num_cus.
+# At only 2x undersubscription the persistent grid-stride loop with one
+# workgroup per tile is already fast enough that the overhead of
+# split-K's fp32 scratch + atomic_add reduction + finaliser cast
+# regresses performance (autotune sweep showed 0.05x-0.15x regression on
+# 12 shapes when the gate was at 2x).  4x is the smallest threshold
+# where the parallelism win dominates the overhead.
+TILE_UNDERSUB_FACTOR = 4
+
+# Minimum total K work to make split-K worthwhile.  Below this the
+# persistent grid-stride path beats split-K -- Stream-K's per-tile
+# bookkeeping + atomic-store reduction overhead exceeds the parallelism
+# win.  Cohort sweep:
+#   K=2048 -> persistent wins 24/32 shapes -> off
+#   K=4096 -> persistent wins 18/32 shapes -> off (geomean drops 0.013x
+#             when split-K fires here)
+#   K=8192 -> Stream-K wins 22/32 shapes  -> on (geomean lifts 0.013x)
+# K>=8192 is the durable threshold.
+MIN_K_FOR_SPLIT_K = 8192
+
+
+def _split_k_factor(M: int, N: int, K: int, num_cus: int) -> int:
+    """Choose SPLIT_K (power of 2 in [1, MAX_SPLIT_K]).  Returns 1 when
+    split-K is not worthwhile (gate stays off).
+
+    Three guards (tuned on the K-169 small-M cohort):
+      * ``total_tiles * TILE_UNDERSUB_FACTOR <= num_cus`` -- only fire when
+        the persistent path is at least 4x under-subscribed; smaller
+        under-subscription is well-served by the grid-stride loop.
+      * ``K >= MIN_K_FOR_SPLIT_K`` -- below this the fp32 atomic_add
+        overhead dominates the parallelism win.
+      * Each shard gets at least ``MIN_BK_ITERS_PER_SHARD`` BLOCK_K iters,
+        so the MFMA pipeline still fills inside each workgroup.
+    """
+    if K < MIN_K_FOR_SPLIT_K:
+        return 1
+    bm, bn, bk, _, _ = small_m_block_override(M, N, K, num_cus)
+    total_tiles = ((M + bm - 1) // bm) * ((N + bn - 1) // bn)
+    if total_tiles * TILE_UNDERSUB_FACTOR > num_cus:
+        return 1
+    iters_total = max(1, K // bk)
+    # Don't let any shard have fewer than MIN_BK_ITERS_PER_SHARD iters.
+    max_sk_by_K = max(1, iters_total // MIN_BK_ITERS_PER_SHARD)
+    # Don't oversubscribe the chip.
+    target_sk = num_cus // total_tiles
+    sk = min(target_sk, max_sk_by_K, MAX_SPLIT_K)
+    if sk < 2:
+        return 1
+    # Round down to the largest power of 2 (clean K-shard alignment so
+    # K_per_split is divisible by BLOCK_K when K already is).
+    sk_pow2 = 1
+    while sk_pow2 * 2 <= sk:
+        sk_pow2 *= 2
+    return sk_pow2
 
 
 def should_use_split_k_path(M: int, N: int, K: int, num_cus: int) -> bool:
-    """Gate for the split-K Stream-K fall-back.
+    """Gate for the split-K dispatch path.
 
     Pre-condition: should_use_small_m_path returned True.
 
-    Routes the structurally-CU-starved corner (M<=16, N<=2048, K>=8192)
-    through Stream-K so K shards across CUs.  The persistent grid-stride
-    path can't recover the >75% idle CUs there because the output-tile
-    count is structurally below num_cus.
+    Fires whenever the small-M override would still leave >50% of CUs
+    idle AND there is enough K work to shard with at least
+    MIN_BK_ITERS_PER_SHARD BLOCK_K iterations per shard.  See
+    ``_split_k_factor``.
     """
     if _env_disable():
         return False
-    return M <= SPLIT_K_M_MAX and N <= SPLIT_K_N_MAX and K >= SPLIT_K_K_MIN
+    if M > SMALL_M_THRESHOLD:
+        return False
+    return _split_k_factor(M, N, K, num_cus) >= 2
 
 
 def split_k_block_override(
     M: int, N: int, K: int, num_cus: int,
 ) -> Tuple[int, int, int, int, int, int]:
-    """Return (BM, BN, BK, GROUP_SIZE_M, NUM_WARPS, sk_grid) for split-K.
+    """Return ``(BLOCK_M, BLOCK_N, BLOCK_K, GROUP_SIZE_M, NUM_WARPS, SPLIT_K)``.
 
-    BM=16 BN=32 BK=128, num_warps=4.  sk_grid picks the largest factor in
-    {8,6,4,3,2} such that tiles*factor<=num_cus AND iters_per_tile/factor>=8.
+    Re-uses the small-M block recipe so the (BM, BN, BK, num_warps) tuple
+    matches what the persistent path would have used; SPLIT_K is chosen by
+    ``_split_k_factor`` to fill the chip without oversubscription.
     """
-    bm, bn, bk = 16, 32, 128
-    while K % bk != 0 and bk > 16:
-        bk //= 2
-
-    tiles = ((M + bm - 1) // bm) * ((N + bn - 1) // bn)
-    iters_per_tile = max(1, (K + bk - 1) // bk)
-
-    sk_grid = tiles
-    for factor in (8, 6, 4, 3, 2):
-        candidate = tiles * factor
-        if candidate <= num_cus and iters_per_tile // factor >= 8:
-            sk_grid = candidate
-            break
-
-    return bm, bn, bk, 1, 4, sk_grid
+    bm, bn, bk, gm, nw = small_m_block_override(M, N, K, num_cus)
+    sk = _split_k_factor(M, N, K, num_cus)
+    return bm, bn, bk, gm, nw, sk

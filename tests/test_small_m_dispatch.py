@@ -39,23 +39,41 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 
+# Workaround for a torch+ROCm hipBLASLt bug in older PyTorch ROCm builds
+# (observed on torch 2.9.1+rocm6.3) where fp32 GEMM with M>=2 raises
+# "HIP error: named symbol not found".  Setting these *before* importing
+# torch forces rocBLAS, which has no such issue.  No effect on newer
+# torch/ROCm builds where hipBLASLt works fine.
+os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+os.environ.setdefault("DISABLE_ADDMM_HIP_LT", "1")
+os.environ.setdefault("ROCBLAS_USE_HIPBLASLT", "0")
+
 import pytest
 import torch
+
+# Belt-and-braces: switch the preferred BLAS library at the torch level
+# too, in case the env vars weren't read before torch imported its native
+# bindings.
+try:
+    torch.backends.cuda.preferred_blas_library("cublas")
+except Exception:
+    pass
 
 import tritonblas
 from tritonblas.dispatch import (
     LDS_BUDGET_BYTES,
+    MAX_SPLIT_K,
+    MIN_BK_ITERS_PER_SHARD,
     NUM_PIPELINE_STAGES,
     SMALL_M_THRESHOLD,
-    SPLIT_K_K_MIN,
-    SPLIT_K_M_MAX,
-    SPLIT_K_N_MAX,
+    _split_k_factor,
     should_use_small_m_path,
     should_use_split_k_path,
     small_m_block_override,
     small_m_grid,
     split_k_block_override,
 )
+from tritonblas.kernels.split_k_gemm import split_k_matmul as _split_k_matmul_fn
 
 
 SMALL_M_DIMS = [
@@ -148,35 +166,83 @@ def test_should_use_small_m_skips_m64_narrow_n():
     assert should_use_small_m_path(64, 8192, 2048, 32, 64, NUM_CUS_MI300X)
 
 
-def test_split_k_gate_positive():
-    assert should_use_split_k_path(SPLIT_K_M_MAX, SPLIT_K_N_MAX, SPLIT_K_K_MIN, NUM_CUS_MI300X)
+def test_split_k_gate_positive_cu_starved():
+    """Gate fires on the structurally CU-starved corner (total_tiles * 4
+    <= num_cus AND K >= MIN_K_FOR_SPLIT_K)."""
     assert should_use_split_k_path(1, 1024, 8192, NUM_CUS_MI300X)
-    assert should_use_split_k_path(16, 2048, 8192, NUM_CUS_MI300X)
+    assert should_use_split_k_path(8, 2048, 8192, NUM_CUS_MI300X)
+    assert should_use_split_k_path(16, 1024, 8192, NUM_CUS_MI300X)
+    # M=64 N=1024 K=8192 still fires: tiles = 2*32 = 64, 64*4=256 <= 304.
+    assert should_use_split_k_path(64, 1024, 8192, NUM_CUS_MI300X)
 
 
 def test_split_k_gate_negative():
-    """Split-K rejects shapes outside the corner."""
-    assert not should_use_split_k_path(32, 1024, 8192, NUM_CUS_MI300X)  # M too large
-    assert not should_use_split_k_path(16, 4096, 8192, NUM_CUS_MI300X)  # N too wide
-    assert not should_use_split_k_path(16, 1024, 2048, NUM_CUS_MI300X)  # K too small
-    assert not should_use_split_k_path(16, 1024, 4096, NUM_CUS_MI300X)  # K below threshold
+    """Negative cases (each guard must independently reject):
+      * M > SMALL_M_THRESHOLD: out of small-M scope entirely.
+      * Tile count too high (persistent grid-stride is already enough).
+      * K below MIN_K_FOR_SPLIT_K (overhead dominates).
+      * K too small to keep MIN_BK_ITERS_PER_SHARD per shard.
+    """
+    # M too large for the small-M scope.
+    assert not should_use_split_k_path(SMALL_M_THRESHOLD + 1, 1024, 8192, NUM_CUS_MI300X)
+    # M=16, N=8192: bm=16,bn=32,bk=256 -> tiles=1*256=256, well above
+    # num_cus/4 = 76 -> off.
+    assert not should_use_split_k_path(16, 8192, 8192, NUM_CUS_MI300X)
+    # K below MIN_K_FOR_SPLIT_K (8192): the persistent grid-stride
+    # path beats split-K below this threshold (Stream-K's per-tile
+    # bookkeeping + atomic-store reduction overhead exceeds the
+    # parallelism win for K<8192).
+    assert not should_use_split_k_path(1, 1024, 1024, NUM_CUS_MI300X)
+    assert not should_use_split_k_path(1, 1024, 2048, NUM_CUS_MI300X)
+    assert not should_use_split_k_path(1, 1024, 4096, NUM_CUS_MI300X)
+    # M=32 N=8192 K=8192: tiles = 1*128 = 128, 128*4=512 > 304 -> off.
+    # The persistent grid-stride loop covers this.
+    assert not should_use_split_k_path(32, 8192, 8192, NUM_CUS_MI300X)
 
 
 def test_split_k_gate_env_disabled():
+    """Env-var escape hatch: TRITONBLAS_SMALL_M_DISABLE=1 forces gate False
+    even when the shape would normally fire."""
     with _env("TRITONBLAS_SMALL_M_DISABLE", "1"):
         assert not should_use_split_k_path(1, 1024, 8192, NUM_CUS_MI300X)
+    # Sanity: re-enabled once the env var is unset.
+    with _env("TRITONBLAS_SMALL_M_DISABLE", None):
+        assert should_use_split_k_path(1, 1024, 8192, NUM_CUS_MI300X)
 
 
 @pytest.mark.parametrize("M, N, K",
     [(1, 1024, 8192), (8, 2048, 8192), (16, 1024, 8192), (16, 2048, 8192)])
-def test_split_k_override_grid_fits(M, N, K):
-    bm, bn, bk, gm, nw, sk_grid = split_k_block_override(M, N, K, NUM_CUS_MI300X)
+def test_split_k_override_invariants(M, N, K):
+    """Invariants on the split-K override:
+      * BLOCK_K divides K (EVEN_K stays true on the kernel hot path).
+      * SPLIT_K is a power of 2 in [2, MAX_SPLIT_K].
+      * Each K-shard has at least MIN_BK_ITERS_PER_SHARD BLOCK_K iters
+        (no shard so small that the MFMA pipeline can't fill).
+      * Launch grid (tiles * SPLIT_K) is bounded by num_cus -- no chip
+        oversubscription.
+      * LDS budget invariant inherited from small_m_block_override.
+    """
+    bm, bn, bk, gm, nw, sk = split_k_block_override(M, N, K, NUM_CUS_MI300X)
     assert K % bk == 0
+    assert 2 <= sk <= MAX_SPLIT_K
+    assert (sk & (sk - 1)) == 0, f"SPLIT_K={sk} not a power of 2"
+    iters_per_shard = (K // bk) // sk
+    assert iters_per_shard >= MIN_BK_ITERS_PER_SHARD
     tiles = ((M + bm - 1) // bm) * ((N + bn - 1) // bn)
-    assert sk_grid >= tiles
-    assert sk_grid <= NUM_CUS_MI300X
+    assert tiles * sk <= NUM_CUS_MI300X
     lds_bytes = NUM_PIPELINE_STAGES * (bm * bk + bk * bn) * 2
     assert lds_bytes <= LDS_BUDGET_BYTES
+
+
+def test_split_k_factor_returns_one_when_subscribed():
+    """Shapes where the persistent grid-stride is already enough -> factor
+    drops to 1 (gate stays off)."""
+    # M=64, N=8192: bm=32, bn=64 -> tiles = 2*128 = 256. 256*4 > 304 -> off.
+    assert _split_k_factor(64, 8192, 4096, NUM_CUS_MI300X) == 1
+    assert _split_k_factor(64, 8192, 8192, NUM_CUS_MI300X) == 1
+    # K=2048 < MIN_K_FOR_SPLIT_K (=4096) -> off regardless of tile count.
+    assert _split_k_factor(1, 1024, 1024, NUM_CUS_MI300X) == 1
+    assert _split_k_factor(1, 1024, 2048, NUM_CUS_MI300X) == 1
 
 
 @pytest.mark.parametrize("M, N", [(1, 1024), (16, 8192), (32, 4096), (64, 8192)])
@@ -292,6 +358,46 @@ def test_small_m_uneven_k_correctness(M, N, K):
     ref = (a.float() @ b.float()).to(torch.float16)
     rtol, atol = _gemm_tolerance(K, torch.float16)
     torch.testing.assert_close(out, ref, atol=atol, rtol=rtol)
+
+
+@pytest.mark.skipif(not _has_cuda(), reason="requires GPU")
+@pytest.mark.parametrize("M, N, K, SPLIT_K",
+    [(1, 1024, 8192, 4),
+     (8, 2048, 8192, 2),
+     (16, 1024, 4096, 4),
+     (1, 1024, 4096, 8)])
+def test_split_k_kernel_direct(M, N, K, SPLIT_K):
+    """Drive the split_k_matmul kernel directly (bypassing the dispatcher)
+    so a bug in the kernel itself is caught even if the gate decides not
+    to fire it.  Also exercises a few SPLIT_K values explicitly so the
+    SPLIT_K computation in _split_k_factor doesn't mask kernel bugs by
+    always picking the same factor.
+    """
+    torch.manual_seed(99)
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    c = torch.empty(M, N, device="cuda", dtype=torch.float16)
+    bm, bn, bk = 16, 32, 128
+    while K % bk != 0 and bk > 16:
+        bk //= 2
+    _split_k_matmul_fn(a, b, c, BLOCK_M=bm, BLOCK_N=bn, BLOCK_K=bk, SPLIT_K=SPLIT_K)
+    ref = (a.float() @ b.float()).to(torch.float16)
+    rtol, atol = _gemm_tolerance(K, torch.float16)
+    torch.testing.assert_close(c, ref, atol=atol, rtol=rtol)
+
+
+def test_split_k_factor_respects_min_iters_per_shard():
+    """Negative case: when K is too small to give every shard
+    MIN_BK_ITERS_PER_SHARD iters, _split_k_factor must fall back to a
+    smaller SPLIT_K (or 1) rather than producing a shard that drops MFMA
+    pipeline fill."""
+    # Pick a CU-starved shape with a borderline K.
+    # M=1 N=1024 K=1024: bm=16,bn=16,bk=128 (LDS-walked), tiles=64,
+    # iters_total = 1024/128 = 8. max_sk_by_K = 8/4 = 2 -> sk=2 is OK.
+    sk = _split_k_factor(1, 1024, 1024, NUM_CUS_MI300X)
+    bm, bn, bk, _, _ = small_m_block_override(1, 1024, 1024, NUM_CUS_MI300X)
+    iters_per_shard = (1024 // bk) // max(1, sk)
+    assert iters_per_shard >= MIN_BK_ITERS_PER_SHARD or sk == 1
 
 
 @pytest.mark.skipif(not _has_cuda(), reason="requires GPU")

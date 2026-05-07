@@ -10,6 +10,7 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.split_k_gemm import split_k_matmul as _split_k_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from .dispatch import (
@@ -73,72 +74,92 @@ def _make_matmul_selector(
     )
 
 
-def _streamk_with_override(
+def _split_k_with_override(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
-    selector,
     M: int,
     N: int,
     K: int,
     num_cus: int,
 ) -> torch.Tensor:
-    """Invoke the Stream-K kernel directly with a small-M split-K override.
+    """Run a split-K GEMM with a small-M block override.
 
-    Used for the structurally CU-starved corner (M<=16, N<=2048, K>=8192)
-    where even the persistent grid-stride path can't recover the >75% of
-    CUs left idle by the small output-tile count.  See
-    ``tritonblas.dispatch.split_k_block_override`` for the recipe.
+    Used for the CU-starved corner where even the small-M persistent
+    grid-stride launch leaves >75% of MI300X's 304 CUs idle (M*N tile
+    count is structurally below num_cus / 4) AND K >= 8192 (enough K
+    work per shard for the MFMA pipeline to fill).
 
-    Bypasses the OrigamiMatmulSelector for the streamk variant (which is
-    expensive to construct on every call) by reusing the persistent
-    selector for hardware metadata and overriding the block dims +
-    sk_grid here.
+    Two implementation paths share the same dispatch:
+
+      * ``tritonblas.kernels.streamk_matmul`` (preferred) -- the
+        existing AMD-optimised Stream-K GEMM with locks + per-grid fp32
+        partial buffer.  Has a per-tile schedule that overlaps load /
+        MFMA / atomic-store much better than the standalone split-K
+        kernel and has been hardened across the existing test suite.
+      * ``tritonblas.kernels.split_k_gemm`` (fall-back) -- the new
+        standalone fp32 atomic-add Triton kernel.  Used only when the
+        Stream-K path can't fit (sk_grid > MAX_SMS or block_size >
+        MAX_BLOCK_SIZE for the persistent locks/P scratch).
+
+    See ``tritonblas.dispatch.split_k_block_override`` for the block /
+    SPLIT_K recipe.  Numerically both paths have the same K-summation
+    error bound as the unsharded fp16/bf16 GEMM with fp32 accumulator
+    (cuBLAS uses the same model for split-K).
     """
-    BLK_M, BLK_N, BLK_K, gsize_m, num_warps, sk_grid = split_k_block_override(
+    BLK_M, BLK_N, BLK_K, gsize_m, num_warps, SPLIT_K = split_k_block_override(
         M, N, K, num_cus
     )
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
-    even_k = K % BLK_K == 0
-
-    grids = sk_grid
+    sk_grid = total_tiles * SPLIT_K
     block_size = BLK_M * BLK_N
-    num_xcds = 8
-    chunk_size = max(1, min(gsize_m * gsize_m, grids // num_xcds))
 
-    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
-        locks = _global_locks[:grids]
-        P = _global_P[:grids, :block_size]
-    else:
-        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
-        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+    # Prefer the AMD-optimised Stream-K kernel when its scratch fits in
+    # our pre-allocated _global_locks / _global_P buffers.  Falls through
+    # to the standalone fp32 atomic-add kernel otherwise.
+    if sk_grid <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        even_k = K % BLK_K == 0
+        num_xcds = 8
+        chunk_size = max(1, min(gsize_m * gsize_m, sk_grid // num_xcds))
+        locks = _global_locks[:sk_grid]
+        P = _global_P[:sk_grid, :block_size]
+        streamk_tiles = total_tiles % sk_grid if sk_grid > 0 else 0
 
-    streamk_tiles = total_tiles % grids if grids > 0 else 0
+        _maybe_wrap(streamk_matmul, probe_tensor=a)[(sk_grid,)](
+            a, b, c,
+            None, None, None,
+            P, locks,
+            M, N, K,
+            a.stride(0), b.stride(1), c.stride(0), c.stride(1), None,
+            stride_ak=a.stride(1),
+            stride_bk=b.stride(0),
+            BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
+            GROUP_SIZE_M=gsize_m,
+            NUM_SMS=sk_grid, NUM_XCDS=num_xcds,
+            CHUNK_SIZE=chunk_size,
+            STREAMK_TILES=streamk_tiles,
+            BIAS=False, EVEN_K=even_k,
+            CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
+            QUANTIZED=False,
+            ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            num_stages=2, num_warps=num_warps,
+            waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+        )
+        return c
 
-    _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
+    # Fall-back: standalone fp32 atomic-add kernel.  Slower than
+    # Stream-K on the cohort but always safe.
+    return _split_k_matmul(
         a, b, c,
-        None, None, None,
-        P, locks,
-        M, N, K,
-        a.stride(0), b.stride(1), c.stride(0), c.stride(1), None,
-        stride_ak=a.stride(1),
-        stride_bk=b.stride(0),
-        BLOCK_SIZE_M=BLK_M, BLOCK_SIZE_N=BLK_N, BLOCK_SIZE_K=BLK_K,
-        GROUP_SIZE_M=gsize_m,
-        NUM_SMS=grids, NUM_XCDS=num_xcds,
-        CHUNK_SIZE=chunk_size,
-        STREAMK_TILES=streamk_tiles,
-        BIAS=False, EVEN_K=even_k,
-        CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
-        QUANTIZED=False,
-        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-        num_stages=2, num_warps=num_warps,
-        waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+        BLOCK_M=BLK_M,
+        BLOCK_N=BLK_N,
+        BLOCK_K=BLK_K,
+        SPLIT_K=SPLIT_K,
+        num_warps=num_warps,
     )
-    return c
 
 
 def persistent_matmul_lt(
@@ -194,10 +215,11 @@ def persistent_matmul_lt(
     use_small_m = small_m_eligible and not use_split_k
 
     if use_split_k:
-        # Structurally CU-starved corner (M<=16, N<=2048, K>=8192): even at
-        # the smallest legal MFMA tile the persistent grid leaves >75% of
-        # CUs idle.  Route through Stream-K so K shards across CUs.
-        return _streamk_with_override(a, b, c, selector, M, N, K, num_cus)
+        # CU-starved corner: total_tiles < num_cus / 2 even at the smallest
+        # legal MFMA tile.  Route through split-K so K shards across CUs --
+        # SPLIT_K * total_tiles workgroups each accumulate a K-shard's
+        # partial sum into a shared fp32 output.
+        return _split_k_with_override(a, b, c, M, N, K, num_cus)
 
     if use_small_m:
         BLK_M, BLK_N, BLK_K, gsize_m, num_warps = small_m_block_override(

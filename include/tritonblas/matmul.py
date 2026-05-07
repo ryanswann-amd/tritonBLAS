@@ -480,6 +480,19 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Skinny-GEMM (M<=32) auto Stream-K.
+    #
+    # For small-M LLM token-decode shapes the data-parallel persistent kernel
+    # cannot split along K, so the few N tiles produced by the (16|32, 256, 64)
+    # skinny-tile override in OrigamiMatmulSelector leave most CUs idle.
+    # Auto-enable Stream-K in this cohort so the SPLIT_K branch in
+    # `OrigamiMatmulSelector._compute_sk_grid` engages (split factors in
+    # [2,3,4,6,8], typically reaching ~50-90% CU coverage at the N sizes
+    # common in LLM inference).  Skipped when the caller already passed
+    # enable_streamk=True or when an FP4/FP8 path is used (itemsize < 2).
+    if not enable_streamk and a.shape[0] <= 32 and a.dtype.itemsize >= 2:
+        enable_streamk = True
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

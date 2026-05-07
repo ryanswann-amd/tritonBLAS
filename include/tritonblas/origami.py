@@ -168,6 +168,41 @@ def kpack_for_tile(blk_m: int, blk_n: int) -> int:
     return 2 if (blk_m * blk_n) <= KPACK2_TILE_AREA_THRESHOLD else 1
 
 
+# K-595 (S-002): T7 — per-shape hardware-knob overrides.
+#
+# *** EMPIRICAL OUTCOME (K-595 knob_sweep.py on c42, MI300X) ***
+#
+# T7 (per-shape `num_warps` / `waves_per_eu` / `mfmaInstrSize` / `kpack`
+# overrides) was identified by the K-581 residual taxonomy as the largest
+# untouched mechanism class. A directed sweep on the K-587 residual cohort
+# was run to populate a per-shape registry:
+#
+#   * num_warps ∈ {4, 8} × waves_per_eu ∈ {0, 1, 2, 3} (112 measurements,
+#     14 shapes): NO shape lifted by ≥ +2pp over the default (8, 0)
+#     configuration. Best signed delta was +1.37pp on 1024×8192×8192 bf16
+#     at (8, 1) — within the ±5pp inter-run noise floor measured by the
+#     K-545 cohort_bench. waves_per_eu ≥ 2 with num_warps=4 caused
+#     catastrophic ratio collapse (≈0.04) on multiple shapes, confirming
+#     the hardcoded (8, 0) default is structurally correct.
+#   * mfma_instr_size ∈ {16, 32} (28 measurements): mfma=32 is uniformly
+#     worse (median delta −4.39pp), confirming the hardcoded 16.
+#
+# Conclusion: the T7 lever class is **falsified** for the residual cohort
+# at this bench iteration count. There are no per-shape knob entries that
+# beat the default by more than the noise floor, so a production registry
+# is not justified. The previously-shipped `_HIPBLASLT_KNOB_OVERRIDES`
+# dict, the `_hipblaslt_knob_override` lookup, and the four `*_hint`
+# selector properties have been removed. Only the four diagnostic env
+# vars survive in matmul.py, behind `_resolve_knob`, so future
+# investigations (e.g. an ISA-codegen patch that opens a new lever) can
+# sweep without code changes.
+#
+# Surviving env vars (read by matmul.py): TRITONBLAS_FORCE_NUM_WARPS /
+# TRITONBLAS_FORCE_WAVES_PER_EU / TRITONBLAS_FORCE_MFMA_INSTR_SIZE /
+# TRITONBLAS_FORCE_KPACK. Each accepts an int; malformed values silently
+# fall through to the call-site default (no kernel-launch crash).
+
+
 def _hipblaslt_shape_override(
     m: int,
     n: int,
@@ -508,6 +543,11 @@ class OrigamiMatmulSelector:
                 self._result.config.mt.m = 256
                 self._result.config.mt.n = 256
                 self._result.config.mt.k = 64
+
+        # K-595 T7: a per-shape hardware-knob registry was investigated and
+        # falsified for the residual cohort (see header comment above the
+        # _hipblaslt_shape_override function). No selector-side hint state
+        # is carried; matmul.py reads the four diagnostic env vars directly.
 
         if streamk:
             self._grid = self._compute_sk_grid()

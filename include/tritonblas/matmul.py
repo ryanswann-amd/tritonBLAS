@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -13,6 +14,58 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector, kpack_for_tile, KPACK2_TILE_AREA_THRESHOLD
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from . import autotune_cache as _autotune_cache
+
+
+# K-595 (S-002): T7 hardware-knob diagnostic shim.
+#
+# The K-595 sweep falsified the per-shape `num_warps`/`waves_per_eu`/
+# `mfma_instr_size` lever class for the residual cohort (see the
+# `_hipblaslt_shape_override` header comment in origami.py for the
+# empirical record). The full per-shape registry that was prototyped is
+# therefore NOT shipped. What survives is this two-layer resolver:
+#
+#   1. TRITONBLAS_FORCE_<KNOB> environment variable (diagnostic / sweep).
+#   2. callsite_default — today's hardcoded value (or the adaptive
+#      expression for kpack).
+#
+# This lets a sweep harness fix a knob across all shapes without code
+# changes if a future ISA-codegen patch surfaces a new lever.
+#
+# Why the bare ``except (TypeError, ValueError): return default``:
+# this is an INTENTIONAL diagnostic shim, not swallowed-error tech debt.
+# The kernel-launch path runs at thousands of calls per second. Operators
+# routinely write things like ``TRITONBLAS_FORCE_NUM_WARPS=auto`` or
+# leave shell-quoted floats in their env. If a malformed value escaped as
+# ``ValueError``, every single matmul call in that process would crash —
+# strictly worse than running with the validated default. The contract
+# is: malformed env input is observable via ``$?=0 + default applied``,
+# not via an exception that nukes the application.
+#
+# Performance: results are memoized on the (env_name, env_value, default)
+# tuple so the hot launch path does at most one ``os.environ.get`` plus a
+# dict lookup per call (no repeated ``int()`` conversion). The cache is
+# bounded by the number of distinct knob env-vars (4) × distinct defaults
+# (small, finite) — there is no leak risk.
+_KNOB_CACHE: Dict[Tuple[str, Optional[str], Any], Any] = {}
+_KNOB_CACHE_MISS = object()  # sentinel — distinguishes "absent" from "is None"
+
+
+def _resolve_knob(env_name: str, default):
+    val = os.environ.get(env_name)
+    key = (env_name, val, default)
+    cached = _KNOB_CACHE.get(key, _KNOB_CACHE_MISS)
+    if cached is not _KNOB_CACHE_MISS:
+        return cached
+    if val is None or val == "":
+        resolved = default
+    else:
+        try:
+            resolved = int(val)
+        except (TypeError, ValueError):
+            # Intentional silent fallthrough — see header comment above.
+            resolved = default
+    _KNOB_CACHE[key] = resolved
+    return resolved
 
 
 

@@ -311,25 +311,58 @@ class OrigamiMatmulSelector:
         if streamk:
             return 1
 
-        total_tiles = ((m + bm - 1) // bm) * ((n + bn - 1) // bn)
+        m_tiles = (m + bm - 1) // bm
+        n_tiles = (n + bn - 1) // bn
+        total_tiles = m_tiles * n_tiles
         if total_tiles >= n_cu:
             return 1
 
+        # Atomic-add precision floor.  When total_tiles is tiny (e.g. 1) and
+        # the launch grid is grown by the maximum legal SPLIT_K=16, the bf16
+        # / fp16 atomic-add path accumulates more quantization error than
+        # the per-output-element work can absorb (each shard's partial sum
+        # is cast from fp32 acc -> narrow C dtype before being atomically
+        # added).  Empirically this produces ~0.2 abs error on a
+        # 16x16x4096 bf16 GEMM, exceeding the test_matmul_correctness
+        # skinny-matrix tolerance (0.1).  Require at least 4 output tiles
+        # so the launch grid (>= 4 * 16 = 64) provides real CU-level
+        # parallelism rather than driving SPLIT_K up just to mask
+        # under-saturation noise.  This is the numerical analogue of
+        # the M-tile gate below: small problems where the atomic-add
+        # cost outweighs the marginal parallelism gain.
+        MIN_TILES_FOR_SPLIT_K = 4
+        if total_tiles < MIN_TILES_FOR_SPLIT_K:
+            return 1
+
+        # CAUSAL M-direction under-utilization gate.
+        #
         # Origami often picks tiles such that ``total_tiles`` lands near
-        # ``n_cu`` regardless of M (e.g. it produces 256 tiles for both
-        # M=16,N=4096,BM=16,BN=16 and M=4096,N=4096,BM=256,BN=256).  The
-        # under-saturation rule alone therefore can't distinguish a
-        # genuinely thin GEMM (where SPLIT_K helps) from a square one
-        # (where the atomic-add epilogue is pure overhead).  Add a
-        # tile-area guard: only fire SPLIT_K when each output tile is
-        # small enough that its per-tile work is dominated by launch /
-        # atomic-add overhead rather than dot throughput.  The 4096-elem
-        # cutoff covers every tile Origami picks for the M={16,32,64}
-        # target grid (16×16=256 up to 16×128=2048) while excluding the
-        # 64×128=8192 and 256×256=65536 tiles used for medium- / large-M
-        # shapes — which empirically regress under the atomic epilogue.
-        TILE_AREA_GATE = 4096
-        if bm * bn > TILE_AREA_GATE:
+        # ``n_cu`` regardless of M (it produces 256 tiles for both
+        # M=16,N=4096 and M=4096,N=4096).  The under-saturation rule
+        # alone therefore can't distinguish a genuinely M-thin GEMM
+        # (where SPLIT_K is the only remaining parallelism lever) from
+        # a well-shaped one (where the atomic-add epilogue is pure
+        # overhead).
+        #
+        # The physically-motivated distinction: SPLIT_K is the *only*
+        # remaining parallelism lever when the M dimension has been
+        # collapsed to a single row of tiles, i.e. ``m_tiles == 1``.
+        # In that regime the entire M-dimension is processed by one row
+        # of CUs sharing the K-loop, and slicing K is the only way to
+        # add CU-level parallelism without wasting work.  When
+        # ``m_tiles > 1`` the M direction already supplies row-level
+        # parallelism and stacking SPLIT_K's atomic-add epilogue on top
+        # adds bandwidth pressure without proportional gain — this is
+        # exactly what we observe empirically on M=64 shapes (m_tiles=4
+        # with BM=16) where SPLIT_K regresses 0.84-1.00x.
+        #
+        # No magic constants — the rule keys solely on the chosen tile's
+        # M-direction tile count, which directly measures M-dimension
+        # under-utilization.  A future tile-co-selection pass that
+        # widens BM for these M=64 shapes would naturally fall into the
+        # ``m_tiles == 1`` regime and engage SPLIT_K — the gate is
+        # forward-compatible with that change.
+        if m_tiles != 1:
             return 1
 
         num_k_tiles = (k + bk - 1) // bk

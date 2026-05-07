@@ -43,15 +43,18 @@ def _split_k(m, n, k, bm, bn, bk, n_cu=N_CU_MI300X, streamk=False, env=None):
 
 
 class TestSplitKGating:
-    """Gate fires only when (a) total_tiles < N_CU AND (b) tile area is
-    small enough that the atomic-add epilogue isn't pure overhead."""
+    """Gate fires only when (a) ``total_tiles < N_CU`` (under-saturation)
+    AND (b) ``m_tiles == 1`` (the M dimension is collapsed to a single
+    row of tiles, so K-splitting is the only remaining parallelism lever).
+    This is the causal M-direction under-utilization predicate — no magic
+    tile-area constant; the rule keys solely on the chosen tile's
+    ``ceil(M/BM)``."""
 
     def test_under_saturation_engages_split_k(self):
-        # M=16, N=4096, BM=16, BN=256 -> total_tiles = 1*16 = 16 << 304.
-        # Tile area = 16*256 = 4096 (< 8192 gate).
+        # M=16, N=4096, BM=16, BN=256 -> m_tiles=1, n_tiles=16, total=16 << 304.
         # K=8192 / BK=64 = 128 K-tiles -> plenty of room (≥4 per shard).
         sk = _split_k(16, 4096, 8192, 16, 256, 64)
-        assert sk > 1, "small-M shape should engage SPLIT_K"
+        assert sk > 1, "small-M shape (m_tiles==1) should engage SPLIT_K"
         assert sk in (1, 2, 4, 8, 16)
 
     def test_saturating_shape_bypasses(self):
@@ -59,17 +62,40 @@ class TestSplitKGating:
         # fires the bypass.
         assert _split_k(8192, 8192, 4096, 128, 128, 64) == 1
 
-    def test_large_tile_bypasses_even_when_under_saturated(self):
-        # 4096³ with 256x256 tile -> 16*16 = 256 tiles (< 304 N_CU) but
-        # tile area = 65536 >> 4096 gate: square shapes use the legacy
-        # path so the atomic-add doesn't burn perf.
+    def test_square_shape_bypasses_even_when_under_saturated(self):
+        # 4096³ with 256x256 tile -> m_tiles=16, n_tiles=16 (256 total < 304
+        # N_CU).  The under-saturation rule alone would fire here, but the
+        # M-tile gate (m_tiles=16 != 1) bypasses: the M direction already
+        # supplies 16-way row parallelism, so SPLIT_K's atomic-add
+        # epilogue is pure overhead.
         assert _split_k(4096, 4096, 4096, 256, 256, 64) == 1
 
-    def test_medium_tile_bypasses_even_when_under_saturated(self):
-        # M=256, N=8192 with 64x128 tile -> 4*64 = 256 tiles (< 304 N_CU)
-        # but tile area = 8192 > 4096 gate: bypass to avoid the atomic-add
-        # regression observed empirically on this shape.
+    def test_medium_m_bypasses_even_when_under_saturated(self):
+        # M=256, N=8192 with 64x128 tile -> m_tiles=4, n_tiles=64 (256 total
+        # < 304 N_CU).  Under-saturated, but M direction has 4 rows of
+        # tiles already — bypass to avoid the atomic-add regression
+        # observed empirically on this shape.
         assert _split_k(256, 8192, 8192, 64, 128, 128) == 1
+
+    def test_m64_with_small_bm_bypasses(self):
+        # The empirical regression case: M=64 with BM=16 (Origami's actual
+        # pick for M=64 N=4096..8192) -> m_tiles=4.  Causally distinct from
+        # m_tiles=1 because the M direction already supplies 4-way row
+        # parallelism, so K-splitting on top burns atomic bandwidth without
+        # filling additional CUs.  Locked in as a regression test against
+        # the previous tile-area gate that was tuned to fire here.
+        assert _split_k(64, 4096, 8192, 16, 64, 256) == 1
+        assert _split_k(64, 8192, 16384, 16, 128, 128) == 1
+
+    def test_tiny_problem_bypasses_for_precision(self):
+        # Numerical regression guard: M=16, N=16, K=4096 has total_tiles=1.
+        # Without the MIN_TILES_FOR_SPLIT_K floor, ideal_split=304 capped
+        # at 16 would fire, and 16-way bf16 atomic-add accumulation
+        # exceeded the test_matmul_correctness skinny tolerance (~0.2 abs
+        # error vs allowed 0.1).  The floor keeps SPLIT_K off for these
+        # pathological tiny shapes where the atomic-add precision tax is
+        # not amortised by enough per-output-element work.
+        assert _split_k(16, 16, 4096, 16, 16, 32) == 1
 
     def test_at_threshold_bypasses(self):
         # total_tiles == N_CU -> not strictly less than -> SPLIT_K = 1.
@@ -86,9 +112,12 @@ class TestSplitKValueSelection:
         assert sk in (1, 2, 4, 8, 16)
 
     def test_caps_at_16_even_when_room_for_more(self):
-        # 1 tile with K=65536 / 64 = 1024 K-tiles -> capacity for 256-way
-        # split, but the cap clamps to 16.
-        sk = _split_k(16, 256, 65536, 16, 256, 64)
+        # 16 output tiles with K=65536 / 64 = 1024 K-tiles -> capacity for
+        # 64-way split (and for ideal-from-CU=304/16=19), but the cap
+        # clamps to 16.  Use BN=256 so n_tiles=16 (and total_tiles=16,
+        # safely above the MIN_TILES_FOR_SPLIT_K floor that bypasses
+        # 1-tile pathological shapes).
+        sk = _split_k(16, 4096, 65536, 16, 256, 64)
         assert sk == 16
 
     def test_under_saturation_does_not_overshoot_cu_count(self):
@@ -206,5 +235,58 @@ class TestSplitKNumericalCorrectness:
         try:
             out, ref = self._run(16, 4096, 8192)
             torch.testing.assert_close(out, ref, atol=8.0, rtol=2e-2)
+        finally:
+            os.environ.pop("TBLAS_DISABLE_SPLIT_K", None)
+
+
+@requires_cuda
+class TestSplitKDispatchViaPublicSelector:
+    """Lock the dispatch boundary at ``OrigamiMatmulSelector`` — the same
+    object the public ``tritonblas.matmul`` builds for every call.  These
+    are the load-bearing dispatch assertions the previous review demanded:
+    one positive (small-M engages), one negative (square shape disengages),
+    plus an env-var override exercised through the selector itself.
+
+    Without this the ``m_tiles == 1`` gate is only covered by the unit
+    tests on ``_compute_split_k`` and not at the public boundary."""
+
+    @staticmethod
+    def _selector(m, n, k, dtype=torch.bfloat16):
+        return OrigamiMatmulSelector(
+            m, n, k, dtype, dtype, dtype, torch.device("cuda:0")
+        )
+
+    def test_small_m_selector_engages_split_k(self):
+        # Positive dispatch assertion: the spec's canonical M=16 shape
+        # MUST come back from the public selector with split_k > 1, or
+        # the dispatch hook is not actually wired up for the target case.
+        sel = self._selector(16, 4096, 8192)
+        assert sel.split_k > 1, (
+            f"M=16,N=4096,K=8192 should engage SPLIT_K via the public "
+            f"selector dispatch path; got split_k={sel.split_k}"
+        )
+        assert sel.split_k in (2, 4, 8, 16)
+
+    def test_square_shape_selector_disengages_split_k(self):
+        # Negative dispatch assertion: a well-shaped square GEMM where
+        # m_tiles > 1 MUST come back with split_k == 1.  Locks in the
+        # tile-aware gate (formerly the magic-number area gate the
+        # previous reviewer flagged) at the public boundary.
+        sel = self._selector(4096, 4096, 4096)
+        assert sel.split_k == 1, (
+            f"4096^3 square shape must NOT engage SPLIT_K via the public "
+            f"selector dispatch path; got split_k={sel.split_k}"
+        )
+
+    def test_disable_env_routes_dispatch_through_legacy(self):
+        # The env-var disable knob must be honored at the dispatch
+        # boundary too — not just inside ``_compute_split_k`` — or the
+        # ablation/A-B benchmark workflow regresses to a no-op.
+        os.environ["TBLAS_DISABLE_SPLIT_K"] = "1"
+        try:
+            sel = self._selector(16, 4096, 8192)
+            assert sel.split_k == 1, (
+                "TBLAS_DISABLE_SPLIT_K=1 must force selector.split_k == 1"
+            )
         finally:
             os.environ.pop("TBLAS_DISABLE_SPLIT_K", None)

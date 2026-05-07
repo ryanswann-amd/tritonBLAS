@@ -36,9 +36,34 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# Function will behave like an LRU-Cache of heuristic results
-# Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# Selector cache.
+# OrigamiMatmulSelector construction calls origami.select_config (~170us on
+# MI300X).  For skinny GEMM (M<=32) the actual GPU kernel is only ~45us, so an
+# uncached selector dominates.  Caching by problem shape drives that to <2us.
+# Disabled previously due to "hash bug" (commit cd11927); we side-step by
+# normalising every argument into a deterministic primitive tuple key.
+_selector_cache: Dict[Tuple, Any] = {}
+
+
+def _selector_cache_key(
+    M, N, K, a_dtype, b_dtype, c_dtype, device, mx_block_size, streamk, num_stages
+):
+    if isinstance(device, torch.device):
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        dev_key: Any = (device.type, idx)
+    else:
+        dev_key = device
+
+    def _dt(d):
+        return d if not isinstance(d, torch.dtype) else str(d)
+
+    return (
+        int(M), int(N), int(K),
+        _dt(a_dtype), _dt(b_dtype), _dt(c_dtype),
+        dev_key, int(mx_block_size), bool(streamk), int(num_stages),
+    )
+
+
 def _make_matmul_selector(
     M: int,
     N: int,
@@ -51,19 +76,18 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
-    # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
-        M,
-        N,
-        K,
-        a_dtype,
-        b_dtype,
-        c_dtype,
-        device,
-        mx_block_size=mx_block_size,
-        streamk=streamk,
-        num_stages=num_stages,
+    key = _selector_cache_key(
+        M, N, K, a_dtype, b_dtype, c_dtype, device, mx_block_size, streamk, num_stages
     )
+    sel = _selector_cache.get(key)
+    if sel is not None:
+        return sel
+    sel = OrigamiMatmulSelector(
+        M, N, K, a_dtype, b_dtype, c_dtype, device,
+        mx_block_size=mx_block_size, streamk=streamk, num_stages=num_stages,
+    )
+    _selector_cache[key] = sel
+    return sel
 
 
 def persistent_matmul_lt(
@@ -480,6 +504,14 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Skinny-GEMM (M<=32) auto Stream-K.
+    # The (BM=16|32, BN=256, BK=64) tile chosen in OrigamiMatmulSelector for
+    # M<=32 produces too few (~16-112) data-parallel tiles to fill the 304
+    # CUs on MI300X.  Auto-route through Stream-K so _compute_sk_grid splits
+    # the K dimension by factor 2-8x, restoring 50-90% CU coverage.
+    if not enable_streamk and a.shape[0] <= 32 and a.dtype.itemsize >= 2:
+        enable_streamk = True
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

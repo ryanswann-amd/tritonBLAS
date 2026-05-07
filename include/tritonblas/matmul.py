@@ -100,9 +100,14 @@ def persistent_matmul_lt(
     # hipBLASLt evidence shows num_warps=4 outperforms 8); fall back to 8
     # for selectors that don't expose the property.
     num_warps = getattr(selector, "num_warps", 8)
-    waves_per_eu = 0
+    # K-706: per-shape waves_per_eu / kpack overrides.  Selector exposes
+    # k706_waves_per_eu / k706_kpack; either may be None when no entry
+    # exists for this shape (preserve historical defaults of 0 / 1).
+    _k706_wpu = getattr(selector, "k706_waves_per_eu", None)
+    _k706_kp = getattr(selector, "k706_kpack", None)
+    waves_per_eu = _k706_wpu if _k706_wpu is not None else 0
     mfmaInstrSize = 16
-    kpack = 1
+    kpack = _k706_kp if _k706_kp is not None else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -247,9 +252,13 @@ def streamk_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     # num_warps: see persistent_matmul_lt for rationale.
     num_warps = getattr(selector, "num_warps", 8)
-    waves_per_eu = 0
+    # K-706: per-shape waves_per_eu / kpack overrides (see
+    # persistent_matmul_lt).  None falls back to the historical default.
+    _k706_wpu = getattr(selector, "k706_waves_per_eu", None)
+    _k706_kp = getattr(selector, "k706_kpack", None)
+    waves_per_eu = _k706_wpu if _k706_wpu is not None else 0
     mfmaInstrSize = 16
-    kpack = 1
+    kpack = _k706_kp if _k706_kp is not None else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

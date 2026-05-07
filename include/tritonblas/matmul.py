@@ -17,13 +17,15 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
 # Set TRITONBLAS_DISABLE_SPLIT_K=1 to opt out of the auto-engaged SPLIT_K
-# small-M / large-K path (useful for A/B testing).
-_SPLIT_K_DISABLED = os.environ.get("TRITONBLAS_DISABLE_SPLIT_K", "").lower() in ("1", "true", "yes")
+# small-M / large-K path (useful for A/B testing).  Read dynamically on every
+# dispatch so the env var can be flipped without re-importing the module.
+def _split_k_env_disabled() -> bool:
+    return os.environ.get("TRITONBLAS_DISABLE_SPLIT_K", "").lower() in ("1", "true", "yes")
 
 
 def _should_use_split_k(selector) -> bool:
     """True when the Origami selector picked SPLIT_K > 1 and the env hasn't opted out."""
-    if _SPLIT_K_DISABLED:
+    if _split_k_env_disabled():
         return False
     return getattr(selector, "split_k", 1) > 1
 

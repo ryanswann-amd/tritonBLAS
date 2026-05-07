@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector, kpack_for_tile, KPACK2_TILE_AREA_THRESHOLD
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from . import autotune_cache as _autotune_cache
 
 
 
@@ -56,8 +57,69 @@ def _make_matmul_selector(
     streamk=False,
     num_stages: int = 2,
 ):
+    # Persistent on-disk autotune cache: skip the expensive Origami
+    # selection when we have a previously-recorded entry for this exact
+    # shape / dtype / mode / arch.
+    arch, n_cu = _resolve_arch_info(device)
+    cache = _autotune_cache.get_cache(arch, n_cu)
+    a_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, str(a_dtype))
+    b_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, str(b_dtype))
+    c_str = OrigamiMatmulSelector.dtype_to_str.get(c_dtype, str(c_dtype))
+    key = _autotune_cache.make_cache_key(
+        M, N, K, a_str, b_str, c_str,
+        mx_block_size, streamk, num_stages,
+        n_cu,
+    )
+    cached = cache.lookup(key)
+    if cached is not None:
+        try:
+            return OrigamiMatmulSelector(
+                M,
+                N,
+                K,
+                a_dtype,
+                b_dtype,
+                c_dtype,
+                device,
+                mx_block_size=mx_block_size,
+                streamk=streamk,
+                num_stages=num_stages,
+                _cached_params=cached,
+            )
+        except Exception:
+            # Fall through to a full computation if cached params can't be
+            # reconstructed (e.g. arch change, origami API change).
+            pass
+
+    # Boundary-tolerance fall-back (K-591 / K-588 follow-up): exact-match
+    # missed but a near-neighbor entry sharing the same dtype/mode may be
+    # reusable.  We adopt it for this call only — the substituted config is
+    # NOT persisted under the new key, otherwise chained interpolations
+    # could drift arbitrarily from any tuned canonical entry.
+    nearest = cache.lookup_nearest(key)
+    if nearest is not None:
+        cached_params, _matched_key = nearest
+        try:
+            return OrigamiMatmulSelector(
+                M,
+                N,
+                K,
+                a_dtype,
+                b_dtype,
+                c_dtype,
+                device,
+                mx_block_size=mx_block_size,
+                streamk=streamk,
+                num_stages=num_stages,
+                _cached_params=cached_params,
+            )
+        except Exception:
+            # Cached params for the neighbor can't be reconstructed for
+            # this shape; fall through to the full Origami path.
+            pass
+
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -69,6 +131,28 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    try:
+        cache.store(key, selector.get_cache_params())
+    except Exception:
+        # Persistence failures must never break the kernel call.
+        pass
+    return selector
+
+
+def _resolve_arch_info(device):
+    """Return (arch_name, n_cu) for the given torch device.
+
+    A per-call sub-CU mask is intentionally not part of the cache identity
+    (see ``autotune_cache.make_cache_key`` for the rationale).
+    """
+    try:
+        props = torch.cuda.get_device_properties(device)
+        gcn = getattr(props, "gcnArchName", "") or ""
+        arch = gcn.split(":")[0] if gcn else "unknown"
+        n_cu = int(getattr(props, "multi_processor_count", 0)) or 0
+    except Exception:
+        arch, n_cu = "unknown", 0
+    return arch, n_cu
 
 
 def persistent_matmul_lt(

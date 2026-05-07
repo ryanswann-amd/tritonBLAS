@@ -393,9 +393,13 @@ def split_k_matmul_lt(
 ):
     """Launch the SPLIT_K data-parallel kernel for under-utilized shapes.
 
-    Caller MUST zero-initialise ``c`` first when ``selector.split_k > 1`` —
-    the split-K kernel uses ``tl.atomic_add`` to merge per-shard partials
-    into the output tile.
+    Atomic-add precision: the SPLIT_K kernel atomic_adds per-shard partials
+    into a buffer.  When the user-visible output dtype is narrower than fp32
+    (bf16/fp16/int8) we route the atomics through an FP32 staging buffer
+    (zeroed beforehand) and cast back at the end — atomic_add of bf16
+    partials into a bf16 output element introduces O(SPLIT_K) cumulative
+    rounding error that easily blows the project's atol=1e-1 GEMM bar at
+    K >= 4096.  When SPLIT_K == 1 we just zero c and store directly.
     """
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -420,11 +424,24 @@ def split_k_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # Pick the atomic-target buffer.  For SPLIT_K > 1 we stage atomics through
+    # FP32 (or int32 for int8 outputs) to avoid per-shard quantization noise;
+    # SPLIT_K == 1 falls through to a direct tl.store into c.
+    if SPLIT_K > 1 and c.dtype != torch.float32:
+        if c.dtype == torch.int8:
+            atom_buf = torch.zeros_like(c, dtype=torch.int32)
+        else:
+            atom_buf = torch.zeros_like(c, dtype=torch.float32)
+    else:
+        # SPLIT_K == 1: the kernel does tl.store, no zero-init needed.
+        # SPLIT_K > 1 with fp32 output: atomic_add into c directly is exact.
+        atom_buf = c
+
     grid = (total_tiles, SPLIT_K)
     _maybe_wrap(split_k_matmul, probe_tensor=a)[grid](
         a,
         b,
-        c,
+        atom_buf,
         a_scale if quantized else None,
         b_scale if quantized else None,
         bias if bias is not None else None,
@@ -433,8 +450,8 @@ def split_k_matmul_lt(
         K,
         a.stride(0),
         b.stride(1),
-        c.stride(0),
-        c.stride(1),
+        atom_buf.stride(0),
+        atom_buf.stride(1),
         bias.stride(0) if bias is not None else 0,
         stride_ak=a.stride(1),
         stride_bk=b.stride(0),
@@ -455,6 +472,8 @@ def split_k_matmul_lt(
         matrix_instr_nonkdim=mfmaInstrSize,
         kpack=kpack,
     )
+    if atom_buf is not c:
+        c.copy_(atom_buf.to(c.dtype))
     return c
 
 

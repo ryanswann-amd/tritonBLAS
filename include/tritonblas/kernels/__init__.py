@@ -27,6 +27,9 @@ else:
 # Work-stealing kernel (opt-in via work_stealing=True in matmul calls)
 from .persistent_gemm_work_stealing import ws_persistent_matmul
 
+# Batched persistent kernel (true 3D-grid batched matmul)
+from .batched_persistent_gemm import batched_persistent_matmul
+
 # Stream-K kernel is always the same
 from .streamk_gemm import streamk_matmul
 

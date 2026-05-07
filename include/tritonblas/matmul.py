@@ -8,10 +8,27 @@ from torch.library import triton_op, wrap_triton
 from torch._subclasses.fake_tensor import is_fake
 import triton
 
-from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import (
+    persistent_matmul,
+    ws_persistent_matmul,
+    streamk_matmul,
+    ws_streamk_matmul,
+    batched_persistent_matmul,
+)
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .utils import get_arch
+
+
+# Architectures whose CU count + LDS layout match the tile sweep that derived
+# the bmm tile / group_m / num_warps heuristic. The heuristic constants were
+# measured on MI300X (gfx942, 304 CUs, 8 XCDs). On other archs (MI325X,
+# MI350X, MI355X, gfx950, ...) the CU count and XCD topology differ, so
+# applying the override blind would silently use tiles tuned for a different
+# machine. Until those archs get their own sweep, the bmm path defers entirely
+# to the Origami selector outside this allowlist.
+_BMM_TILE_OVERRIDE_ARCHS = frozenset({"gfx942"})
 
 
 
@@ -365,6 +382,303 @@ def streamk_matmul_lt(
 
     return c
 
+@functools.lru_cache(maxsize=1024)
+def _bmm_pick_tile_cached(
+    M: int,
+    N: int,
+    K: int,
+    B: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    arch: str,
+    lds_cap: int,
+    num_stages: int,
+) -> Optional[Tuple[int, int, int, int, int, int]]:
+    """Hashable, memoized core of :func:`_bmm_pick_tile`.
+
+    Split out from the wrapper so the LRU key is a tuple of plain scalars / the
+    arch string, not the unhashable ``OrigamiMatmulSelector`` object. The
+    wrapper extracts ``arch / lds_cap / num_stages`` from the selector and
+    delegates here; repeated calls with the same shape+dtype hit the cache and
+    pay only the dict-lookup cost (relevant for hot inference paths where bmm
+    is called every step with the same shape).
+
+    Returns
+    -------
+    None
+        Defer to the Origami selector untouched.
+    (BLK_M, BLK_N, BLK_K, group_m_override, kpack_override, num_warps_override)
+        On a hit, the launcher applies all five values.
+
+    See :func:`_bmm_pick_tile` for the derivation.
+    """
+    # Arch gate: heuristic constants were derived from an empirical block-size
+    # / num_warps / num_stages sweep on MI300X (gfx942, 304 CUs, 8 XCDs). Other
+    # archs (MI325X, MI350X / gfx950, ...) have different CU counts and LDS
+    # capacities, so the configs would not transfer. Defer to Origami until
+    # those archs get their own sweep.
+    if arch not in _BMM_TILE_OVERRIDE_ARCHS:
+        return None
+    if B < 2:
+        return None
+    if M < 256 or N < 256 or K < 64:
+        return None
+    try:
+        bytes_a = torch.finfo(a_dtype).bits // 8
+        bytes_b = torch.finfo(b_dtype).bits // 8
+    except TypeError:
+        return None  # int8 / fp8 — quantized paths still use Origami
+
+    mn_area = M * N
+    # Two empirical regimes (from the per-shape sweep in the workspace
+    # ``probe_persistent.py`` / ``tile_sweep.py``):
+    # * Very-large MN with B>=2 — large square tiles, default num_warps=8.
+    #   Origami picks 128x128x128 here, but 256x256x64 wins ~30-40% on the
+    #   batched grid because per-tile work is high enough to amortize the
+    #   per-batch launch overhead.
+    # * Medium MN with B>=4 — square 128x128x64 with num_warps=4 wins. The
+    #   rank-2 default of 64x64x256 is too small (the grid undersaturates
+    #   the CUs), and num_warps=8 is too wide for tiles this size.
+    if mn_area >= 4 * 1024 * 1024:
+        priority = [(256, 256, 64), (256, 128, 64), (128, 256, 64), (128, 128, 64)]
+        gsm_override = 4
+        kpack_override = 1
+        nw_override = 8
+    elif mn_area >= 1024 * 1024 and B >= 4:
+        priority = [(128, 128, 64), (128, 256, 64), (256, 128, 64)]
+        gsm_override = 4
+        kpack_override = 1
+        nw_override = 4
+    else:
+        # Smaller MN or smaller batch: defer to Origami. Sweep showed the
+        # override does not improve these and can mildly regress some.
+        return None
+
+    # LDS-fit check — pick the first priority tile that fits the hardware
+    # capacity at the requested num_stages (Triton's async_copy + N-stage
+    # software pipeline holds N-1 buffers of (BLK_M*BLK_K + BLK_K*BLK_N)).
+    for bm, bn, bk in priority:
+        if num_stages <= 1:
+            lds = max(bm * bk * bytes_a, bn * bk * bytes_b)
+        else:
+            lds = (num_stages - 1) * (bm * bk * bytes_a + bn * bk * bytes_b)
+        if lds > lds_cap:
+            continue
+        return bm, bn, bk, gsm_override, kpack_override, nw_override
+    return None
+
+
+def _bmm_pick_tile(
+    M: int,
+    N: int,
+    K: int,
+    B: int,
+    a_dtype: torch.dtype,
+    b_dtype: torch.dtype,
+    selector,
+) -> Optional[Tuple[int, int, int, int, int, int]]:
+    """Batched-aware tile / GSM / kpack / num_warps override for ``bmm()``.
+
+    Origami picks tiles assuming a single rank-2 problem; for batched workloads
+    the total grid is ``tiles_per_batch * B`` and the rank-2-optimal pick can
+    under-utilize the CUs (or use too many warps for the chosen tile). For
+    fp16 B=4 2048^3 Origami picks ``128x128x128`` while empirical measurement
+    shows ``256x256x64`` is ~40% faster on the batched grid; for bf16 B=8
+    1024^3 Origami picks ``64x64x256`` while ``128x128x64`` with num_warps=4
+    is ~80% faster.
+
+    Architecture:
+        The CU count (304), XCD count (8), and LDS capacity used to validate
+        the priority list are MI300X-specific. On any non-gfx942 arch the
+        override is *disabled* (returns ``None``) and the launcher falls back
+        to the unmodified Origami pick. New archs need their own sweep before
+        being added to :data:`_BMM_TILE_OVERRIDE_ARCHS`.
+
+    Heuristic (pick first priority tile whose LDS footprint fits hardware):
+        * ``M*N >= 4M``           → ``[(256,256,64), (256,128,64), ...]``,
+                                     ``GSM=4``, ``kpack=1``, ``num_warps=8``
+        * ``M*N >= 1M and B >= 4`` → ``[(128,128,64), (128,256,64), ...]``,
+                                     ``GSM=4``, ``kpack=1``, ``num_warps=4``
+        * smaller / B<4           → ``None`` (defer to Origami)
+
+    Skipped (returns ``None``) for non-gfx942 archs, ``B<2``, ``M<256``,
+    ``N<256``, ``K<64``, or quantized dtypes (the sweep only covered
+    fp16/bf16/fp32). The caller keeps the Origami pick on a miss.
+
+    Returns ``(BLK_M, BLK_N, BLK_K, group_m, kpack, num_warps)`` on a hit.
+    """
+    arch = get_arch()
+    lds_cap = selector._hardware.lds_capacity
+    num_stages = getattr(selector, "num_stages", 2)
+    return _bmm_pick_tile_cached(
+        M, N, K, B, a_dtype, b_dtype, arch, lds_cap, num_stages
+    )
+
+
+def batched_persistent_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    bias: Optional[torch.Tensor] = None,
+    a_scale: Optional[torch.Tensor] = None,
+    b_scale: Optional[torch.Tensor] = None,
+    quantized: bool = False,
+):
+    """Host launcher for the true batched persistent matmul kernel.
+
+    Resolves per-tensor strides (including the batch dim), computes the 3D
+    launch grid ``(total_tiles_per_batch, batch_size)``, and forwards everything
+    to :func:`batched_persistent_matmul`. See that kernel's docstring for the
+    grid layout, batch-stride contract, and stride-0 broadcast convention used
+    when one operand is rank-2 and the other is rank-3.
+
+    Args:
+        a: ``(B, M, K)`` or ``(M, K)``. Rank-2 inputs broadcast over the batch
+            dim by passing ``stride_ab = 0`` to the kernel.
+        b: ``(B, K, N)`` or ``(K, N)``. Rank-2 inputs broadcast similarly via
+            ``stride_bb = 0``.
+        c: Pre-allocated output of shape ``(B, M, N)``.
+        selector: ``OrigamiMatmulSelector`` for ``(M, N, K, dtype)`` — shape-only,
+            so safe to share across batches and across calls.
+    """
+    assert a.shape[-1] == b.shape[-2], "Incompatible Dimensions"
+    assert c.dim() == 3, "Output must be rank-3"
+    batch_size, M, K = c.shape[0], c.shape[1], c.shape[2 - (1 if c.dim() == 3 else 0)]
+    # Re-derive cleanly:
+    batch_size = c.shape[0]
+    M = c.shape[1]
+    N = c.shape[2]
+    K = a.shape[-1]
+
+    # Resolve per-tensor batch / row / col strides. Rank-2 operands broadcast
+    # across the batch dim by setting their batch stride to 0.
+    if a.dim() == 3:
+        stride_ab, stride_am, stride_ak = a.stride(0), a.stride(1), a.stride(2)
+    else:
+        stride_ab, stride_am, stride_ak = 0, a.stride(0), a.stride(1)
+
+    if b.dim() == 3:
+        stride_bb, stride_bk, stride_bn = b.stride(0), b.stride(1), b.stride(2)
+    else:
+        stride_bb, stride_bk, stride_bn = 0, b.stride(0), b.stride(1)
+
+    stride_cb, stride_cm, stride_cn = c.stride(0), c.stride(1), c.stride(2)
+
+    # Optional epilogue strides
+    if quantized:
+        if a_scale is not None and a_scale.dim() == 2:
+            stride_a_scale_b = a_scale.stride(0)
+        else:
+            stride_a_scale_b = 0
+        if b_scale is not None and b_scale.dim() == 2:
+            stride_b_scale_b = b_scale.stride(0)
+        else:
+            stride_b_scale_b = 0
+    else:
+        stride_a_scale_b = 0
+        stride_b_scale_b = 0
+
+    if bias is not None:
+        broadcast_bias = bias.dim() == 1
+        stride_bias = bias.stride(-1)
+    else:
+        broadcast_bias = True
+        stride_bias = 0
+
+    # Batched-aware tile / group_m / kpack / num_warps override. Origami picks
+    # tiles assuming a rank-2 problem; for batched shapes the rank-2 pick
+    # under-utilizes the CUs (or uses too many warps for the chosen tile) once
+    # all batches share one grid. See ``_bmm_pick_tile`` docstring for the
+    # heuristic. On a hit the override returns 6 values; on a miss we fall
+    # back to the Origami selector exactly.
+    override = _bmm_pick_tile(M, N, K, batch_size, a.dtype, b.dtype, selector)
+
+    # Selector defaults — used when the override misses, and let an explicit
+    # FakeSelector pass override-style attributes through for benchmarking.
+    num_stages = getattr(selector, "num_stages", 2)
+    waves_per_eu = getattr(selector, "waves_per_eu_override", 0)
+    mfmaInstrSize = getattr(selector, "mfma_instr_nonkdim", 16)
+
+    if override is not None:
+        BLK_M, BLK_N, BLK_K, gsm_override, kpack, nw_override = override
+        gsize_m = gsm_override if gsm_override > 0 else selector.group_m
+        num_warps = nw_override
+        # NUM_XCDS retained from the selector (default 8 on MI300X) — the
+        # batch dim is independent from XCD remapping, and pinning XCDS=1 was
+        # measured to be no better than the selector default on the per-shape
+        # sweep.
+        num_xcds = selector.num_sms
+    else:
+        BLK_M = selector.block_m
+        BLK_N = selector.block_n
+        BLK_K = selector.block_k
+        gsize_m = selector.group_m
+        kpack = getattr(selector, "kpack", 1)
+        num_warps = getattr(selector, "num_warps", 8)
+        num_xcds = selector.num_sms
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    even_k = K % BLK_K == 0
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    chunk_size = gsize_m * gsize_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    else:
+        num_xcds = 1
+
+    grid = (total_tiles, batch_size)
+
+    _maybe_wrap(batched_persistent_matmul, probe_tensor=a)[grid](
+        a,
+        b,
+        c,
+        a_scale if quantized else None,
+        b_scale if quantized else None,
+        bias if bias is not None else None,
+        M,
+        N,
+        K,
+        stride_ab,
+        stride_am,
+        stride_ak,
+        stride_bb,
+        stride_bk,
+        stride_bn,
+        stride_cb,
+        stride_cm,
+        stride_cn,
+        stride_bias,
+        stride_a_scale_b,
+        stride_b_scale_b,
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=total_tiles,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        BIAS=bias is not None,
+        EVEN_K=even_k,
+        BROADCAST_BIAS=broadcast_bias,
+        QUANTIZED=quantized,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        CACHE_MODIFIER_A=CACHE_MODIFIER_A,
+        CACHE_MODIFIER_B=CACHE_MODIFIER_B,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfmaInstrSize,
+        kpack=kpack,
+    )
+
+    return c
+
+
 def matmul_lt(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
     selector, config: MatmulConfig,
@@ -472,6 +786,108 @@ def _matmul_out(
     return None
 
 
+def _is_batched_inputs(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Detect whether a matmul call should take the rank-3 batched path.
+
+    A call is batched if either operand is rank-3. Rank-2 @ rank-2 stays on the
+    legacy 2D path. Rank-3 @ rank-2 (or vice-versa) is broadcast across the
+    batch dim by the batched kernel.
+    """
+    return a.dim() == 3 or b.dim() == 3
+
+
+# Memoized selector lookup for batched matmul.
+#
+# The Origami selector + heuristic search is shape-only (independent of pointer
+# values, batch size, and strides), so a (M, N, K, dtype, device) key is enough
+# to safely reuse it across calls. Repeated batched matmul calls (e.g. inside a
+# training loop) hit this cache and pay only the launch cost on subsequent
+# invocations.
+_BMM_SELECTOR_CACHE: Dict[Tuple, Any] = {}
+
+
+def _bmm_selector(M, N, K, a_dtype, b_dtype, out_dtype, device):
+    key = (M, N, K, a_dtype, b_dtype, out_dtype, str(device))
+    sel = _BMM_SELECTOR_CACHE.get(key)
+    if sel is None:
+        sel = _make_matmul_selector(M, N, K, a_dtype, b_dtype, out_dtype, device)
+        _BMM_SELECTOR_CACHE[key] = sel
+    return sel
+
+
+def bmm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Batched matmul — fused 3D-grid kernel (analog of ``torch.bmm``).
+
+    Computes ``out[i] = a[i] @ b[i]`` in a single kernel launch. Equivalent to
+    looping ``tritonblas.matmul`` over the batch dim, but pays one kernel-launch
+    cost instead of B, which closes the structural gap vs hipBLASLt for batched
+    workloads where launch latency dominated useful work.
+
+    Accepted ranks (auto-dispatched from :func:`matmul` when either operand is
+    rank-3):
+
+    * ``a: (B, M, K)``, ``b: (B, K, N)``  → ``out: (B, M, N)``
+    * ``a: (M, K)``,    ``b: (B, K, N)``  → ``out: (B, M, N)`` (a broadcast)
+    * ``a: (B, M, K)``, ``b: (K, N)``     → ``out: (B, M, N)`` (b broadcast)
+    * ``a: (M, K)``,    ``b: (K, N)``     → falls back to rank-2 :func:`matmul`
+
+    Broadcasting is implemented by passing batch stride 0 to the kernel (see
+    :func:`batched_persistent_matmul_lt` and the kernel docstring), so no copy
+    is performed.
+
+    Non-contiguous inputs are supported: the kernel reads per-tensor strides
+    from ``a.stride() / b.stride() / out.stride()`` rather than assuming a
+    layout. ``B == 1`` is a valid edge case (single batch element, batch stride
+    is irrelevant since only ``program_id(1) = 0`` ever runs).
+
+    Args:
+        a: Left-hand operand; rank-2 or rank-3.
+        b: Right-hand operand; rank-2 or rank-3.
+        out: Optional pre-allocated output of shape ``(B, M, N)``. Allocated if
+            omitted.
+
+    Returns:
+        ``out`` (the same tensor if supplied).
+
+    Raises:
+        AssertionError: if ranks are not in {2, 3}, batch dims mismatch when
+            both operands are rank-3, or the inner dim ``K`` disagrees.
+    """
+    if a.dim() == 2 and b.dim() == 2:
+        return matmul(a, b, out=out)
+
+    assert a.dim() in (2, 3) and b.dim() in (2, 3), (
+        f"bmm requires rank-2 or rank-3 inputs, got a.dim={a.dim()} b.dim={b.dim()}"
+    )
+    a_batch = a.shape[0] if a.dim() == 3 else 1
+    b_batch = b.shape[0] if b.dim() == 3 else 1
+    if a.dim() == 3 and b.dim() == 3:
+        assert a_batch == b_batch, (
+            f"Incompatible batch dims: a={a_batch}, b={b_batch}"
+        )
+    batch_size = max(a_batch, b_batch)
+
+    M = a.shape[-2]
+    K = a.shape[-1]
+    K2 = b.shape[-2]
+    N = b.shape[-1]
+    assert K == K2, f"Incompatible inner dims: a K={K}, b K={K2}"
+
+    if out is None:
+        out = torch.empty((batch_size, M, N), device=a.device, dtype=a.dtype)
+    else:
+        assert out.dim() == 3 and out.shape == (batch_size, M, N), (
+            f"out shape mismatch: expected ({batch_size},{M},{N}), got {tuple(out.shape)}"
+        )
+
+    selector = _bmm_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
+    return batched_persistent_matmul_lt(a, b, out, selector)
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -480,6 +896,15 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Rank-3 inputs route through the true batched 3D-grid kernel rather than
+    # paying per-batch kernel-launch overhead in a Python loop. This applies
+    # only to the unquantized, non-stream-K, non-work-stealing path; advanced
+    # modes still take the rank-2 path (and would Python-loop today). The
+    # batched path is correctness-equivalent to a per-batch loop over
+    # persistent_matmul_lt (verified by tests/test_bmm_correctness.py).
+    if _is_batched_inputs(a, b) and not enable_streamk and not work_stealing:
+        return bmm(a, b, out=out)
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

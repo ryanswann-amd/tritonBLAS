@@ -37,25 +37,31 @@ def _maybe_wrap(fn, probe_tensor):
 
 
 # --- K-282: Large-square cohort fast path ---
-# Closes the persistent-CTA gap vs hipBLASLt on M=N=K in {8192, 16384} fp16/bf16
-# by routing those shapes through streamk_matmul_lt (which K-splits across CTAs
-# and amortizes the prologue/epilogue cost across more waves).  Empirically:
+# Closes the persistent-CTA gap vs hipBLASLt on the 16384³ fp16/bf16 entry by
+# routing through streamk_matmul_lt (which K-splits across CTAs and amortizes
+# the prologue cost across more waves).  Measured under hardened methodology
+# (autotune-resolved warmup, isolated TRITON_CACHE_DIR per shape):
 #   shape           persistent     streamk        torch (hipBLASLt)
-#   8192³  fp16     2.518 ms       2.158 ms       1.685 ms     -> +14% closer
-#   8192³  bf16     2.421          2.088          1.587        -> +14%
-#   16384³ fp16    16.652         14.845         14.105        -> +11% closer
-#   16384³ bf16    16.050         14.480         13.340        -> +10%
-# 4096³ shows mixed results from streamk (modest fp16 regression, modest bf16
-# gain) so we leave it on the persistent path.  Gate is narrow: auto-enable
-# only when caller has not asked for streamk/work-stealing/bias/quantization
-# (preserves explicit-flag callers and existing perf gates).
+#   4096³  fp16     0.587 ms       0.587 ms       0.274 ms   no improvement (structural)
+#   4096³  bf16     0.578          0.582          0.253      no improvement (structural)
+#   8192³  fp16     2.155          2.198          1.720      persistent wins (1.5%)
+#   8192³  bf16     2.016          2.046          1.625      persistent wins (1.5%)
+#   16384³ fp16   17.288         15.433         14.826      streamk wins (12%)
+#   16384³ bf16   16.624         14.800         14.049      streamk wins (12%)
+# 4096³: structural CU under-fill — only 256 output tiles at 256x256 < 304 CUs;
+# no tile config in {128,256}x{128,256}x{32,64} improves it (probed in
+# scripts/probe_tiles_4096.py).  hipBLASLt likely uses a fundamentally different
+# kernel (split-K accumulation / different MFMA layout) for this small-but-wide
+# square.  Tracked as a follow-up ticket; not addressable from dispatch.
+# 8192³: persistent already wins under proper warmup — leave default.
+# Gate is narrow: auto-enable only when caller has not asked for
+# streamk/work-stealing/bias/quantization (preserves explicit-flag callers).
 _K282_LARGE_SQUARE_SHAPES = frozenset({
     (4096, 4096, 4096),
     (8192, 8192, 8192),
     (16384, 16384, 16384),
 })
 _K282_STREAMK_ROUTE_SHAPES = frozenset({
-    (8192, 8192, 8192),
     (16384, 16384, 16384),
 })
 

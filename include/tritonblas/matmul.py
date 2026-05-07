@@ -269,6 +269,32 @@ def streamk_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # K-273: large-K square autotune override on streamk path. Same lookup as
+    # persistent path; the table key (M,N,K,dtype) may carry kernel kwargs in
+    # addition to the streamk-routing decision (made at matmul() entry).
+    if _lks is not None:
+        _ovr = _lks.lookup(M, N, K, a.dtype)
+        if _ovr is not None:
+            if "BLOCK_M" in _ovr:
+                BLK_M = _ovr["BLOCK_M"]
+                BLK_N = _ovr["BLOCK_N"]
+                BLK_K = _ovr["BLOCK_K"]
+                # Recompute derived fields once block sizes change
+                total_blocks_M = triton.cdiv(M, BLK_M)
+                total_blocks_N = triton.cdiv(N, BLK_N)
+                total_tiles = total_blocks_M * total_blocks_N
+                even_k = K % BLK_K == 0
+                if total_programs_streamk > 0:
+                    total_tiles_streamk = total_tiles % total_programs_streamk
+                else:
+                    total_tiles_streamk = 0
+            if "num_stages" in _ovr: num_stages = _ovr["num_stages"]
+            if "num_warps" in _ovr: num_warps = _ovr["num_warps"]
+            if "matrix_instr_nonkdim" in _ovr: mfmaInstrSize = _ovr["matrix_instr_nonkdim"]
+            if "kpack" in _ovr: kpack = _ovr["kpack"]
+            if "waves_per_eu" in _ovr: waves_per_eu = _ovr["waves_per_eu"]
+            if "GROUP_SIZE_M" in _ovr: gsize_m = _ovr["GROUP_SIZE_M"]
+
     if sk_grid is not None:
         total_programs_streamk = sk_grid
 
@@ -501,6 +527,23 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # K-273: large-K square cohort autotune — for the gated cohort, the
+    # autotune table may request streamk dispatch (and optionally sk_grid).
+    # Caller-supplied enable_streamk=True wins (no override); only auto-promote
+    # from the default enable_streamk=False.
+    if not enable_streamk and _lks is not None:
+        try:
+            M, K = a.shape
+            _, N = b.shape
+            if _lks.should_use_streamk(M, N, K, a.dtype):
+                enable_streamk = True
+                if sk_grid is None:
+                    _ovr = _lks.streamk_sk_grid_override(M, N, K, a.dtype)
+                    if _ovr is not None:
+                        sk_grid = _ovr
+        except Exception:
+            pass  # Defense in depth — never let autotune break dispatch.
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

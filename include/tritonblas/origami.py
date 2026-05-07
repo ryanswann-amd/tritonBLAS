@@ -275,7 +275,14 @@ class OrigamiMatmulSelector:
             self._problem, self._hardware, self._configs
         )
 
-        if streamk:
+        # Small-M cohort post-process: when M is in the cohort, replace the
+        # analytic tile choice with the curated wide-N tile and pin StreamK.
+        # This *must* run before _compute_sk_grid so the grid is sized to the
+        # overridden tile (not the analytic one).
+        self._small_m_override_tile = None
+        self._apply_small_m_override(bytes_a, bytes_b, lds_cap)
+
+        if self.streamk:
             self._grid = self._compute_sk_grid()
         else:
             self._grid = self._hardware.N_CU
@@ -435,39 +442,79 @@ class OrigamiMatmulSelector:
         # scale by the number of partial‑tiles per WG
         return tile_size * sk_grid
 
+    # Tile candidates for the small-M cohort, ordered by empirical preference
+    # on gfx942 (MI300X / MI325X) for bf16/fp16 from a (BM,BN,BK) sweep across
+    # the K-654-style shape distribution. Each entry is (BM, BN, BK).
+    #
+    # Why BM=32 even when M<=16? On gfx942 the bf16/fp16 MFMA tile is 16x16x16,
+    # so BM=32 schedules two stacked MFMAs per output tile and keeps the matrix
+    # pipeline saturated; with BM=16 the kernel issues only one MFMA per tile
+    # and stalls on global loads. The "wasted" lower 16 rows have negligible
+    # cost because (a) the LDS A-buffer is sized to BM (Triton masks past-M
+    # loads) and (b) HBM traffic is dominated by B which is M-independent.
+    # Empirically 32x64x64 + StreamK hits 0.7-1.2x torch.matmul on M={16,32}
+    # N={4K..16K} K={2K..16K} bf16 shapes on MI325X, vs 0.13-0.45x for the
+    # analytic-selector default of 16x16x32 / 16x64x32.
+    #
+    # BN=64 + BK=64 (~32 KB LDS at ns=2) leaves the most headroom for the
+    # StreamK K-split: tiles_N = N/64 yields a healthy DP grid that StreamK
+    # multiplies up to ~N_CU. Larger BN (128/256) under-fills the DP grid and
+    # the larger BK (128) leaves less K-split factor when iters_per_tile is
+    # already small.
+    _SMALL_M_TILE_CANDIDATES = (
+        (32, 64, 64),
+        (32, 64, 128),
+        (32, 128, 64),
+        (16, 64, 64),
+        (16, 128, 64),
+        (16, 64, 128),
+    )
+
+    def _apply_small_m_override(self, bytes_a, bytes_b, lds_cap):
+        """Patch the selected config + streamk flag for the small-M cohort.
+
+        For M <= SMALL_M_THRESHOLD, replace the analytic tile choice with the
+        first LDS-feasible entry from ``_SMALL_M_TILE_CANDIDATES`` and pin
+        ``self.streamk`` so the kernel router (matmul.py) opts into the
+        StreamK path. The method is a no-op for M > SMALL_M_THRESHOLD, so
+        M >= 64 shapes are completely unaffected.
+        """
+        if not self._small_m:
+            return
+
+        chosen = None
+        for bm, bn, bk in self._SMALL_M_TILE_CANDIDATES:
+            if check_triton_lds_capacity(
+                bm, bn, bk, bytes_a, bytes_b, lds_cap, self._num_stages
+            ):
+                chosen = (bm, bn, bk)
+                break
+        if chosen is None:
+            # All curated tiles exceed LDS — should not happen on supported
+            # hardware (>=64KB LDS) for these tiny tiles. Bail out instead of
+            # silently regressing the analytic pick.
+            return
+
+        bm, bn, bk = chosen
+        self._result.config.mt.m = bm
+        self._result.config.mt.n = bn
+        self._result.config.mt.k = bk
+        self._small_m_override_tile = chosen
+
+        # Pin StreamK on so the dispatch layer routes to streamk_matmul_lt
+        # and _compute_sk_grid() multiplies the DP grid (which is at most
+        # ceil(N/BN) tiles for M_tiles=1) by an integer K-split factor that
+        # fans the work back out across N_CU.
+        self.streamk = True
+
     def _generate_default_configs(self):
         config_list = []
 
         mi = self._infer_matrix_instruction_dimensions()
 
-        # Default candidate ranges
-        bm_range = list(self._block_mn_range)
-        bn_range = list(self._block_mn_range)
-
-        # Small-M cohort: BM>=64 wastes M-dim threads (e.g. M=16 with BM=64
-        # only fills 25% of the tile rows, halving effective TFLOPS even at
-        # 100% CU occupancy). Cap BM at the smallest power of two covering M
-        # (16 or 32). At the same time, prefer BN>=128 — with BM<=32 the M
-        # dimension only feeds one MFMA row per warp, so we need wide N tiles
-        # to amortize the K-loop and keep waves resident. Smaller BNs are
-        # still kept as fallbacks for tiny N.
-        if self._small_m:
-            small_m_cap = max(16, _round_up_pow2(self._m))
-            small_m_cap = min(small_m_cap, SMALL_M_THRESHOLD)
-            bm_range = [b for b in self._block_mn_range if b <= small_m_cap]
-            if not bm_range:
-                bm_range = [16]
-            preferred_bn = [b for b in self._block_mn_range if b >= 128]
-            if preferred_bn:
-                bn_range = preferred_bn
-            # If the problem's N is smaller than the smallest preferred BN,
-            # let the original range back in so we still have valid configs.
-            if self._n < min(bn_range):
-                bn_range = list(self._block_mn_range)
-
         for blk_m, blk_n, blk_k, occupancy in itertools.product(
-            bm_range,
-            bn_range,
+            self._block_mn_range,
+            self._block_mn_range,
             self._block_k_range,
             self._kernel_occupancy_range,
         ):

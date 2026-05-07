@@ -63,7 +63,7 @@ def test_threshold_is_pinned_at_32():
 
 
 @pytest.mark.parametrize("m", [16, 32])
-def test_small_m_cohort_clamps_bm_and_enables_streamk(m):
+def test_small_m_cohort_picks_curated_tile_and_enables_streamk(m):
     dev = _device()
     sel = OrigamiMatmulSelector(
         m=m, n=4096, k=4096,
@@ -71,22 +71,24 @@ def test_small_m_cohort_clamps_bm_and_enables_streamk(m):
         device=dev, streamk=False,
     )
 
-    # Cohort flag is on, BM is clamped to a power of two <= 32, and the
-    # tile is wide enough in N to amortize the K-loop on a skinny problem.
+    # Cohort flag is on; the override forces (BM, BN, BK) to come from
+    # ``OrigamiMatmulSelector._SMALL_M_TILE_CANDIDATES`` rather than the
+    # analytic-selector pick. On supported hardware (>=64KB LDS) the first
+    # entry — (32, 64, 64) — is always LDS-feasible for bf16/fp16, so we
+    # assert against the curated set.
     assert sel.is_small_m is True
-    assert sel.block_m <= 32, f"BM={sel.block_m} would waste M-dim threads for M={m}"
-    assert sel.block_m in (16, 32)
-    assert sel.block_n >= 128, f"BN={sel.block_n} too narrow for skinny-M cohort"
+    candidates = OrigamiMatmulSelector._SMALL_M_TILE_CANDIDATES
+    assert (sel.block_m, sel.block_n, sel.block_k) in candidates, \
+        f"({sel.block_m},{sel.block_n},{sel.block_k}) not in curated set {candidates}"
 
     # Routing must report StreamK without the caller passing enable_streamk.
     assert sel.use_streamk is True
     assert _selector_wants_streamk(sel, enable_streamk=False) is True
 
 
-def test_small_m_falls_back_when_n_is_tiny():
-    """When N is itself smaller than the preferred 128 floor, the BN range
-    must reopen so we still produce a valid config (regression guard for
-    crash-on-empty-candidate-set)."""
+def test_small_m_no_crash_on_tiny_n():
+    """The curated override is independent of N, so even very small N must
+    still produce a valid selector (no crash on empty candidate set)."""
     dev = _device()
     sel = OrigamiMatmulSelector(
         m=16, n=64, k=4096,

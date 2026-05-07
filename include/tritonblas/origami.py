@@ -332,7 +332,7 @@ def check_triton_lds_capacity(
 #
 # Tuple value layout: (BM, BN, BK, num_warps, waves_per_eu, kpack).
 # waves_per_eu=0 means "compiler picks"; >0 forces a specific occupancy.
-_HIPBLASLT_SHAPE_OVERRIDES: dict[
+_HIPBLASLT_NW_OVERRIDES: dict[
     tuple[int, int, int, str], tuple[int, int, int, int, int, int]
 ] = {
     # K-706 sweep v3 (persistent_matmul_lt path on MI300X gfx942):
@@ -367,7 +367,7 @@ def _lookup_shape_override(
     m: int, n: int, k: int, dtype_str: str
 ) -> tuple[int, int, int, int, int, int] | None:
     """Return (BM, BN, BK, num_warps, waves_per_eu, kpack) override or None."""
-    return _HIPBLASLT_SHAPE_OVERRIDES.get((m, n, k, dtype_str))
+    return _HIPBLASLT_NW_OVERRIDES.get((m, n, k, dtype_str))
 
 
 class OrigamiMatmulSelector:

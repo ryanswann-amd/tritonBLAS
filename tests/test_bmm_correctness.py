@@ -183,3 +183,109 @@ def test_bmm_mismatched_inner_raises():
     b = torch.randn(4, 64, 64, device="cuda", dtype=torch.float16)
     with pytest.raises(AssertionError, match="inner dims"):
         tritonblas.bmm(a, b)
+
+
+# ──────────────────────── Degenerate / adversarial edge cases ────────────────────────
+# These exercise paths that the 3D-grid offset arithmetic could mis-handle:
+# * Empty batch (B=0): zero-size grid, kernel must not be launched.
+# * Empty inner dim (K=0): inner reduction over nothing → output must be zeros.
+# * Non-monotonic / negative-stride batch: torch.flip / reverse-batch indexing
+#   produces a tensor whose stride(0) is negative; the kernel reads bid * stride_ab
+#   so a negative stride must work.
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_bmm_zero_batch(dtype):
+    """B=0 — return the empty out tensor without launching a kernel.
+    torch.bmm returns an empty (0, M, N) tensor; we must mirror that."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm GPU")
+    M, N, K = 64, 64, 64
+    a = torch.empty(0, M, K, device="cuda", dtype=dtype)
+    b = torch.empty(0, K, N, device="cuda", dtype=dtype)
+    out = tritonblas.bmm(a, b)
+    assert out.shape == (0, M, N)
+    # Reference path
+    ref = torch.bmm(a, b)
+    assert ref.shape == out.shape
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_bmm_zero_K(dtype):
+    """K=0 — empty inner reduction → output must be all zeros."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm GPU")
+    B, M, N, K = 4, 64, 64, 0
+    a = torch.empty(B, M, K, device="cuda", dtype=dtype)
+    b = torch.empty(B, K, N, device="cuda", dtype=dtype)
+    out = tritonblas.bmm(a, b)
+    assert out.shape == (B, M, N)
+    # All zeros — empty reduction is the additive identity.
+    assert out.abs().sum().item() == 0.0
+    # Same as torch
+    ref = torch.bmm(a, b)
+    assert torch.equal(out, ref)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_bmm_zero_M_or_N(dtype):
+    """Empty M or N output dim — return out unchanged, no kernel launch."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm GPU")
+    B, K = 4, 64
+    for (M, N) in [(0, 64), (64, 0)]:
+        a = torch.empty(B, M, K, device="cuda", dtype=dtype)
+        b = torch.empty(B, K, N, device="cuda", dtype=dtype)
+        out = tritonblas.bmm(a, b)
+        assert out.shape == (B, M, N)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_bmm_non_monotonic_batch_stride(dtype):
+    """Non-natural batch stride: take every other batch element from a
+    larger tensor. This produces ``stride(0) = 2 * M * K`` (not the natural
+    ``M * K``) — the kernel must read ``stride(0)`` from the tensor rather
+    than assuming the batch slice is packed. Catches a sign-extension /
+    "assume contiguous" bug in the 3D-grid offset arithmetic."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm GPU")
+    torch.manual_seed(67)
+    B, M, N, K = 4, 256, 256, 256
+    a_big = torch.randn(2 * B, M, K, device="cuda", dtype=dtype)
+    b_big = torch.randn(2 * B, K, N, device="cuda", dtype=dtype)
+    # Strided slice: take every other batch. PyTorch returns a non-contiguous
+    # view with stride(0) = 2 * stride_natural.
+    a = a_big[::2]
+    b = b_big[::2]
+    assert a.shape == (B, M, K)
+    assert a.stride(0) == 2 * a.stride(1) * M, (
+        f"expected non-natural stride(0)=2*M*stride(1), got {a.stride()}"
+    )
+    out = tritonblas.bmm(a, b)
+    ref = torch.bmm(a, b)  # torch.bmm handles stride internally
+    rel_err = _max_rel_err(out, ref)
+    tol = _tol(K, dtype)
+    assert rel_err < max(tol, 1e-2), (
+        f"bmm non-monotonic-stride rel_err {rel_err:.3e} > tol {tol:.3e}"
+    )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_bmm_b_eq_one_broadcast(dtype):
+    """Edge of broadcast: rank-2 A × rank-3 B with B=1. The host launcher
+    sets stride_ab=0, the kernel iterates a 1-element batch dim; the result
+    must equal a single rank-2 matmul. Caught a corner where the override
+    registry was firing on B=1 (it shouldn't — single batch is just rank-2)."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA/ROCm GPU")
+    torch.manual_seed(89)
+    M, N, K = 256, 256, 256
+    a = torch.randn(M, K, device="cuda", dtype=dtype)
+    b = torch.randn(1, K, N, device="cuda", dtype=dtype)
+    out = tritonblas.bmm(a, b)
+    assert out.shape == (1, M, N)
+    ref = torch.matmul(a, b)
+    rel_err = _max_rel_err(out, ref)
+    tol = _tol(K, dtype)
+    assert rel_err < max(tol, 1e-2), (
+        f"bmm b-rank3-B1 rel_err {rel_err:.3e} > tol {tol:.3e}"
+    )

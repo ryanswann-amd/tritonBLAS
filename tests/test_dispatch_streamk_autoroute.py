@@ -129,10 +129,23 @@ def test_env_var_disables_routing():
             os.environ["TBLAS_DISABLE_AUTO_STREAMK"] = prev
 
 
-def _atol_rtol(dtype):
+def _atol_rtol(dtype, K):
+    """fp16 / bf16 GEMM error bound, K-scaled.
+
+    Per-element forward error in a K-element dot product accumulated in
+    low precision is bounded by ~ ``K * eps * max(|a|) * max(|b|)``.
+    For inputs drawn from ``N(0, 1)``:
+
+        fp16 (eps ≈ 9.8e-4):   atol ≈ K * 1e-3,   rtol ≈ 1e-2
+        bf16 (eps ≈ 7.8e-3):   atol ≈ K * 8e-3,   rtol ≈ 2e-2
+
+    These are tight enough that a wrong tile / wrong kernel routing /
+    single flipped reduction will fail the assertion (a ~50 % output
+    error on K=8192 would be ~45 in absolute, vs the bound of ~8).
+    """
     if dtype == torch.float16:
-        return 1.0, 5e-2
-    return 2.0, 1e-1  # bf16 has ~half the mantissa
+        return max(1e-2, K * 1e-3), 1e-2
+    return max(1e-2, K * 8e-3), 2e-2
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -147,7 +160,7 @@ def test_streamk_routed_path_matches_reference(M, N, K, dtype):
     b = torch.randn(K, N, device=device, dtype=dtype)
     out = tritonblas.matmul(a, b)
     ref = a.to(torch.float32) @ b.to(torch.float32)
-    atol, rtol = _atol_rtol(dtype)
+    atol, rtol = _atol_rtol(dtype, K)
     torch.testing.assert_close(out.to(torch.float32), ref, atol=atol, rtol=rtol)
 
 
@@ -174,7 +187,7 @@ def test_persistent_baseline_matches_streamk_routed(M, N, K, dtype):
         else:
             os.environ["TBLAS_DISABLE_AUTO_STREAMK"] = prev
 
-    atol, rtol = _atol_rtol(dtype)
+    atol, rtol = _atol_rtol(dtype, K)
     torch.testing.assert_close(
         out_routed.to(torch.float32), out_persistent.to(torch.float32),
         atol=atol, rtol=rtol,

@@ -148,13 +148,6 @@ def test_envelope_admits_benefit_cohort():
         ), f"benefit shape {M}x{N}x{K} must remain admitted"
 
 
-def test_custom_envelope_overrides_default():
-    """A caller-supplied envelope replaces the module default."""
-    relaxed = KPack2Envelope(mainloop_iters_min=4, tiles_max=4096)
-    # Shape that the default envelope rejects on the amortization floor.
-    assert not is_medium_k_residual(2048, 2048, 512, block_k=64)
-    # Same shape under a relaxed envelope is admitted.
-    assert is_medium_k_residual(2048, 2048, 512, block_k=64, envelope=relaxed)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -299,6 +292,41 @@ def test_cached_kpack2_dropped_for_out_of_envelope_shape_auto(monkeypatch, tmp_p
     )
 
 
+def test_cached_kpack2_preserved_for_in_envelope_shape_on_mode(monkeypatch, tmp_path):
+    """Symmetric companion to ``..._dropped_for_out_of_envelope_shape_on_mode``.
+
+    Pins the positive side of the gating contract: an in-envelope shape
+    on ``mode=on`` must return ``SWIZZLED_CONFIG`` whether or not a cache
+    entry exists. Together with the drop-case test this locks the
+    two-sided behavior so regressions in either direction are caught.
+    """
+    cache_path = tmp_path / "preserved_on.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "on")
+    reset_cache_for_testing()
+
+    # Mainline-benefit shape: K=2048, BK=64 → 32 iters; tiles = 8*8 = 64;
+    # M=N=2048 ≥ min_mn — fully inside the envelope.
+    cache = PersistentSwizzleCache(path=cache_path)
+    key = (
+        "2048x2048x2048|f16|f16|f16|"
+        "256x256x64|ds|nows"
+    )
+    cache.set(key, SWIZZLED_CONFIG)
+    reset_cache_for_testing()
+
+    cfg = select_lds_config(
+        2048, 2048, 2048,
+        "f16", "f16", "f16",
+        256, 256, 64,
+        streamk=False, work_stealing=False,
+    )
+    assert cfg == SWIZZLED_CONFIG, (
+        "mode=on must preserve kpack=2 routing for in-envelope shapes "
+        "on every dispatch including warm cache hits"
+    )
+
+
 def test_cached_kpack2_dropped_for_out_of_envelope_shape_on_mode(monkeypatch, tmp_path):
     """Same root-cause coverage but with ``mode=on`` — verifies the
     envelope check fires structurally on every dispatch (not just on the
@@ -339,6 +367,39 @@ def test_cached_kpack2_dropped_for_out_of_envelope_shape_on_mode(monkeypatch, tm
 # ──────────────────────────────────────────────────────────────────────────────
 # Autotune callback
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_warm_dispatch_is_consistent_after_autotune_cache_write(monkeypatch, tmp_path):
+    """Memoization invariants: warm dispatch returns the same config
+    on repeated calls, and an autotune-driven cache mutation invalidates
+    the memo so the next call reflects the newly persisted entry.
+    """
+    cache_path = tmp_path / "memo.json"
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE_CACHE", str(cache_path))
+    reset_cache_for_testing()
+
+    # Cold call (auto, empty cache) → baseline.
+    args = dict(
+        M=4096, N=2048, K=2048,
+        a_dtype="f16", b_dtype="f16", c_dtype="f16",
+        block_m=256, block_n=256, block_k=64,
+    )
+    first = select_lds_config(**args)
+    second = select_lds_config(**args)
+    assert first == BASELINE_CONFIG
+    assert second == BASELINE_CONFIG
+
+    # Run autotune (env switched mid-process). It must persist SWIZZLED
+    # for this in-envelope shape and the next auto call must observe it,
+    # proving the memo invalidates on cache mutation.
+    monkeypatch.setenv("TRITONBLAS_LDS_SWIZZLE", "autotune")
+    select_lds_config(autotune_fn=lambda c: 1.0 if c == SWIZZLED_CONFIG else 5.0, **args)
+
+    monkeypatch.delenv("TRITONBLAS_LDS_SWIZZLE")  # back to default 'auto'
+    after = select_lds_config(**args)
+    assert after == SWIZZLED_CONFIG, (
+        "memoized auto-mode decision must reflect the autotune-written cache entry"
+    )
 
 
 def test_autotune_picks_faster_and_persists(monkeypatch, tmp_path):

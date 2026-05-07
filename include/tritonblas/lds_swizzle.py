@@ -54,9 +54,10 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
+from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -108,9 +109,7 @@ class KPack2Envelope:
     for whether a shape is allowed to receive ``kpack=2`` — every code
     path in :func:`select_lds_config` (mode resolution, cache hit,
     cache miss, autotune) calls :meth:`admits` rather than re-deriving
-    the predicate. To extend the envelope (e.g., per-dtype bounds, new
-    architectures), construct a new ``KPack2Envelope`` and pass it
-    explicitly into :func:`select_lds_config`.
+    the predicate.
 
     Bounds (defaults are calibrated for MI300X bf16/fp16):
 
@@ -196,8 +195,10 @@ class KPack2Envelope:
         return True
 
 
-#: Process-wide default envelope. Override by passing ``envelope=...`` to
-#: :func:`select_lds_config` (e.g., from a per-arch dispatch layer).
+#: Process-wide singleton envelope. There is exactly one in-tree caller
+#: (``select_lds_config``); other callers must consume the predicate
+#: through :func:`is_medium_k_residual` rather than constructing their own
+#: envelope so the routing contract stays centralized.
 DEFAULT_KPACK2_ENVELOPE = KPack2Envelope()
 
 
@@ -208,10 +209,17 @@ def is_medium_k_residual(
     block_k: Optional[int] = None,
     block_m: Optional[int] = None,
     block_n: Optional[int] = None,
-    envelope: KPack2Envelope = DEFAULT_KPACK2_ENVELOPE,
 ) -> bool:
-    """Backwards-compatible wrapper around :meth:`KPack2Envelope.admits`."""
-    return envelope.admits(M, N, K, block_k=block_k, block_m=block_m, block_n=block_n)
+    """Return True if (M, N, K, tile) is admitted to the kpack=2 envelope.
+
+    Thin wrapper around the singleton :data:`DEFAULT_KPACK2_ENVELOPE` so
+    callers and tests have a single, side-effect-free predicate to
+    consult. There is intentionally no ``envelope=`` override — the
+    routing contract is process-wide and shared by every dispatch.
+    """
+    return DEFAULT_KPACK2_ENVELOPE.admits(
+        M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -221,6 +229,12 @@ def is_medium_k_residual(
 
 _CACHE_LOCK = threading.Lock()
 _CACHE_INSTANCE: Optional["PersistentSwizzleCache"] = None
+
+# Bumped whenever the persistent cache is mutated (set/clear) or replaced;
+# the per-shape memoization in :func:`select_lds_config` keys on this so
+# warm dispatches are an O(1) dict lookup but newly-cached entries from
+# autotune are picked up on the next call.
+_CACHE_VERSION = 0
 
 
 class PersistentSwizzleCache:
@@ -284,10 +298,20 @@ class PersistentSwizzleCache:
     def set(self, key: str, cfg: LDSSwizzleConfig) -> None:
         self._data[key] = asdict(cfg)
         self._save()
+        _bump_cache_version()
 
     def clear(self) -> None:
         self._data = {}
         self._save()
+        _bump_cache_version()
+
+
+def _bump_cache_version() -> None:
+    """Invalidate the per-shape decision memo. Called on every cache mutation."""
+    global _CACHE_VERSION
+    with _CACHE_LOCK:
+        _CACHE_VERSION += 1
+    _decide_memo.cache_clear()
 
 
 def get_cache() -> PersistentSwizzleCache:
@@ -304,6 +328,7 @@ def reset_cache_for_testing() -> None:
     global _CACHE_INSTANCE
     with _CACHE_LOCK:
         _CACHE_INSTANCE = None
+    _bump_cache_version()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -349,6 +374,55 @@ def _cache_key(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+@lru_cache(maxsize=4096)
+def _decide_memo(
+    mode: str,
+    cache_version: int,
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: str,
+    b_dtype: str,
+    c_dtype: str,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    streamk: bool,
+    work_stealing: bool,
+) -> LDSSwizzleConfig:
+    """Resolve the routing decision for the no-autotune-callback path.
+
+    Pure function of (mode, cache snapshot version, shape, dtypes, tile,
+    schedule). The cache_version arg is the invalidation hook —
+    :func:`_bump_cache_version` clears the lru_cache whenever the
+    persistent cache is mutated, so this memo stays consistent with
+    the JSON-file backing store while keeping warm dispatches O(1).
+    """
+    if mode == "off":
+        return BASELINE_CONFIG
+
+    in_envelope = DEFAULT_KPACK2_ENVELOPE.admits(
+        M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
+    )
+
+    if mode == "on":
+        return SWIZZLED_CONFIG if in_envelope else BASELINE_CONFIG
+
+    # auto mode (and autotune-without-callback fall-through): cache → baseline.
+    cache = get_cache()
+    key = _cache_key(
+        M, N, K, a_dtype, b_dtype, c_dtype,
+        block_m, block_n, block_k, streamk, work_stealing,
+    )
+    cached = cache.get(key)
+    if cached is not None:
+        if cached.kpack == BASELINE_CONFIG.kpack or in_envelope:
+            return cached
+        # Cached non-baseline config but shape is out of envelope → baseline.
+        return BASELINE_CONFIG
+    return BASELINE_CONFIG
+
+
 def select_lds_config(
     M: int,
     N: int,
@@ -362,7 +436,6 @@ def select_lds_config(
     streamk: bool = False,
     work_stealing: bool = False,
     autotune_fn: Optional[Callable[[LDSSwizzleConfig], float]] = None,
-    envelope: KPack2Envelope = DEFAULT_KPACK2_ENVELOPE,
 ) -> LDSSwizzleConfig:
     """Resolve the LDS swizzle config for one kernel launch.
 
@@ -381,66 +454,48 @@ def select_lds_config(
             config and returns elapsed time (ms). Required when mode is
             "autotune" — without it autotune falls back to the cached/auto
             decision.
-        envelope: Optional override for the kpack=2 routing envelope.
-            Defaults to :data:`DEFAULT_KPACK2_ENVELOPE`.
 
     Returns:
         ``LDSSwizzleConfig`` to forward to the Triton kernel launch.
     """
     mode = get_mode()
 
-    if mode == "off":
-        return BASELINE_CONFIG
-
-    # Single envelope check — all subsequent branches consult ``in_envelope``
-    # rather than re-deriving the predicate. This is the structural guarantee
-    # that no out-of-envelope shape ever receives ``kpack=2``, regardless of
-    # mode, cache state, or autotune callback.
-    in_envelope = envelope.admits(
-        M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
-    )
-
-    if mode == "on":
-        return SWIZZLED_CONFIG if in_envelope else BASELINE_CONFIG
-
-    cache = get_cache()
-    key = _cache_key(
-        M, N, K, a_dtype, b_dtype, c_dtype,
-        block_m, block_n, block_k, streamk, work_stealing,
-    )
-
-    # autotune mode: time both candidates and persist the winner. Restrict the
-    # candidate set to the baseline outside the envelope so the cache cannot be
-    # poisoned by a regressing kpack=2 entry on an out-of-envelope shape (the
-    # observed root cause for the small-K cohort regression in pre-merge sweeps).
+    # autotune mode runs the actual GPU timing callback and is intentionally
+    # NOT memoized — every call is a real measurement. All other modes
+    # (off / on / auto) are pure functions of (mode, cache version, shape,
+    # tile) and go through the lru_cache for O(1) warm-dispatch lookup.
     if mode == "autotune" and autotune_fn is not None:
+        in_envelope = DEFAULT_KPACK2_ENVELOPE.admits(
+            M, N, K, block_k=block_k, block_m=block_m, block_n=block_n
+        )
+        # Restrict the candidate set to the baseline outside the envelope so
+        # the cache cannot be poisoned by a regressing kpack=2 entry on an
+        # out-of-envelope shape (the observed root cause for the small-K
+        # cohort regression in pre-merge sweeps).
         candidates = (BASELINE_CONFIG, SWIZZLED_CONFIG) if in_envelope else (BASELINE_CONFIG,)
         try:
             timings = [(autotune_fn(c), c) for c in candidates]
         except Exception:
             # Fall through to auto on autotune error to preserve correctness.
-            mode = "auto"
-            timings = None
+            pass
         else:
             timings.sort(key=lambda t: t[0])
             winner = timings[0][1]
-            cache.set(key, winner)
+            cache = get_cache()
+            key = _cache_key(
+                M, N, K, a_dtype, b_dtype, c_dtype,
+                block_m, block_n, block_k, streamk, work_stealing,
+            )
+            cache.set(key, winner)  # bumps _CACHE_VERSION → memo invalidated
             return winner
+        # autotune callback raised → fall through to the memoized auto path.
+        mode = "auto"
 
-    # auto mode (and autotune fall-through): cache → baseline.
-    # auto is intentionally safe — it never picks a non-baseline config without
-    # an empirical timing in the cache. Cache hits are still gated by the
-    # envelope: a stale ``kpack=2`` entry on an out-of-envelope shape is dropped
-    # to baseline rather than served, preventing silent regressions when the
-    # envelope tightens between releases.
-    cached = cache.get(key)
-    if cached is not None:
-        if cached.kpack == BASELINE_CONFIG.kpack or in_envelope:
-            return cached
-        # Cached non-baseline config but shape is out of envelope → baseline.
-        return BASELINE_CONFIG
-
-    return BASELINE_CONFIG
+    return _decide_memo(
+        mode, _CACHE_VERSION,
+        M, N, K, a_dtype, b_dtype, c_dtype,
+        block_m, block_n, block_k, streamk, work_stealing,
+    )
 
 
 __all__ = [

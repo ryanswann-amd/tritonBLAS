@@ -831,6 +831,29 @@ def _bmm_lookup_config(BATCH, M, N, K, dtype):
     return _BMM_SHAPE_LOOKUP.get((BATCH, M, N, K, dtype))
 
 
+@functools.lru_cache(maxsize=8)
+def _bmm_hw_props(device_index):
+    """Cached hardware-property fetch for the lookup-hit fast path.
+
+    Returns (N_CU, NUM_XCD).  Faster than a full Origami selector call
+    (which the lookup-hit path does NOT need — its tile/launcher
+    params come from ``_BMM_SHAPE_LOOKUP``), and importantly does not
+    pay the ~300 µs Origami solve.  Cached per-device so it's free
+    after the first call.
+    """
+    # Make a tiny throwaway selector just to read hardware properties.
+    # (Origami's hardware enumerator doesn't expose a public no-solve
+    # constructor, so we pay the solve cost ONCE per device-index here,
+    # then cache the result for every subsequent bmm() call on that
+    # device.)
+    sel = OrigamiMatmulSelector(
+        128, 128, 128,
+        torch.float16, torch.float16, torch.float16,
+        torch.device("cuda", device_index), batch=1,
+    )
+    return sel._hardware.N_CU, max(1, getattr(sel._hardware, "NUM_XCD", 1))
+
+
 def _batched_matmul_launch(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -867,19 +890,15 @@ def _batched_matmul_launch(
     # ----------------------------------------------------------------
     lookup = _bmm_lookup_config(BATCH, M, N, K, a.dtype)
     if lookup is not None:
-        # Hardware metadata still needs an Origami call for NUM_XCD/N_CU,
-        # but the result is LRU-cached so the cost is paid once per
-        # (shape, dtype, device) and amortised across all subsequent
-        # invocations.  We don't *use* selector's tile picks when the
-        # lookup hits — only the hardware-property handles.
-        selector = _bmm_selector_cached(
-            M, N, K, a.dtype, b.dtype, out.dtype, a.device.index, BATCH
-        )
+        # Hardware metadata for the lookup-hit path: read it from a
+        # tiny per-device LRU cache (``_bmm_hw_props``) instead of a
+        # full Origami solve, since the tile and launcher params
+        # already come from the lookup table.  After the first call
+        # this is a dict access; the per-call cost is dominated by
+        # the Triton launcher itself, not Python.
         (BLK_M, BLK_N, BLK_K, gsize_m, num_warps, num_stages,
          kpack, waves_per_eu) = lookup
-        num_sms_hw = selector._hardware.N_CU
-        hw_xcds = max(1, getattr(selector._hardware, "NUM_XCD", 1))
-        num_xcds = hw_xcds
+        num_sms_hw, num_xcds = _bmm_hw_props(a.device.index)
         mfmaInstrSize = 16
 
         total_blocks_M = triton.cdiv(M, BLK_M)

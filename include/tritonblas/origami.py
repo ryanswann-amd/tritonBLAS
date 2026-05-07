@@ -1,9 +1,14 @@
 from __future__ import annotations
 import itertools
+import os
 import torch
 import origami
 import math
 from math import ceil
+
+
+def _env_disabled(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
 def estimate_triton_lds_bytes(
@@ -286,7 +291,11 @@ class OrigamiMatmulSelector:
           * a wider tile fits LDS at the current num_stages
           * the wider tile actually reduces the program count
             (otherwise we'd just enlarge tiles for no reason)
+
+        Set ``TRITONBLAS_DISABLE_TILE_WIDEN=1`` to opt out (A/B testing).
         """
+        if _env_disabled("TRITONBLAS_DISABLE_TILE_WIDEN"):
+            return
         if self.streamk:
             # Stream-K owns its own grid; don't perturb its tile choice.
             return

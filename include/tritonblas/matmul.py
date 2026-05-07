@@ -27,26 +27,35 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 
 
 # ---------------------------------------------------------------------------
-# Small-M dispatch
+# Small-M dispatch (K-163: persistent-CTA + BLOCK_N override scaffolding)
 # ---------------------------------------------------------------------------
 # Shapes with small M (e.g. M=1..32) generate very few output tiles in the
 # data-parallel persistent kernel.  For an MI300X (304 CUs) a shape like
 # M=16,N=1024,K=1024 produces only ~8 (M,N) tiles, leaving ~37x of the device
-# idle.  Routing such shapes through the Stream-K kernel with the program
-# grid pinned to the CU count is the persistent-CTA pattern: every CU gets
-# exactly one program that walks the full (N,K) work itinerary internally,
-# splitting K across CUs to fill the device.  We additionally pin the tile
-# shape to (BLOCK_M_small, 256) and num_warps=4 so we (a) actually generate
-# enough N tiles for the persistent loop to spread across CUs and (b) keep
-# register pressure low for the skinny accumulator.  The threshold is
-# intentionally generous so we cover both decoding-style (M=1..16) and
-# small-batch attention (M=32) shapes.
+# idle.  K-186 (5154b6f) introduced the small-M dispatch that routes such
+# shapes through the Stream-K kernel with the program grid pinned to the CU
+# count — this is the persistent-CTA pattern: every CU gets exactly one
+# program that walks the full (N,K) work itinerary internally, splitting K
+# across CUs to fill the device.
+#
+# This file adds the *infrastructure* for tile-shape overrides at the
+# small-M dispatch site (``block_m_override``, ``block_n_override``,
+# ``block_k_override`` on ``streamk_matmul_lt``) plus a helper
+# (``_small_m_block_shape``) that picks (BLOCK_M, BLOCK_N=256, BLOCK_K=64)
+# for M<=32 shapes.  These overrides are gated behind
+# ``TRITONBLAS_SMALL_M_BLOCK_N_OVERRIDE`` and OFF by default — empirical
+# sweep on the K-163 cohort (M={1,2,4,8,16,32} x N,K in {1024..8192} x
+# {fp16,bf16}, 192 shapes) shows that pinning BLOCK_N=256 yields ~0.98x
+# geomean vs the K-186 selector pick.  The infrastructure is retained so
+# operators can experiment with tile-shape overrides without monkey-patching
+# the dispatch site, and so future small-M kernels (e.g. a persistent
+# K-split + atomic_add variant) have a clear injection point.
+import os as _os
 SMALL_M_THRESHOLD = 32
 SMALL_M_NUM_WARPS = 4
-# Pin BLOCK_N up to 256 to maximise N-tile count and so the per-CU
-# accumulator stays large (BLOCK_M is tiny by definition of this branch).
-# 256 is the largest tile that fits in LDS for fp16/bf16 with num_stages=2
-# alongside a BLOCK_K of 64.
+# Pin BLOCK_N up to this value when the override is enabled.  256 is the
+# largest tile that fits in LDS for fp16/bf16 with num_stages=2 alongside a
+# BLOCK_K of 64.
 SMALL_M_BLOCK_N_MAX = 256
 # 64 is a good default for fp16/bf16 K-loop on gfx942 — it matches the L1
 # line and keeps the K-splitting granularity high enough that even M=16
@@ -56,21 +65,13 @@ SMALL_M_BLOCK_K = 64
 # of the device idle.  At 0.5 we divert any shape that would otherwise use
 # fewer than half the CUs, which is the regime where K-splitting clearly wins.
 SMALL_M_GRID_FILL_RATIO = 0.5
-# Don't divert when M >= this — measurements show M=32 regresses on the
-# Stream-K path because the data-parallel persistent kernel already gets
-# good per-CU efficiency at M=32 (the 32-row MFMA accumulator dominates).
-SMALL_M_NO_DIVERT_M = 32
-# Stream-K splits K across CUs; with K below this, per-CU iteration count
-# is too low for the atomic-aggregation overhead to pay back.
-SMALL_M_MIN_K = 4096
-# When M=32, only divert if K and N are both above these (the only regime
-# where Stream-K wins for M=32 in measurements).
-SMALL_M_LARGE_K = 8192
-SMALL_M_LARGE_N = 4096
-# Each CU should get at least this many Stream-K iterations after splitting,
-# otherwise the per-tile aggregation overhead dominates.  Empirical
-# break-even on MI300X for fp16/bf16 small-M is ~2 iters/CU.
-SMALL_M_MIN_ITERS_PER_CU = 2
+# Opt-in for the BLOCK_N=256 override.  Default OFF so that the dispatch
+# behavior matches K-186 (origami-selected tile shape).  Set
+# ``TRITONBLAS_SMALL_M_BLOCK_N_OVERRIDE=1`` to enable.
+SMALL_M_BLOCK_N_OVERRIDE_ENABLED = (
+    _os.environ.get("TRITONBLAS_SMALL_M_BLOCK_N_OVERRIDE", "0").lower()
+    in ("1", "true", "yes", "on")
+)
 
 
 def _next_pow2(x: int) -> int:
@@ -104,53 +105,23 @@ def _should_route_small_m(M: int, N: int, K: int, selector) -> bool:
     """Return True when (M, N, K, selector) is a small-M shape that benefits
     from being routed through the persistent-CTA Stream-K path.
 
-    Empirical gating (validated on MI300X, gfx942, fp16/bf16):
+    Mirrors the K-186 routing decision: divert when M<=SMALL_M_THRESHOLD and
+    the data-parallel grid (with the *origami-picked* tile shape) would
+    leave at least SMALL_M_GRID_FILL_RATIO of the device idle.
 
-      * ``M > SMALL_M_THRESHOLD``: data-parallel path already covers enough
-        tiles, the Stream-K overhead is not worth it.
-      * ``M == 32``: skipped — measurements show 0.4-0.5x regressions vs the
-        data-parallel persistent kernel at K <= 4096 and only flat/marginal
-        wins at K = 8192, so the diversion is net-negative.  The 32-row
-        accumulator already reaches ~37 TF/s on the data-parallel path for
-        N=K=8192, leaving little headroom for Stream-K to pay back its
-        atomic-aggregation cost.
-      * ``K < SMALL_M_MIN_K``: Stream-K splits K across CUs, so without
-        enough K work per CU the per-tile aggregation overhead dominates
-        and the diversion regresses.  The empirical break-even on MI300X
-        is around K=4096 for M<=16.
-      * Tile-fill check: when the data-parallel grid (with the small-M
-        tile shape) would already fill more than half the CUs, we leave
-        the shape on the original path.
+    The previously-considered additional gates (K>=4096, M<32, iters/CU>=2)
+    were correlated with the BLOCK_N=256 override.  When the override is OFF
+    (default), the K-186 routing predicate is correct and there is no need
+    to filter further — the default dispatch already produces the K-186
+    behavior.
     """
     if M > SMALL_M_THRESHOLD:
         return False
-    if M >= SMALL_M_NO_DIVERT_M:
-        # M=32 is broadly slower with Stream-K than with the data-parallel
-        # persistent kernel; only divert when K is huge AND N is huge (the
-        # only regime where measurements show net wins).
-        if not (K >= SMALL_M_LARGE_K and N >= SMALL_M_LARGE_N):
-            return False
-    if K < SMALL_M_MIN_K:
-        return False
-    # Use the *override* tile shape (not the origami pick) when judging fill
-    # fraction — origami often picks BLOCK_N <= 64 for tiny M, which would
-    # already pass the threshold but miss the bigger win from BLOCK_N=256.
-    BLK_M, BLK_N, BLK_K = _small_m_block_shape(M, N, K, selector)
+    BLK_M = selector.block_m
+    BLK_N = selector.block_n
     total_tiles = ((M + BLK_M - 1) // BLK_M) * ((N + BLK_N - 1) // BLK_N)
     num_cu = selector._hardware.N_CU
-    if total_tiles >= int(num_cu * SMALL_M_GRID_FILL_RATIO):
-        return False
-    # Require at least SMALL_M_MIN_ITERS_PER_CU K iterations per CU after
-    # Stream-K splitting.  Without this, shapes with tiny N (e.g. N=1024,
-    # BLK_N=256 → 4 N-tiles) end up with one K iter per CU, which is too
-    # little work per launch to overcome Stream-K's per-tile aggregation
-    # overhead.  Empirically the data-parallel persistent kernel wins
-    # below this threshold.
-    iters_per_tile = max(1, (K + BLK_K - 1) // BLK_K)
-    total_streamk_iters = total_tiles * iters_per_tile
-    if total_streamk_iters < num_cu * SMALL_M_MIN_ITERS_PER_CU:
-        return False
-    return True
+    return total_tiles < int(num_cu * SMALL_M_GRID_FILL_RATIO)
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -221,11 +192,18 @@ def persistent_matmul_lt(
     # ─────────────────────────────────────────────────────────────────────
     if (not work_stealing) and (not quantized) and _should_route_small_m(M, N, K, selector):
         num_cu = selector._hardware.N_CU
-        # Persistent-CTA tile shape: BLOCK_N up to 256 to spread N work across
-        # CUs, BLOCK_M scaled to M (16/32/64), BLOCK_K=64 (or smaller for
-        # tiny K).  These overrides are applied at the kernel launch site so
-        # we don't disturb origami's normal selections for other shapes.
-        BLK_M_, BLK_N_, BLK_K_ = _small_m_block_shape(M, N, K, selector)
+        # Pick block shape: when the override is enabled, force the
+        # persistent-CTA tile (BLOCK_M scaled to M, BLOCK_N up to 256,
+        # BLOCK_K=64).  Otherwise use origami's selection — this is the
+        # K-186-compatible default after empirical sweep showed the
+        # BLOCK_N=256 override is ~neutral on the K-163 cohort (geomean
+        # 0.98x vs origami pick across 192 fp16/bf16 shapes).
+        if SMALL_M_BLOCK_N_OVERRIDE_ENABLED:
+            BLK_M_, BLK_N_, BLK_K_ = _small_m_block_shape(M, N, K, selector)
+        else:
+            BLK_M_ = selector.block_m
+            BLK_N_ = selector.block_n
+            BLK_K_ = selector.block_k
         # Clamp grid to the maximum useful program count.  In Stream-K, each
         # program is responsible for at least one (tile, k_iter) pair; if the
         # grid exceeds total_tiles * iters_per_tile, the surplus programs do
@@ -243,9 +221,9 @@ def persistent_matmul_lt(
             quantized=False,
             work_stealing=False,
             num_warps_override=SMALL_M_NUM_WARPS,
-            block_m_override=BLK_M_,
-            block_n_override=BLK_N_,
-            block_k_override=BLK_K_,
+            block_m_override=BLK_M_ if SMALL_M_BLOCK_N_OVERRIDE_ENABLED else None,
+            block_n_override=BLK_N_ if SMALL_M_BLOCK_N_OVERRIDE_ENABLED else None,
+            block_k_override=BLK_K_ if SMALL_M_BLOCK_N_OVERRIDE_ENABLED else None,
         )
 
     BLK_M    = selector.block_m

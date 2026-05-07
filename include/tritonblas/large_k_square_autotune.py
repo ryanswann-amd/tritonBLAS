@@ -8,132 +8,102 @@ Cohort definition (PRD K-273):
 Gate predicate enforced at apply time (matmul.py):
     M >= 1024 AND N >= 1024 AND K >= 8192 AND dtype in {fp16, bf16}
 
-This module is gated behind ``is_large_k_square()`` AND ``_safe_to_apply()``
-so that:
-
-    * shapes with K < 8192 (small/medium-K cohort, K-216 territory) are
-      never perturbed,
-    * shapes with M < 1024 or N < 1024 (small-M / skinny-N cohort,
-      K-176 / K-208 territory) are never perturbed,
-    * shapes that fall in the cohort but where the cached BLOCK_K would
-      not produce K-654's mainloop_iters >= 16 floor are rejected.
-
 ═══════════════════════════════════════════════════════════════════════════
-HEADLINE (cohort geomean over 24 shapes, MI300X, b06u31, fp16+bf16)
+HEADLINE — NEGATIVE FINDING (PRD bar NOT met)
 ═══════════════════════════════════════════════════════════════════════════
 
-    no patch   tritonblas.matmul / hipBLASLt = 2.311x   (tritonblas slower)
-    K-273      tritonblas.matmul / hipBLASLt = 1.419x
+PRD bar:        cohort geomean tritonblas/hipBLASLt improvement >= 1.05x
+Result:         1.000x  (only 1/24 shapes admits a winning override)
+Status:         INFEASIBLE under (BLOCK_M, BLOCK_N, BLOCK_K, num_stages,
+                num_warps, matrix_instr_nonkdim, kpack, waves_per_eu,
+                GROUP_SIZE_M) tile/pipeline knob set.
 
-    cohort geomean improvement = 1.628x   (PRD bar: >= 1.05x)
+Apples-to-apples warm-cache A/B through ``tritonblas.matmul()`` end-to-end
+(per-shape baseline = empty AUTOTUNE_TABLE → Origami selector pick;
+per-shape tuned = single-entry AUTOTUNE_TABLE → override pick) on MI300X
+(node j07u37) gave:
 
-The improvement is delivered **entirely by the @functools.lru_cache enable on
-``_make_matmul_selector``** in matmul.py — not by the autotune table.  The
-autotune table is currently empty by deliberate choice; see "Negative finding"
-below.
+    decision   count    description
+    ──────────────────────────────────────────────────────────────────
+    WIN        1/24     gain >= 2.5% over Origami baseline
+    MARGINAL  12/24     0% < gain < 2.5% (within noise floor)
+    REGRESS   11/24     tuned slower than baseline
+                       (1024² shapes hit hardest: -30% to -60% because
+                        v1 grid excluded BLOCK_M=64 — Origami's pick)
 
-═══════════════════════════════════════════════════════════════════════════
-METHODOLOGY
-═══════════════════════════════════════════════════════════════════════════
-
-Sweep v1 — coarse 384-config grid (BM, BN ∈ {128, 256}; BK ∈ {32, 64, 128,
-256}; ns ∈ {2, 3, 4}; nw ∈ {4, 8}; mfma=16; kpack ∈ {1, 2}; gsm ∈ {4, 8}).
-Run on 8 MI300X GPUs in parallel (3 shapes per GPU, ~10 min wall).
-
-Sweep v1 measurement (baseline = ``tritonblas.matmul``; tuned = direct
-``persistent_matmul[...]`` launch with override knobs) reported a cohort
-geomean improvement of **+58% over baseline**.  This was a **measurement
-bias**: the baseline path went through ``triton_op`` (~0.2 ms dispatch
-overhead per call), the tuned path bypassed it.  After fixing this bias
-(see Sweep v2 below), the apparent +58% kernel-level win collapsed to no
-measurable win at the user-facing API level.
-
-Sweep v2 — same coarse grid but apples-to-apples: every candidate goes
-through ``tritonblas.matmul()`` end-to-end via temporary insertion into
-``AUTOTUNE_TABLE``, and a regression guard requires the candidate's median
-to beat baseline by ≥ 2.5%.  Search expanded to BM, BN ∈ {64, 128, 256}
-to cover Origami's BM=64 picks for the small-output shapes.  Result:
-**0 of 24 shapes produced a winning config above the 2.5% guard.**  14 of 24
-showed marginal improvements (0.04% – 2.2%) at the noise floor.
+The single confirmed WIN is shipped in AUTOTUNE_TABLE below; the other 23
+cohort shapes return None from lookup() and use Origami's selector
+unchanged.
 
 ═══════════════════════════════════════════════════════════════════════════
-NEGATIVE FINDING — autotune table is intentionally empty
+WHY ORIGAMI WINS — methodological context
 ═══════════════════════════════════════════════════════════════════════════
 
-Under the user-facing ``tritonblas.matmul()`` API path, **no tile / pipeline
-knob combination in the search grid beats Origami's selector by ≥ 2.5%** on
-any of the 24 cohort shapes.
+Two earlier sweep iterations and one final reverify converged on the same
+conclusion:
 
-This mirrors K-216's outcome on the medium-square cohort (closed as
-INFEASIBLE under the stated knob set) but for a different mechanistic
-reason:
+  * Sweep v1 (384-config kernel-level grid) — measured baseline through
+    ``tritonblas.matmul`` and tuned via raw ``persistent_matmul[...]``
+    launch.  Reported a +58% cohort geomean kernel-level "win".  This
+    was a **measurement bias**: baseline paid the triton_op + selector
+    dispatch overhead (~150-200µs cold), tuned bypassed it.
 
-    K-216 (medium-square, K ∈ [256, 2048]):
-        K-654 mainloop_iters >= 16 guard rejected 7 of 9 unique shapes
-        for any BLOCK_K in {64, 128, 256}.  Headroom existed but couldn't
-        be claimed.
+  * Sweep v2 (1296-config Stage A grid, BM ∈ {64, 128, 256}) —
+    apples-to-apples via temporary AUTOTUNE_TABLE insertion + reset
+    of the selector lru_cache so the override is honored.  0/24
+    shapes beat baseline by >= 2.5% guard; 14/24 marginal.
 
-    K-273 (large-K square, K >= 8192):
-        K-654 guard is satisfied trivially (K_min/BK_max = 8192/256 = 32).
-        Origami's heuristic is already at or near the kernel-level optimum
-        for this regime.  The remaining gap to hipBLASLt is **dispatch
-        overhead** (now reduced 4-7x by the ``@lru_cache`` enable), not
-        kernel inefficiency.
+  * K-273 reverify (this file's keep set) — re-checked v1 picks under
+    warm-cache fair-comparison conditions.  1/24 WIN, 12/24 MARGINAL,
+    11/24 REGRESS.  See output/reverify_v1.csv for per-shape numbers.
 
-Per-knob ablation (from sweep v1, kernel-level numbers):
-
-    * BLOCK_M = BLOCK_N: 64 wins for M==N <= 1024 (Origami's pick), 128
-      wins for M==N == 2048, 256 wins for M==N >= 4096.  My v1 grid
-      excluded BM=64 and was therefore biased away from Origami's
-      established small-output sweet spot.
-    * BLOCK_K: insensitive in the 64–128 range; 32 occasionally helps
-      under heavy register pressure; 256 hurts (cuts mainloop_iters too
-      far in the 8192-K case).
-    * num_stages: 2 dominates; 3 ties on a couple of shapes; 4 always
-      regresses (LDS spill).
-    * num_warps: 8 dominates universally; 4 always regresses (under-uses
-      MFMA throughput at these tile sizes).
-    * matrix_instr_nonkdim: 16 dominates; 32 is net-neutral.
-    * kpack: 1 vs 2 swap order between shapes; gain < 1% either way.
-    * waves_per_eu: only the largest 8192² shapes show a < 1% win at wpe>0.
-    * GROUP_SIZE_M: 1, 4, 8 all within 1-2%; 16 starts to degrade L2 reuse.
+Mechanistic interpretation: at K >= 8192, arithmetic intensity per tile is
+large enough that the tile/pipeline knob choice matters less than the
+selector's MI300X-aware streamk routing.  Origami's heuristic already
+chooses BLOCK_M=64 for the 1024-output-row shapes (where occupancy
+matters most) and BLOCK_M=256 for the 8192-output-row shapes (where
+MFMA throughput dominates).  The remaining 1.4-2.5x gap to hipBLASLt is
+**dispatch overhead and kernel-launch latency**, not kernel inefficiency.
 
 ═══════════════════════════════════════════════════════════════════════════
-WHY THE TABLE IS STILL HERE
+COMPANION CHANGE — selector LRU cache (cold-start latency, separate axis)
 ═══════════════════════════════════════════════════════════════════════════
 
-The cache infrastructure (gate, lookup, regression guard) is shipped so that
-future work can populate it without re-deriving the dispatch plumbing:
+A separate change in matmul.py re-enables ``@functools.lru_cache(maxsize=
+1024)`` on ``_make_matmul_selector``.  This is a **cold-start-only fix**:
+the first call for a given (M, N, K, dtype) pays ~150-200µs in selector
+construction; subsequent calls hit the cache and pay ~0µs.
 
-    * Adding shape-specific entries (e.g., from a new search around different
-      knobs — split-K external reduction, persistent vs streamk routing) is
-      a one-line edit to AUTOTUNE_TABLE.
-    * The regression guard ``_safe_to_apply()`` is preserved so any future
-      entry inherits the K-654 mainloop_iters floor without re-derivation.
-    * The cohort gate ``is_large_k_square()`` defines the partition that
-      future autotune work should target.
+In steady-state (e.g., training/inference loops calling matmul on the
+same shape repeatedly), the lru_cache hit rate is ~100% and the
+re-enable has no measurable effect on warm-cache geomean
+(see verify_baseline.csv vs verify_final.csv).  It is shipped as a
+bugfix for one-shot / many-distinct-shape workloads where cold dispatch
+dominates.
 
-Out-of-cohort shapes return ``None`` from ``lookup()`` and are unperturbed.
+The previous attempt's "1.628x cohort speedup" headline conflated the
+cold-start cache enable with steady-state autotune impact — that headline
+has been retracted.  The honest steady-state geomean impact of K-273's
+combined changes is **1.000x** (no measurable improvement above noise on
+this cohort).
 
 ═══════════════════════════════════════════════════════════════════════════
 FUTURE WORK (recommended next-ticket scope)
 ═══════════════════════════════════════════════════════════════════════════
 
-1.  Extra-knob autotune.  The PRD's SPLIT_K knob is not exposed by the
-    persistent kernel; a new sweep using the streamk path (which has implicit
-    K-slicing via ``selector.sk_grid``) might find wins for the K=32768 row
-    where atomic-free split-K reduction overlaps the long mainloop.
+1.  **Streamk / split-K external reduction.**  The persistent kernel does
+    not expose SPLIT_K.  The streamk path's implicit K-slicing
+    (``selector.sk_grid``) might find wins for K=32768 where atomic-free
+    split-K reduction overlaps the long mainloop.  Outside K-273 scope.
 
-2.  Dispatch-overhead reduction beyond LRU.  The 1024² × 8K shape still
-    spends ~50% of its time in triton_op dispatch even with LRU cache enabled.
-    Bypassing the triton_op layer entirely (direct call to
-    ``persistent_matmul_lt``) would close that gap but is incompatible with
-    torch.compile / fakemode tracing.  An eager-only fastpath could be added.
+2.  **Dispatch-overhead bypass.**  Direct call to ``persistent_matmul_lt``
+    skipping the triton_op layer would close the 1024² × 8K shape's
+    remaining ~50% gap to hipBLASLt.  Incompatible with torch.compile.
 
-3.  Move Origami selector cache key to (M, N, K, dtype) only.  Currently the
-    ``functools.lru_cache`` keys on (M, N, K, a_dtype, b_dtype, c_dtype,
-    device, mx_block_size, streamk, num_stages); for the common case
-    (matmul_lt, fp16/bf16) a coarser key would raise the cache hit rate.
+3.  **Coarser selector cache key.**  Currently keyed on (M, N, K,
+    a_dtype, b_dtype, c_dtype, device, mx_block_size, streamk,
+    num_stages); for the matmul_lt fp16/bf16 common case a coarser
+    key would raise hit rate.
 """
 
 from __future__ import annotations
@@ -179,23 +149,27 @@ def _safe_to_apply(cfg: Dict[str, int], M: int, N: int, K: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Per-shape autotune table  (regression-guarded; currently empty)
+# Per-shape autotune table
 # ---------------------------------------------------------------------------
-# Keys: (M, N, K, dtype-string).  Values: dict matching persistent_matmul_lt's
-# kwargs.  Entries here SHALL ONLY be added if they verifiably beat the
-# Origami baseline by >= 2.5% at the user-facing tritonblas.matmul API level
-# (sweep v2 protocol — see module docstring).
+# Keys: (M, N, K, dtype-string).  Values: dict of persistent_matmul_lt kwargs.
 #
-# As of K-273 close, sweep v2 found 0 of 24 cohort shapes meet that bar
-# under the (BM, BN, BK, num_stages, num_warps, mfma, kpack, waves_per_eu,
-# GROUP_SIZE_M) knob set.  The negative finding is the deliverable; the
-# table is preserved as infrastructure for future autotune additions.
+# ENTRIES SHIPPED HERE PASS the apples-to-apples >= 2.5% gain guard at the
+# user-facing tritonblas.matmul() API level, measured warm-cache on MI300X
+# against an empty-table Origami baseline.
+#
+# As of K-273 close, only ONE cohort shape produces a winning override above
+# the guard (see output/reverify_v1.csv).  The 23 other cohort shapes return
+# None from lookup() → Origami's selector pick is used unchanged.
 
 AUTOTUNE_TABLE: Dict = {
-    # (M, N, K, dtype): dict(BLOCK_M=..., BLOCK_N=..., BLOCK_K=...,
-    #                         num_stages=..., num_warps=...,
-    #                         matrix_instr_nonkdim=..., kpack=...,
-    #                         waves_per_eu=..., GROUP_SIZE_M=...),
+    # K-273 confirmed winner (apples-to-apples warm-cache reverify, +3.01%
+    # over Origami baseline through tritonblas.matmul() end-to-end on MI300X).
+    (8192, 8192, 16384, "bf16"): dict(
+        BLOCK_M=256, BLOCK_N=256, BLOCK_K=64,
+        num_stages=2, num_warps=8,
+        matrix_instr_nonkdim=16, kpack=1,
+        waves_per_eu=0, GROUP_SIZE_M=1,
+    ),
 }
 
 

@@ -26,6 +26,76 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# K-776: shape+dtype-guarded tile override for FP8 e4m3fnuz square large-K cohort.
+#
+# Built on the K-746 verified tile table (cohort = M=N in {2048, 4096, 8192}
+# x K in {4096, 8192, 16384}, MI300X). Of the 9 cohort shapes, only 5 land
+# the override; the other 4 (the M=N=2048 row plus (4096,4096,4096)) are left
+# on Origami because the override either regressed or fell inside the noise
+# band on K-746's e2e re-verification. All 5 firing entries share a single
+# tile family: BM=BN=BK=128, num_stages=2, kpack=1, num_warps=4 -- exactly
+# fits the MI300X 64KiB LDS double-buffer budget for FP8 (1 byte/element).
+#
+# Routed BEFORE any sibling FP8 hooks (mirrors K-751 dispatch-order pattern).
+# Strict equality on (M, N, K) and exact dtype match on float8_e4m3fnuz; no
+# fallthrough loop, no fuzzy match. Skipped on the work-stealing path
+# (work_stealing tile selection lives in the WS preamble, not here).
+#
+# Tuple = (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack, num_warps)
+_FP8_SQUARE_LARGEK_TILE_TABLE: Dict[
+    Tuple[int, int, int],
+    Tuple[int, int, int, int, int, int],
+] = {
+    (4096, 4096,  8192): (128, 128, 128, 2, 1, 4),
+    (4096, 4096, 16384): (128, 128, 128, 2, 1, 4),
+    (8192, 8192,  4096): (128, 128, 128, 2, 1, 4),
+    (8192, 8192,  8192): (128, 128, 128, 2, 1, 4),
+    (8192, 8192, 16384): (128, 128, 128, 2, 1, 4),
+}
+
+
+# K-776 runtime gate-fire telemetry. Bounded by definition: writers are the
+# 5 entries of _FP8_SQUARE_LARGEK_TILE_TABLE plus a fixed-size per-shape map
+# keyed on the same 5-element domain. No unbounded growth; no LRU needed.
+_FP8_SQUARE_LARGEK_FIRE_COUNT: int = 0
+_FP8_SQUARE_LARGEK_FIRE_BY_SHAPE: Dict[Tuple[int, int, int], int] = {}
+
+
+def _fp8_square_largek_tile_override(
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    work_stealing: bool,
+):
+    """Return (BM, BN, BK, NS, KP, NW) tile override for the K-776 cohort, or None.
+
+    Constant-time: a single dict.get on a 5-entry table. dtype guard is a
+    direct identity check against torch.float8_e4m3fnuz; the work_stealing
+    path has its own tile selection and is skipped here. No fallthrough,
+    no fuzzy match, no caching beyond the module-level constant table.
+    """
+    if a_dtype is not torch.float8_e4m3fnuz:
+        return None
+    if work_stealing:
+        return None
+    return _FP8_SQUARE_LARGEK_TILE_TABLE.get((M, N, K))
+
+
+def _fp8_square_largek_lds_fits(
+    BM: int, BN: int, BK: int, NS: int, lds_cap: int = 65536
+) -> bool:
+    """LDS double-buffer budget guard (FP8 = 1 byte/element).
+
+    For the K-776 default (128, 128, 128, 2): 2*(128*128 + 128*128) = 65536
+    -- exactly fits. The check is a defensive runtime invariant; the table
+    values above pass, but a future edit that bumps BM/BN/BK/NS will be
+    rejected silently (override falls back to Origami) rather than crash
+    the kernel at LDS allocation.
+    """
+    return NS * (BM * BK + BK * BN) <= lds_cap
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -99,6 +169,27 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+
+    # K-776: shape+dtype-guarded tile override for the FP8 e4m3fnuz square
+    # large-K cohort. Routed BEFORE any sibling FP8 hooks. The LDS-fit guard
+    # auto-falls-back to Origami if a future table edit overflows the LDS
+    # budget; the work_stealing path is skipped (handled in the WS preamble).
+    _k776_ov = _fp8_square_largek_tile_override(M, N, K, a.dtype, work_stealing)
+    if _k776_ov is not None and _fp8_square_largek_lds_fits(*_k776_ov[:4]):
+        BLK_M, BLK_N, BLK_K, num_stages, kpack, num_warps = _k776_ov
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = K % BLK_K == 0
+        # Runtime telemetry (zero-overhead int increment); used by the K-776
+        # leakage audit and by ops to confirm the gate fires in production.
+        global _FP8_SQUARE_LARGEK_FIRE_COUNT
+        _FP8_SQUARE_LARGEK_FIRE_COUNT += 1
+        _FP8_SQUARE_LARGEK_FIRE_BY_SHAPE[(M, N, K)] = (
+            _FP8_SQUARE_LARGEK_FIRE_BY_SHAPE.get((M, N, K), 0) + 1
+        )
+
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

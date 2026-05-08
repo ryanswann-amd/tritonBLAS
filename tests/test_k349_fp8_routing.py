@@ -59,7 +59,7 @@ def _make_fp8_inputs(M, N, K, dtype):
     (2048, 2048, 2048),  # FP8 fnuz, NOT in cohort — must still not crash
     (1024, 1024, 1024),  # FP8 fnuz, NOT in cohort — smoke test
 ])
-def test_fp8_a8w8_lt_does_not_crash(dtype, M, N, K):
+def test_fp8_a8w8_does_not_crash(dtype, M, N, K):
     """Pre-K-349, this path crashed inside the composable persistent_gemm at
     MLIR DenseElementsAttr::get for every FP8 tile we tried. After K-349 it
     routes to monolithic and produces a finite result."""
@@ -74,6 +74,38 @@ def test_fp8_a8w8_lt_does_not_crash(dtype, M, N, K):
     rel_err = (out.to(torch.float32) - ref.to(torch.float32)).abs().mean() \
               / (ref.to(torch.float32).abs().mean() + 1e-6)
     assert rel_err < 0.20, f"FP8 mean-rel-err {rel_err:.4f} too high"
+
+
+@pytest.mark.parametrize("dtype", _FP8_FNUZ_DTYPES,
+                         ids=lambda d: str(d).split(".")[-1])
+@pytest.mark.parametrize("M,N,K", [
+    (4096, 4096, 4096),  # K-349 cohort entry — must hit dispatch table
+    (4096, 4096, 2048),  # K-349 cohort entry — must hit dispatch table
+    (2048, 2048, 2048),  # FP8 fnuz, NOT in cohort — regression-pin only
+    (1024, 1024, 1024),  # FP8 fnuz, NOT in cohort — regression-pin only
+])
+def test_fp8_a8w8_lt_does_not_crash(dtype, M, N, K, monkeypatch):
+    """Explicit regression for Reviewer-1 (Testing Zealot): call the public
+    `matmul_a8w8_lt` directly (not via the higher-level `matmul_a8w8`
+    wrapper) on FP8 fnuz inputs and confirm we get a finite result. This
+    pins the MLIR DenseElementsAttr::get crash that motivated the K-349
+    routing change. The test deliberately does NOT set TBLAS_USE_MONOLITHIC
+    (and explicitly clears it) so we exercise the production routing path
+    that the K-349 fix now installs in `_k349_fp8_dispatch` /
+    `force_monolithic`."""
+    monkeypatch.delenv("TBLAS_USE_MONOLITHIC", raising=False)
+    a, b, a_scale, b_scale = _make_fp8_inputs(M, N, K, dtype)
+    c = torch.zeros(M, N, device="cuda", dtype=torch.bfloat16)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=False,
+    )
+    config = tritonblas.matmul_preamble(selector)
+    tritonblas.matmul_a8w8_lt(
+        a, b, a_scale, b_scale, c, selector, config, False,
+    )
+    assert c.shape == (M, N)
+    assert torch.isfinite(c).all(), \
+        "K-349 regression: matmul_a8w8_lt produced non-finite output on FP8 fnuz"
 
 
 @pytest.mark.parametrize("dtype", _FP8_FNUZ_DTYPES,

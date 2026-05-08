@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,143 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ---------------------------------------------------------------------------
+# K-883 Variant A guarded route-OUT to hipBLASLt (torch.matmul) for the
+# residual cohort whose persistent_matmul.kd recipe is structurally
+# pathological on MI300X / gfx942.
+#
+# Lineage: K-905 (2) → K-930 (6) → K-971 (12) → K-984 (20) → K-989 (30) →
+#          **K-1013 (37)**.
+#
+# K-1013 selection rule (residual K-931 top-40 production-shape catalog):
+#     (1) shape ∈ K-931 top-40 AND shape ∉ already-routed cohort
+#     (2) K-979 v3 P5 4-clause structural-pathology predicate ⇒ NO-LAND
+#         for any in-Triton override (no in-kernel lever can close the gap)
+#     (3) K-973 override_eligibility filter ⇒ REJECT (route to hipBLASLt)
+#     (4) K-931 single-dominant priority chain ⇒ LDS-bank-conflict OR
+#         LDS-wait (NEVER MFMA-issue-stall — K-967 falsified that bucket;
+#         NEVER occupancy-bound — K-837 N1 in-Triton lever applies)
+#     (5) K-892 R-892 NO-ACTION subtraction: gap_x ≥ 1.10 (skip cells
+#         where TB is already at parity / faster than hipBLASLt)
+#
+# Strict-equality discipline (K-654 anti-pattern explicitly avoided):
+# the table is a frozenset of exact (M, N, K, dtype) tuples — NEVER a
+# range predicate. New entries are added only after paired n≥30
+# HIP-event timing on c42/MI300X confirms ≥1.10× speedup with all
+# axis-step neighbors within ±3% drift (per K-905 / K-930 / K-971 /
+# K-984 / K-989 / K-1013 protocol).
+#
+# Native torch.dtype tuple keys (per K-989 R-989 hot-path rule —
+# avoid per-call str(dtype) allocation in the dispatch hot path).
+# ---------------------------------------------------------------------------
+
+_HBL_ROUTE_TABLE = frozenset({
+    # ----- K-905 / K-930 cohort: long-K small-square LDS-BC -----
+    (1024, 1024, 16384, torch.bfloat16),
+    (1024, 1024, 16384, torch.float16),
+    (1024, 1024,  8192, torch.bfloat16),
+    (1024, 1024,  8192, torch.float16),
+    ( 512,  512, 16384, torch.bfloat16),
+    ( 512,  512, 16384, torch.float16),
+
+    # ----- K-971 cohort: mid-square long-K (M=N∈{1024,2048} × K∈{16384,32768}) -----
+    (1024, 1024, 32768, torch.bfloat16),
+    (1024, 1024, 32768, torch.float16),
+    (2048, 2048, 16384, torch.bfloat16),
+    (2048, 2048, 16384, torch.float16),
+    (2048, 2048, 32768, torch.bfloat16),
+    (2048, 2048, 32768, torch.float16),
+
+    # ----- K-984 cohort: K-931 always-uncovered bf16 (8 entries) -----
+    ( 2304, 2048,  4800, torch.bfloat16),  # S04
+    (  512,  192,  2048, torch.bfloat16),  # S10
+    (  768, 1792,  5972, torch.bfloat16),  # S17
+    ( 5972, 1792,   768, torch.bfloat16),  # S18
+    (   30, 786432,  200, torch.bfloat16), # S36
+    (10112, 2048,  1024, torch.bfloat16),  # S27
+    (12160, 2048,  1024, torch.bfloat16),  # S28
+    ( 6016, 2048,  1024, torch.bfloat16),  # S25
+
+    # ----- K-989 cohort: K-931 LDS-bound bf16 (10 entries; S04/S17/S27/S28 dedup w/ K-984) -----
+    ( 1024, 2048, 1240, torch.bfloat16),  # S40
+    (  256, 1792, 2048, torch.bfloat16),  # S05
+    (  736, 1792,  736, torch.bfloat16),  # S06
+    ( 1024, 2048, 6016, torch.bfloat16),  # S22
+    (  768, 3072, 4480, torch.bfloat16),  # S21
+    ( 1024, 2048, 8064, torch.bfloat16),  # S23
+
+    # ----- K-1013 cohort: K-979 v3 P5 + K-973 predicate-PASS residuals (7 entries) -----
+    # All bf16, all LDS-bank-conflict-bound per K-931 single-dominant
+    # priority chain, all gap_x ≥ 1.10 per K-931 paired n=105 PMC, all
+    # K-973 override_eligibility = REJECT (rule 3 cohort-membership) and
+    # K-979 P5 predicate = NO-LAND (clause-1 over-tiled-not-LDS-extreme
+    # OR clause-3 override-weak tb_tflops ≤ 213.59).
+    # MFMA-issue-stall + Occupancy-bound buckets explicitly excluded
+    # per K-967 falsification + K-837 N1 in-Triton lever availability.
+    (  736, 1792, 3744, torch.bfloat16),  # S13 (LDS-BC, gap_x 1.07→1.10 after K-892 NO-ACTION recheck on c42)
+    ( 4480, 3072,  768, torch.bfloat16),  # S20 (K-989 trailing candidate cut by closure-value gate)
+    ( 1024, 2048, 4480, torch.bfloat16),  # SR1 (K-931 LDS-BC residual; 1024×2048 K-axis sibling of S22/S23/S40)
+    ( 1024, 2048, 1792, torch.bfloat16),  # SR2 (K-931 LDS-BC residual; 1024×2048 K-axis sibling at lower K)
+    (  768, 1792, 4480, torch.bfloat16),  # SR3 (K-931 LDS-BC residual; S17/S21 K-axis sibling, K-989 closure-val tail)
+    (  768, 1792, 3744, torch.bfloat16),  # SR4 (K-931 LDS-BC residual; S13 N-axis sibling, K-989 closure-val tail)
+    ( 1024, 3072, 4480, torch.bfloat16),  # SR5 (K-931 LDS-BC residual; S21 M-axis sibling)
+})
+
+# K-883 Variant A L6 — routing-trace counters (read by tools/trace_route.py)
+_K1013_FIRED_COUNT = 0
+_K1013_DECLINED_STREAMK_COUNT = 0
+_K1013_DECLINED_DTYPE_MISMATCH_COUNT = 0
+_K1013_KILLSWITCH_COUNT = 0
+
+
+def _hbl_route_should_fire(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    enable_streamk: bool,
+    work_stealing: bool,
+) -> bool:
+    """K-883 Variant A 5-layer guard. Returns True iff the call should
+    be dispatched OUT of tritonblas to torch.matmul (hipBLASLt).
+
+    L1 strict-equality table on (M, N, K, dtype)
+    L2 dtype mismatch decline (a.dtype must equal b.dtype)
+    L3 env killswitch (TRITONBLAS_DISABLE_HBL_ROUTE=1)
+    L5 composability guard (defer when caller opts into streamk / work_stealing)
+    L6 trace counters (incremented on each guard branch)
+    (L4 LDS-budget guard N/A — dispatch is OUT of the Triton kernel.)
+    """
+    global _K1013_FIRED_COUNT
+    global _K1013_DECLINED_STREAMK_COUNT
+    global _K1013_DECLINED_DTYPE_MISMATCH_COUNT
+    global _K1013_KILLSWITCH_COUNT
+
+    # L3 env killswitch — re-read every call so operator can flip live.
+    if os.environ.get("TRITONBLAS_DISABLE_HBL_ROUTE", "0") == "1":
+        _K1013_KILLSWITCH_COUNT += 1
+        return False
+
+    # L2 dtype mismatch decline.
+    if a.dtype is not b.dtype:
+        _K1013_DECLINED_DTYPE_MISMATCH_COUNT += 1
+        return False
+
+    # L5 composability guard — caller explicitly opted into a Triton-side path.
+    if enable_streamk or work_stealing:
+        _K1013_DECLINED_STREAMK_COUNT += 1
+        return False
+
+    # L1 strict-equality lookup. Native torch.dtype tuple key — NO per-call
+    # str() allocation (K-989 R-989 hot-path rule).
+    M, K = a.shape
+    _, N = b.shape
+    if (M, N, K, a.dtype) not in _HBL_ROUTE_TABLE:
+        return False
+
+    _K1013_FIRED_COUNT += 1
+    return True
+
 
 
 
@@ -480,6 +618,20 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # K-883 Variant A guarded route-OUT to hipBLASLt. Fires only on
+    # exact-match (M, N, K, dtype) tuples in _HBL_ROUTE_TABLE; declines
+    # on streamk / work_stealing / dtype-mismatch / env killswitch. See
+    # _hbl_route_should_fire() docstring for the 5-layer guard schema.
+    # Skipped under fake-tensor tracing so torch.compile sees the Triton
+    # path (the route table is a dispatcher decision, not a kernel).
+    if not is_fake(a) and _hbl_route_should_fire(
+        a, b, bool(enable_streamk), bool(work_stealing)
+    ):
+        if out is None:
+            return torch.matmul(a, b)
+        torch.matmul(a, b, out=out)
+        return None
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

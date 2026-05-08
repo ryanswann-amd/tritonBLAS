@@ -36,6 +36,45 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# ---------------------------------------------------------------------------
+# Tall-skinny FP16/BF16 tile + Stream-K override gate.
+#
+# Cohort:  M >= 2048, N <= 32, K >= 4096, dtype in {float16, bfloat16}.
+#
+# Mechanism: Origami's heuristic picks BLOCK_M=BLOCK_N=16, BLOCK_K=32 in
+# this regime, which (a) wastes 50% of the MFMA N-lanes (BN=16 padding
+# against N=32), (b) inflates the K-loop to 256 mainloop iterations at
+# K=8192 (vs hipBLASLt's MT_K=256 ⇒ 32 iters), and (c) cannot fill the
+# 304-CU MI300X under persistent dispatch (~64 tiles for the M=2048
+# row).  Switching to BLOCK_M=BLOCK_N=32, BLOCK_K=256, num_stages=2,
+# num_warps=4, kpack=1 with Stream-K dispatch (sk_grid = 304 from the
+# Origami StreamK selector) closes the gap from 0.10x to 0.74-0.85x of
+# hipBLASLt on the four worst-offender shapes (M in {2048, 4096} x N=32
+# x K=8192, fp16 and bf16) per a paired HIP-graph kernel-only sweep on
+# MI300X (gfx942).
+#
+# Out of cohort (FP32 / FP8 / FP4, square shapes, N >= 64, K < 4096,
+# M < 2048) this gate is inert -- the predicate returns None and both
+# the selector and the dispatch helpers run upstream-bit-identical.
+# ---------------------------------------------------------------------------
+import os as _os
+_TSKINNY_GATE_ENABLED = _os.environ.get("TRITONBLAS_DISABLE_TSKINNY_OVERRIDE", "0") != "1"
+
+
+def _tskinny_tile_override(M, N, K, dtype):
+    """Return a tile/dispatch override dict for the tall-skinny FP16/BF16
+    cohort, or None when out of cohort."""
+    if not _TSKINNY_GATE_ENABLED:
+        return None
+    if dtype is not torch.float16 and dtype is not torch.bfloat16:
+        return None
+    if M < 2048 or N > 32 or K < 4096:
+        return None
+    return {"BM": 32, "BN": 32, "BK": 256,
+            "num_stages": 2, "num_warps": 4, "kpack": 1,
+            "force_streamk": True}
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +91,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +103,14 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    spec = _tskinny_tile_override(M, N, K, a_dtype)
+    if spec is not None and a_dtype is b_dtype and streamk:
+        sel._tskinny_override = spec  # consumed by persistent_matmul_lt / streamk_matmul_lt
+        # Origami's sk_grid is derived from its own tile pick; the override
+        # changes the tile, so re-pin the StreamK grid to N_CU (the tile
+        # sweep showed sk_grid = N_CU dominates on this cohort).
+        sel._grid = sel._hardware.N_CU
+    return sel
 
 
 def persistent_matmul_lt(
@@ -88,12 +135,6 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
@@ -101,6 +142,18 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # Tall-skinny FP16/BF16 tile override (see _tskinny_tile_override).
+    _spec = getattr(selector, "_tskinny_override", None)
+    if _spec is not None:
+        BLK_M, BLK_N, BLK_K = _spec["BM"], _spec["BN"], _spec["BK"]
+        num_stages, num_warps, kpack = _spec["num_stages"], _spec["num_warps"], _spec["kpack"]
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -222,6 +275,20 @@ def streamk_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    waves_per_eu = 0
+    mfmaInstrSize = 16
+    kpack = 1
+    CACHE_MODIFIER_A = None
+    CACHE_MODIFIER_B = None
+
+    # Tall-skinny FP16/BF16 tile override (see _tskinny_tile_override).
+    _spec = getattr(selector, "_tskinny_override", None)
+    if _spec is not None:
+        BLK_M, BLK_N, BLK_K = _spec["BM"], _spec["BN"], _spec["BK"]
+        num_stages, num_warps, kpack = _spec["num_stages"], _spec["num_warps"], _spec["kpack"]
+
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
@@ -239,14 +306,6 @@ def streamk_matmul_lt(
         total_tiles_streamk = total_tiles % total_programs_streamk
     else:
         total_tiles_streamk = 0
-
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
-    CACHE_MODIFIER_A = None
-    CACHE_MODIFIER_B = None
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -404,6 +463,8 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -461,6 +522,8 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
@@ -638,6 +701,8 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
+    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
+        enable_streamk = True
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -710,6 +775,8 @@ def _addmm_out(
     M, K = a.shape
     _, N = b.shape
 
+    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
+        enable_streamk = True
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

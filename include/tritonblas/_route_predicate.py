@@ -420,26 +420,36 @@ _K1131_P8_NEIGHBORS_12 = frozenset({
     ( 4480, 3072, 1536, "torch.bfloat16"),  # N12 S24 K*2  IN_COHORT
 })
 
-# Composed 25-cell P8 envelope.  Anchors and neighbors are deliberately
-# kept as separate constants so reviewers (and the K-1131 manifest auditor)
-# can see provenance at a glance; the dispatch path consults the union.
-_P8_MFMA_ISSUE_STALL_ROUTEOUT = _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25, (
-    "K-1144 P8 envelope must be exactly 25 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors); a duplicate or stray entry has crept in.")
-# Cross-check: the two sub-sets must be disjoint by construction
-# (K-1131 perturbed AWAY from the K-1121 anchors).
-assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
-    "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
-    "rules require strict disjointness from the 13 K-1121 anchors.")
+# K-1180 / K-1161 axis-extension cells (3 cells, bf16).  K-1161's E2 axis
+# audit (K-floor 256->128 + K=512 K-interior gap fill) yielded a
+# NEGATIVE_AXIS_PIVOT verdict overall, but 3 cells cleared the K-1007
+# admission floor (>= 1.05x, CI95-lo > 1.00) at paired n=30 HIP-graph
+# hot-cache on rad-mi300x-1.  K-1180 ships only those 3.  K-floor
+# relaxation is NOT staged (R-1161 small-M tail guard preserved).
+_K1161_P8_EXTENSIONS_3 = frozenset({
+    (  736, 1792,  736, "torch.bfloat16"),  # E2_I4  ~1.315x  K-interior K=736
+    (10112, 2048, 1024, "torch.bfloat16"),  # E2_M1  ~1.759x  M-extension at E1 K=1024
+    (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2  ~1.499x  M-extension at E1 K=1024
+})
+
+# Composed 28-cell P8 envelope (13 anchors + 12 neighbors + 3 extensions).
+_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_P8_EXTENSIONS_3
+)
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
+    "K-1144/K-1180 P8 envelope must be exactly 28 cells (13+12+3); "
+    "a duplicate or stray entry has crept in.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 — direct hipBLASLt route-OUT for the triply-validated
-    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors).
+    """K-1144 / K-1180 P8 — direct hipBLASLt route-OUT for the
+    measurement-validated MFMA-issue-stall cohort (K-1121 anchors +
+    K-1131 neighbors + K-1161 axis-extension cells).
 
-    Returns True iff (M, N, K, dtype) matches one of the 25 strict-equality
-    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
+    Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
+    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT` (13 K-1121 anchors +
+    12 K-1131 neighbors + 3 K-1161 axis-extensions added by K-1180).
+    bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).
 

@@ -37,23 +37,28 @@ def _maybe_wrap(fn, probe_tensor):
 
 
 # --- K-282: Large-square cohort fast path ---
-# Closes the persistent-CTA gap vs hipBLASLt on the 16384³ fp16/bf16 entry by
-# routing through streamk_matmul_lt (which K-splits across CTAs and amortizes
-# the prologue cost across more waves).  Measured under hardened methodology
-# (autotune-resolved warmup, isolated TRITON_CACHE_DIR per shape):
-#   shape           persistent     streamk        torch (hipBLASLt)
-#   4096³  fp16     0.587 ms       0.587 ms       0.274 ms   no improvement (structural)
-#   4096³  bf16     0.578          0.582          0.253      no improvement (structural)
-#   8192³  fp16     2.155          2.198          1.720      persistent wins (1.5%)
-#   8192³  bf16     2.016          2.046          1.625      persistent wins (1.5%)
-#   16384³ fp16   17.288         15.433         14.826      streamk wins (12%)
-#   16384³ bf16   16.624         14.800         14.049      streamk wins (12%)
+# Closes the persistent-CTA gap vs hipBLASLt on the 8192³ and 16384³ fp16/bf16
+# entries by routing through streamk_matmul_lt (which K-splits across CTAs and
+# amortizes the prologue cost across more waves).  Measured under hardened
+# methodology (warmup in a SEPARATE process that fully populates an
+# isolated TRITON_CACHE_DIR per (mode, shape, dtype); timing in a fresh
+# process that re-uses the warm cache so autotune cost cannot leak):
+#   shape           persistent     streamk        torch (hipBLASLt)   route?
+#   4096³  fp16     0.588 ms       0.590 ms       0.277 ms             no  (no improvement)
+#   4096³  bf16     0.576          0.584          0.253                no  (no improvement)
+#   8192³  fp16     2.540          2.157          1.703                yes (15.2% better)
+#   8192³  bf16     2.362          2.060          1.623                yes (12.1% better)
+#   16384³ fp16   16.559         15.376         14.730                yes ( 7.4% better)
+#   16384³ bf16   16.397         14.643         13.914                yes (10.5% better)
 # 4096³: structural CU under-fill — only 256 output tiles at 256x256 < 304 CUs;
 # no tile config in {128,256}x{128,256}x{32,64} improves it (probed in
 # scripts/probe_tiles_4096.py).  hipBLASLt likely uses a fundamentally different
 # kernel (split-K accumulation / different MFMA layout) for this small-but-wide
 # square.  Tracked as a follow-up ticket; not addressable from dispatch.
-# 8192³: persistent already wins under proper warmup — leave default.
+# Note: in an earlier attempt 8192³ was reported as a wash, but that was a
+# methodology artifact (in-process autotune warmup leaked into the candidate
+# timing).  Under the warmup-in-separate-process methodology, 8192³ streamk
+# beats persistent by 12-15% on both dtypes.
 # Gate is narrow: auto-enable only when caller has not asked for
 # streamk/work-stealing/bias/quantization (preserves explicit-flag callers).
 _K282_LARGE_SQUARE_SHAPES = frozenset({
@@ -62,6 +67,7 @@ _K282_LARGE_SQUARE_SHAPES = frozenset({
     (16384, 16384, 16384),
 })
 _K282_STREAMK_ROUTE_SHAPES = frozenset({
+    (8192, 8192, 8192),
     (16384, 16384, 16384),
 })
 

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,35 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-923 narrow LDS-pressure mitigation for cohort A
+# (M==N==1024, K>=16384, dtype in {fp16,bf16}). K-905 mechanistically
+# root-caused this cohort as LDS-bound on the persistent kernel
+# (SQ_LDS_BANK_CONFLICT 8.39 M cyc/disp vs hipBLASLt 0; SQ_WAIT_INST_LDS
+# 41x hipBLASLt). The brief specified BLK_K=128 to halve ds_read iters per
+# K-step, but Origami already picks BLK_K=256 on this cohort (the LDS-cap
+# ceiling), so widening BK further is structurally infeasible. The real
+# remaining lever is the ds_read WIDTH itself: kpack=2 packs adjacent K
+# elements so the Triton-AMD AMD backend lowers each LDS load to a single
+# ds_read_b128 instead of two ds_read_b64 — halving the ds_read instruction
+# count at the same byte volume (per K-580 / K-905 R5 ISA fingerprint).
+# num_stages=2 is pinned as the smallest LDS double-buffer footprint
+# (matches the existing Origami pick on cohort A; pinned defensively in
+# case Origami drifts to NS=3 which would 2x the LDS footprint and revive
+# the bank-conflict pressure).
+# Default-on; set TB_K923_DISABLE=1 to bypass for rollback / A/B comparison.
+def _k923_lds_narrow_override(M, N, K, a_dtype, BLK_K, num_stages, kpack):
+    """Returns possibly-overridden (BLK_K, num_stages, kpack) for cohort A."""
+    if os.environ.get("TB_K923_DISABLE", "0") == "1":
+        return BLK_K, num_stages, kpack
+    if not (M == 1024 and N == 1024 and K >= 16384):
+        return BLK_K, num_stages, kpack
+    if a_dtype not in (torch.float16, torch.bfloat16):
+        return BLK_K, num_stages, kpack
+    # Predicate matched. Keep Origami's BLK_K (already at LDS ceiling on
+    # this cohort), pin NS=2 defensively, force kpack=2 for ds_read_b128.
+    return BLK_K, 2, 2
 
 
 
@@ -92,7 +122,6 @@ def persistent_matmul_lt(
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
     total_programs = total_tiles
-    even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
@@ -101,6 +130,13 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-923 narrow LDS-pressure mitigation (cohort A). No-op for any shape
+    # outside M==N==1024, K>=16384, fp16/bf16. See _k923_lds_narrow_override.
+    BLK_K, num_stages, kpack = _k923_lds_narrow_override(
+        M, N, K, a.dtype, BLK_K, num_stages, kpack
+    )
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

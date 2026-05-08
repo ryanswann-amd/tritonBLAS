@@ -390,27 +390,38 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
-def _largeK_square_streamk_gate(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
-    """Auto-enable StreamK for the K-570 large-K square fp16/bf16 cohort on MI300X.
+# Strict-membership inclusion list for the large-K square fp16/bf16 cohort on
+# MI300X (gfx942). Each (M, K) here is a square shape (M == N) where independent
+# kernel-only HIP-graph A/B testing showed StreamK wins at Origami's selected
+# streamk-mode tile by ≥2% over the persistent baseline. Origami's persistent
+# tile selection on these shapes is LDS-bound (65536-byte per-stage limit), so
+# the obvious tile/num_stages/kpack overrides either overflow or regress; the
+# scheduler axis is the only one that lifts these cells. Cells deliberately
+# omitted (e.g. M=N=1024, K∈{8192,16384}; M=N=2048, K=16384) showed StreamK
+# regression in A/B testing and must not be silently included.
+_LARGEK_SQUARE_STREAMK_CELLS: frozenset = frozenset({
+    (1024, 4096),
+    (2048, 4096),
+    (2048, 8192),
+    (4096, 4096),
+    (4096, 8192),
+    (4096, 16384),
+})
 
-    K-657 ablation showed Origami's selected (BM,BN,BK,NS) on these shapes is
-    LDS-bound — every shape sits at 65536-byte per-stage LDS, so num_stages+1
-    or kpack=2 either overflow or regress (K-657 NULL-RESULT). Independent
-    kernel-only HIP-graph A/B (K-670) finds StreamK at Origami's selected
-    streamk-mode tile recovers 5-16% per shape on the listed cells with no
-    regression elsewhere (K-654 strict-cohort-membership compliance).
+
+def _largeK_square_streamk_gate(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
+    """Return True iff (M, N, K, dtype) is a verified StreamK-winning cell.
+
+    Single membership test against ``_LARGEK_SQUARE_STREAMK_CELLS``: any change
+    to the cohort requires an edit to the constant (and a corresponding test
+    update). No range-based branches — every accepted cell is enumerated, so
+    the gate cannot leak to unverified shapes (e.g. K=32768).
     """
-    if dtype not in (torch.float16, torch.bfloat16):
-        return False
-    if M != N:
-        return False
-    if M == 1024 and K == 4096:
-        return True
-    if M == 2048 and K in (4096, 8192):
-        return True
-    if M == 4096 and K >= 4096:
-        return True
-    return False
+    return (
+        M == N
+        and dtype in (torch.float16, torch.bfloat16)
+        and (M, K) in _LARGEK_SQUARE_STREAMK_CELLS
+    )
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})

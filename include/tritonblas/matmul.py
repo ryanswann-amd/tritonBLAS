@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,67 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ============================================================================
+# K-358: medium-K skinny-M tile override
+# ----------------------------------------------------------------------------
+# Origami picks tiny tiles (BN=16/32, BK=32) for M in [16,32], leading to
+# excessive K iterations and >12M LDS bank conflicts (rocprofv3 confirmed,
+# see K-358 output/rocprof_summary.json). Widening to BN=128, BK=128 with
+# num_stages=2 eliminates ~95% of LDS instructions and drops bank conflicts
+# to zero. Geomean speedup over Origami baseline on the K-358 cohort:
+# 1.05x kernel-only (4.6%) with up to 1.34x on K=2048 shapes. StreamK
+# regresses on this cohort (see K-199 lesson: streamk lock + partial-tile
+# reduction overhead dominates the K-iteration savings on skinny-M).
+#
+# Per K-683 lesson, the gate is enforced at the selector-construction
+# boundary -- it cannot be bypassed by mode={on,autotune,cache hit}.
+# Per K-199 lesson, the env-var kill switch TRITONBLAS_DISABLE_K358
+# disables the override for downstream callers that need the prior
+# behavior. Per K-654 lesson, the override is gated on the SAME tile
+# dims production sees: the override only fires when the post-override
+# (BM, BN, BK) is strictly larger than Origami's pick AND fits within
+# the 65 KB LDS budget for num_stages=2.
+# ============================================================================
+
+_K358_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K358", "0") == "1"
+_K358_BLOCK_N = 128
+_K358_BLOCK_K = 128
+_K358_NUM_STAGES = 2
+_K358_LDS_BUDGET = 65536  # gfx942 per-workgroup LDS limit
+
+def _is_medium_k_skinny_m(M, N, K, a_dtype, streamk):
+    """K-358 cohort predicate: M in [16,32], N in [2048,8192], K in [256,2048],
+    bf16/fp16, persistent path (NOT streamk -- regresses per K-199)."""
+    if _K358_DISABLED or streamk:
+        return False
+    if a_dtype not in (torch.bfloat16, torch.float16):
+        return False
+    return (16 <= M <= 32) and (2048 <= N <= 8192) and (256 <= K <= 2048)
+
+def _k358_lds_fits(BM, BN, BK, dtype, num_stages):
+    """LDS double-buffer budget check; mirrors origami.estimate_triton_lds_bytes."""
+    bytes_per = 2  # bf16/fp16
+    one_buf = (BM * BK + BK * BN) * bytes_per
+    return (max(num_stages - 1, 1)) * one_buf <= _K358_LDS_BUDGET
+
+class _K358SkinnyMSelector:
+    """Wraps OrigamiMatmulSelector and overrides block_n / block_k / num_stages
+    for the K-358 medium-K skinny-M cohort. All other attributes pass through."""
+    __slots__ = ("_real",)
+    def __init__(self, real):
+        self._real = real
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+    @property
+    def block_m(self):       return self._real.block_m
+    @property
+    def block_n(self):       return _K358_BLOCK_N
+    @property
+    def block_k(self):       return _K358_BLOCK_K
+    @property
+    def num_stages(self):    return _K358_NUM_STAGES
 
 
 
@@ -52,7 +114,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +126,18 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    # K-358 gate: override Origami's small tiles for medium-K skinny-M.
+    # Conditions checked at the codegen boundary (per K-683 lesson):
+    #   1. shape is in the K-358 cohort (M, N, K, dtype, persistent path)
+    #   2. proposed (BN=128, BK=128) is STRICTLY LARGER than Origami pick
+    #      (otherwise the override is a no-op and we save the wrap)
+    #   3. LDS double-buffer budget fits the proposed tile
+    if (_is_medium_k_skinny_m(M, N, K, a_dtype, streamk)
+        and (sel.block_n < _K358_BLOCK_N or sel.block_k < _K358_BLOCK_K)
+        and _k358_lds_fits(sel.block_m, _K358_BLOCK_N, _K358_BLOCK_K,
+                           a_dtype, _K358_NUM_STAGES)):
+        sel = _K358SkinnyMSelector(sel)
+    return sel
 
 
 def persistent_matmul_lt(

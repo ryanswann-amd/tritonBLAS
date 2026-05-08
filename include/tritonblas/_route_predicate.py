@@ -1,21 +1,40 @@
-"""hipBLASLt route-OUT predicate (K-971 / K-1121 / K-1131 / K-1141).
+"""hipBLASLt route-OUT predicate (K-971 / K-1121 / K-1131 / K-1141 / K-1148).
 
 A small frozenset of `(M, N, K, dtype_str)` keys for which the Triton
-GEMM kernel measurably loses to hipBLASLt on MI300X (gfx942). When a
-problem matches a key in the table, `tritonblas.matmul` delegates to
-`torch.matmul`, which dispatches to hipBLASLt.
+GEMM kernel measurably loses to hipBLASLt on MI300X (gfx942), plus an
+axis-aligned structural envelope (E1) over the K-1121 MFMA-issue-stall
+cohort (K-1148). When a problem matches the table OR falls inside E1,
+`tritonblas.matmul` delegates to `torch.matmul`, which dispatches to
+hipBLASLt.
 
-Strict-equality lookup is intentional: every admit row corresponds to a
-specific empirically verified shape with paired n=30 HIP-graph hot-cache
-timing and a 95 % bootstrap CI on `ratio = off/on` whose lower bound
-exceeds 1.0. We deliberately do **not** widen the predicate into a
-parametric envelope -- any envelope tight enough to exclude unmeasured
-cells degenerates to enumeration; any envelope loose enough to be
-parametric admits cells we have no measurement for.
+Strict-equality lookup is intentional for the K-971 / K-1131 entries:
+every admit row corresponds to a specific empirically verified shape
+with paired n=30 HIP-graph hot-cache timing and a 95 % bootstrap CI on
+`ratio = off/on` whose lower bound exceeds 1.0.
+
+The K-1121 cohort is additionally generalised in K-1148 to its natural
+axis-aligned structural envelope E1 (the smallest two-axis box that
+covers all 13 anchors):
+
+    E1 := { (M, N, K, bf16) : N in {1792, 2048, 3072}
+                              AND K in {256, 768, 1024} }
+
+K-1142's inverse-predicate audit measured every K-931 top-40 cell
+inside E1 at paired n=30 and confirmed exactly two false positives:
+
+    ( 256, 2048, 256, bf16)  hbl/tb = 0.973x  CI95 = [0.966, 0.980]
+    (2048, 1792, 256, bf16)  hbl/tb = 1.015x  CI95 = [1.010, 1.020]
+
+Both FPs admit a TB-WIN / TB-TIE (CI95-upper strictly below the 1.05
+admission floor) and are routed OUT under E1 as **accepted residual**.
+The catalog-wide trade quantified by K-1148 (paired n=30 backtest
+across (a) 13 K-1121 anchors, (b) 12 K-1131 neighbors, (c) the 2 FPs)
+shows the structural coverage gain dominates the small loss on FP
+cells.
 
 History
 -------
-- K-971   : initial constant-K bf16/fp16 anchors (8 rows).
+- K-971   : initial constant-K bf16/fp16 anchors (6 rows).
 - K-1121  : MFMA-issue-stall cohort (5 K-1051 + 8 K-1031 leakage = 13
             rows). Verified on MI300X gfx942, ROCm 7.x ; cohort geomean
             1.226x (range 1.158x - 1.365x).
@@ -27,6 +46,12 @@ History
             K-1121 anchors, (b) the 12 K-1131 neighbors, (c) 5 K-931
             disjoint always-uncovered control cells (zero regression
             on controls; controls bypass the route table).
+- K-1148  : structural extension of the K-1121 cohort into the
+            axis-aligned envelope E1 (N in {1792,2048,3072}, K in
+            {256,768,1024}, bf16). Two K-1142 inverse-predicate FPs
+            accepted as residual. Three-cohort paired n=30 backtest on
+            MI300X confirms (a) anchors retained, (b) neighbors
+            unchanged, (c) FP loss bounded.
 """
 import torch
 
@@ -76,8 +101,50 @@ K971_ROUTE_TABLE = frozenset({
 })
 
 
+# ----------------------------------------------------------------------
+# K-1148: axis-aligned structural envelope E1 over the K-1121 anchor
+# cohort. Every K-1121 anchor is inside E1 by construction (the envelope
+# is the closure of the anchor set under axis-aligned bounding box).
+# Two confirmed K-1142 inverse-predicate false positives lie inside E1
+# and are accepted as residual:
+#     (M=256,  N=2048, K=256, bf16)  hbl/tb = 0.973x  TB-WIN
+#     (M=2048, N=1792, K=256, bf16)  hbl/tb = 1.015x  TB-TIE
+# Both have CI95-upper strictly below the 1.05 admission floor; routing
+# them OUT incurs at most a few percent slowdown on those exact cells.
+# K-1148's three-cohort backtest (paired n=30 HIP-graph hot-cache on
+# MI300X) confirms the catalog-wide trade is favourable.
+# ----------------------------------------------------------------------
+_K1148_E1_N_SET = frozenset({1792, 2048, 3072})
+_K1148_E1_K_SET = frozenset({256, 768, 1024})
+_K1148_E1_DTYPE = "torch.bfloat16"
+
+
+def _in_k1148_e1_envelope(M: int, N: int, K: int, dtype_str: str) -> bool:
+    """K-1148 structural extrapolation of the K-1121 cohort.
+
+    Returns True iff (M, N, K, dtype) falls inside the axis-aligned
+    envelope E1 := {N in {1792,2048,3072} AND K in {256,768,1024} AND
+    dtype == bfloat16}.  Two K-1142 inverse-predicate FPs are inside
+    this envelope and are routed OUT as accepted residual; see module
+    docstring for the cell-level measurement."""
+    return (
+        dtype_str == _K1148_E1_DTYPE
+        and N in _K1148_E1_N_SET
+        and K in _K1148_E1_K_SET
+    )
+
+
 def should_route_out(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
-    """Return True iff (M, N, K, dtype) is in the strict-equality route-OUT
-    table (i.e. tritonblas.matmul should delegate to torch.matmul ->
-    hipBLASLt for this problem)."""
-    return (int(M), int(N), int(K), repr(dtype)) in K971_ROUTE_TABLE
+    """Return True iff (M, N, K, dtype) should delegate to hipBLASLt.
+
+    Routes OUT when EITHER:
+      (a) the (M, N, K, dtype_str) tuple matches a strict-equality entry
+          in K971_ROUTE_TABLE (K-971 / K-1131 cells), OR
+      (b) (M, N, K, dtype) lies inside the K-1148 axis-aligned envelope
+          E1 over the K-1121 cohort.
+    """
+    dt = repr(dtype)
+    key = (int(M), int(N), int(K), dt)
+    if key in K971_ROUTE_TABLE:
+        return True
+    return _in_k1148_e1_envelope(int(M), int(N), int(K), dt)

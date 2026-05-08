@@ -2,7 +2,7 @@ import functools
 import os
 import random
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.library import triton_op, wrap_triton

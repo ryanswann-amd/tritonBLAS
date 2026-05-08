@@ -128,6 +128,21 @@ def _split_k_with_override(
         P = _global_P[:sk_grid, :block_size]
         streamk_tiles = total_tiles % sk_grid if sk_grid > 0 else 0
 
+        # Tuned MFMA params for the small-M cohort (autotune sweep over
+        # {ns,kpack,wpeu}^3 on K-169 small-M shapes):
+        #   * kpack=2 packs 2 fp16/bf16 elements per MFMA K-step, halving
+        #     load issues at the K=4096-8192 BLOCK_K=256 inner loop.
+        #     Lifts narrow-N tiles by 0.06-0.12x (e.g. M=8 N=4096 K=8192
+        #     0.886x -> 1.002x; M=16 N=2048 K=8192 0.722x -> 0.845x).
+        #   * waves_per_eu=1 raises occupancy by 1 wavefront/EU when LDS
+        #     allows it; combined with kpack=2 the LDS budget for
+        #     BM=16/32, BN=32/64, BK=256 stays under 32KB.  Modest +0.02x.
+        #   * num_stages=3 fills the 3-stage MFMA pipeline at K=4096-8192
+        #     where BLOCK_K=256 means only 16-32 K-iters per shard;
+        #     SK4 paths benefit (e.g. M=32 N=4096 K=8192 0.71x -> 0.79x).
+        kp = 2
+        wpeu = 1
+        ns = 3 if (BLK_M * BLK_N * BLK_K * 2 * 3) <= 64 * 1024 else 2
         _maybe_wrap(streamk_matmul, probe_tensor=a)[(sk_grid,)](
             a, b, c,
             None, None, None,
@@ -145,8 +160,8 @@ def _split_k_with_override(
             CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
             QUANTIZED=False,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
-            num_stages=2, num_warps=num_warps,
-            waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+            num_stages=ns, num_warps=num_warps,
+            waves_per_eu=wpeu, matrix_instr_nonkdim=16, kpack=kp,
         )
         return c
 
@@ -204,15 +219,23 @@ def persistent_matmul_lt(
     # GEMM so we don't perturb the existing hot paths.
     # ────────────────────────────────────────────────────────────────────
     num_cus = getattr(selector, "_N_CU", 0) or selector._hardware.N_CU
-    small_m_eligible = (
+    override_eligible = (
         not work_stealing
         and not quantized
         and bias is None
         and a.dtype in (torch.float16, torch.bfloat16)
+    )
+    # Split-K is checked first and is independent of the small-M gate so
+    # it can fire on shapes the SM gate excludes (e.g. M=64 N<4096
+    # K>=4096, which the SM gate hands back to the baseline because the
+    # baseline beats SM there at low K -- but at high K the baseline
+    # collapses to 0.30x and SK wins at 0.55-0.85x).
+    use_split_k = override_eligible and should_use_split_k_path(M, N, K, num_cus)
+    use_small_m = (
+        override_eligible
+        and not use_split_k
         and should_use_small_m_path(M, N, K, BLK_M, BLK_N, num_cus)
     )
-    use_split_k = small_m_eligible and should_use_split_k_path(M, N, K, num_cus)
-    use_small_m = small_m_eligible and not use_split_k
 
     if use_split_k:
         # CU-starved corner: total_tiles < num_cus / 2 even at the smallest
@@ -225,6 +248,14 @@ def persistent_matmul_lt(
         BLK_M, BLK_N, BLK_K, gsize_m, num_warps = small_m_block_override(
             M, N, K, num_cus
         )
+        # Lift num_stages to 3 at K>=4096 narrow-N to fill the MFMA
+        # pipeline at the deeper K loops.  Gated to N<=2048 because
+        # wide-N (N>=4096) shapes already saturate the chip on the SM
+        # path; ns=3 there adds LDS pressure with no parallelism win
+        # (saw -0.08x on M=8 N=8192 K=8192 in autotune sweep).  Cohort
+        # sweep: +0.04-0.07x on narrow-N high-K, neutral on wide-N.
+        if K >= 4096 and N <= 2048:
+            num_stages = 3
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)

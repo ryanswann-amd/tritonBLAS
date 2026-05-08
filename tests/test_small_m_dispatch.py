@@ -167,37 +167,48 @@ def test_should_use_small_m_skips_m64_narrow_n():
 
 
 def test_split_k_gate_positive_cu_starved():
-    """Gate fires on the structurally CU-starved corner (total_tiles * 4
-    <= num_cus AND K >= MIN_K_FOR_SPLIT_K)."""
+    """Gate fires on the structurally CU-starved corner.
+
+    Cases (each must satisfy: TILE_UNDERSUB_FACTOR=2 AND tile floor AND
+    K >= MIN_K_FOR_SPLIT_K AND each shard has MIN_BK_ITERS+ iters):
+    """
+    # M=1 N=1024 K=8192: tiles=32, K=8192 floor=32 -- just at boundary.
     assert should_use_split_k_path(1, 1024, 8192, NUM_CUS_MI300X)
+    # M=8 N=2048 K=8192: tiles=64, K=8192 floor=32 -- well above.
     assert should_use_split_k_path(8, 2048, 8192, NUM_CUS_MI300X)
+    # M=16 N=1024 K=8192: tiles=32, K=8192 floor=32 -- at boundary.
     assert should_use_split_k_path(16, 1024, 8192, NUM_CUS_MI300X)
-    # M=64 N=1024 K=8192 still fires: tiles = 2*32 = 64, 64*4=256 <= 304.
+    # M=64 N=1024 K=8192 still fires (independent of small_m gate):
+    # tiles = 2*32 = 64, K=8192 floor=32, tiles*2=128 <= 304.
     assert should_use_split_k_path(64, 1024, 8192, NUM_CUS_MI300X)
+    # M=64 N=2048 K=4096 fires (SM gate excludes M=64 N<4096 but SK
+    # gate is independent): tiles=2*64=128, K=4096 floor=128.
+    assert should_use_split_k_path(64, 2048, 4096, NUM_CUS_MI300X)
+    # K=4096 wide-N (N=4096): tiles=128 hits the K=4096 floor=128.
+    assert should_use_split_k_path(8, 4096, 4096, NUM_CUS_MI300X)
 
 
 def test_split_k_gate_negative():
     """Negative cases (each guard must independently reject):
       * M > SMALL_M_THRESHOLD: out of small-M scope entirely.
-      * Tile count too high (persistent grid-stride is already enough).
+      * Tile count above num_cus / TILE_UNDERSUB_FACTOR (saturated).
+      * Tile count below the per-K floor (overhead exceeds parallelism).
       * K below MIN_K_FOR_SPLIT_K (overhead dominates).
-      * K too small to keep MIN_BK_ITERS_PER_SHARD per shard.
     """
     # M too large for the small-M scope.
     assert not should_use_split_k_path(SMALL_M_THRESHOLD + 1, 1024, 8192, NUM_CUS_MI300X)
-    # M=16, N=8192: bm=16,bn=32,bk=256 -> tiles=1*256=256, well above
-    # num_cus/4 = 76 -> off.
+    # M=16, N=8192: bm=16,bn=32,bk=256 -> tiles=1*256=256, tiles*2=512>304 -> off.
     assert not should_use_split_k_path(16, 8192, 8192, NUM_CUS_MI300X)
-    # K below MIN_K_FOR_SPLIT_K (8192): the persistent grid-stride
-    # path beats split-K below this threshold (Stream-K's per-tile
-    # bookkeeping + atomic-store reduction overhead exceeds the
-    # parallelism win for K<8192).
+    # K below MIN_K_FOR_SPLIT_K (4096): split-K's per-tile bookkeeping
+    # + atomic-store reduction overhead exceeds the parallelism win.
     assert not should_use_split_k_path(1, 1024, 1024, NUM_CUS_MI300X)
     assert not should_use_split_k_path(1, 1024, 2048, NUM_CUS_MI300X)
+    # K=4096 narrow-N below the per-K tile floor (=128):
+    # M=1 N=1024 K=4096 has tiles=32 < 128 -> off.
     assert not should_use_split_k_path(1, 1024, 4096, NUM_CUS_MI300X)
-    # M=32 N=8192 K=8192: tiles = 1*128 = 128, 128*4=512 > 304 -> off.
-    # The persistent grid-stride loop covers this.
-    assert not should_use_split_k_path(32, 8192, 8192, NUM_CUS_MI300X)
+    # M=8 N=2048 K=4096: tiles=64 < 128 -> off (narrow-N at K=4096
+    # regresses 0.05-0.27x with SK firing -- bench-driven veto).
+    assert not should_use_split_k_path(8, 2048, 4096, NUM_CUS_MI300X)
 
 
 def test_split_k_gate_env_disabled():
@@ -237,12 +248,18 @@ def test_split_k_override_invariants(M, N, K):
 def test_split_k_factor_returns_one_when_subscribed():
     """Shapes where the persistent grid-stride is already enough -> factor
     drops to 1 (gate stays off)."""
-    # M=64, N=8192: bm=32, bn=64 -> tiles = 2*128 = 256. 256*4 > 304 -> off.
+    # M=64, N=8192: bm=32, bn=64 -> tiles = 2*128 = 256. tiles*2=512>304
+    # -> persistent path saturates the chip, no SK win.
     assert _split_k_factor(64, 8192, 4096, NUM_CUS_MI300X) == 1
     assert _split_k_factor(64, 8192, 8192, NUM_CUS_MI300X) == 1
     # K=2048 < MIN_K_FOR_SPLIT_K (=4096) -> off regardless of tile count.
     assert _split_k_factor(1, 1024, 1024, NUM_CUS_MI300X) == 1
     assert _split_k_factor(1, 1024, 2048, NUM_CUS_MI300X) == 1
+    # K=4096 narrow-N below the K=4096 tile floor (128):
+    # M=8 N=2048 K=4096: tiles=64 < 128 -> off.
+    assert _split_k_factor(8, 2048, 4096, NUM_CUS_MI300X) == 1
+    # M=1 N=2048 K=4096: tiles=64 < 128 -> off.
+    assert _split_k_factor(1, 2048, 4096, NUM_CUS_MI300X) == 1
 
 
 @pytest.mark.parametrize("M, N", [(1, 1024), (16, 8192), (32, 4096), (64, 8192)])

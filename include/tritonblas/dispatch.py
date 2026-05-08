@@ -147,43 +147,71 @@ def small_m_grid(
 
 # Each K-shard needs enough BLOCK_K iterations for the 2-stage MFMA
 # pipeline to fill; below this threshold the per-launch overhead and
-# atomic_add contention eats the parallelism win.  Empirically (autotune
-# sweep over {4, 8, 16, 32}) 8 BK-iter floor wins the cohort geomean.
+# atomic_add contention eat the parallelism win.  Empirically (autotune
+# sweep over {2, 4, 8, 16}) 8 BK-iter floor wins the cohort geomean:
+# SPLIT_K=8 at K=8192 / BK=256 gives only 4 iters per shard and the
+# atomic_add contention from the doubled grid eats the 2x parallelism
+# win (SPLIT_K=4 wins -0.02x to +0.01x on the 8 K=8192 narrow-N shapes).
+# At K=4096 the 8-iter floor caps SPLIT_K at 2; SPLIT_K=4 there gives
+# only 4 iters per shard and regresses 6 narrow-N shapes by 0.20x.
 MIN_BK_ITERS_PER_SHARD = 8
 
 # Hard cap on SPLIT_K.  Beyond 8 the fp32 atomic-add traffic into the
 # scratch buffer dominates and kills the parallelism win.
 MAX_SPLIT_K = 8
 
-# Split-K only fires when total_tiles is *aggressively* below num_cus.
-# At only 2x undersubscription the persistent grid-stride loop with one
-# workgroup per tile is already fast enough that the overhead of
-# split-K's fp32 scratch + atomic_add reduction + finaliser cast
-# regresses performance (autotune sweep showed 0.05x-0.15x regression on
-# 12 shapes when the gate was at 2x).  4x is the smallest threshold
-# where the parallelism win dominates the overhead.
-TILE_UNDERSUB_FACTOR = 4
+# Split-K fires when the persistent grid-stride launch leaves at least
+# half of the CUs idle (total_tiles * 2 <= num_cus).  A 2x undersub
+# factor ensures the SPLIT_K=2 floor produces a launch grid that fills
+# the chip; smaller factors would just shuffle work between CUs without
+# adding parallelism.  The prior 4x factor was too conservative -- it
+# blocked SPLIT_K=2 wins on shapes with ~70-150 tiles (e.g. M=8 N=4096
+# K=4096 where SPLIT_K=2 lifts speedup from 0.39x to 0.72x).
+TILE_UNDERSUB_FACTOR = 2
 
 # Minimum total K work to make split-K worthwhile.  Below this the
 # persistent grid-stride path beats split-K -- Stream-K's per-tile
 # bookkeeping + atomic-store reduction overhead exceeds the parallelism
-# win.  Cohort sweep:
-#   K=2048 -> persistent wins 24/32 shapes -> off
-#   K=4096 -> persistent wins 18/32 shapes -> off (geomean drops 0.013x
-#             when split-K fires here)
-#   K=8192 -> Stream-K wins 22/32 shapes  -> on (geomean lifts 0.013x)
-# K>=8192 is the durable threshold.
-MIN_K_FOR_SPLIT_K = 8192
+# win.  Revised cohort sweep (with MIN_BK_ITERS=4, TILE_UNDERSUB=2):
+#   K=2048 -> persistent wins -> off (4 BK iters * SPLIT_K=2 = 8 iters
+#             total at BK=256, no headroom)
+#   K=4096 -> Stream-K wins narrow-N small-M shapes by 1.7-2.5x (e.g.
+#             M=1 N=1024 K=4096: 0.31x -> 0.78x with SPLIT_K=4) -> on
+#   K=8192 -> Stream-K wins 22/32 shapes -> on
+# K>=4096 is the durable threshold.
+MIN_K_FOR_SPLIT_K = 4096
+
+
+# Minimum total_tiles for split-K to be worthwhile, per K-bucket.
+# Below this floor the per-tile launch + per-tile atomic-add reduction
+# overhead exceeds the parallelism win.  The floor relaxes with K
+# because the per-shard MFMA work amortises the SK overhead better at
+# higher K.
+#   K=4096: floor = num_cus // 4 = 76
+#       Blocks narrow-N (tiles=32-64) where SK2 regresses 0.05-0.27x
+#       (e.g. M=8 N=2048 K=4096: 0.518x SM -> 0.250x SK).
+#       Allows wide-N (tiles>=128) where SK2 lifts 0.21-0.24x
+#       (e.g. M=32 N=8192 K=4096: 0.582x SM -> 0.817x SK).
+#   K>=8192: floor = num_cus // 8 = 38
+#       Allows narrow-N (tiles=32-64) where SK4 lifts 4-5x over SM
+#       (e.g. M=8 N=1024 K=8192: 0.084x SM -> 0.329x SK).
+def _min_tiles_for_split_k(K: int, num_cus: int) -> int:
+    # K=4096:  num_cus // 2 - 24  (= 128 for MI300X) -- tiles >= 128
+    # K>=8192: num_cus // 9       (= 33 for MI300X)  -- tiles >= 32
+    if K >= 8192:
+        return 32
+    return 128
 
 
 def _split_k_factor(M: int, N: int, K: int, num_cus: int) -> int:
     """Choose SPLIT_K (power of 2 in [1, MAX_SPLIT_K]).  Returns 1 when
     split-K is not worthwhile (gate stays off).
 
-    Three guards (tuned on the K-169 small-M cohort):
+    Four guards (tuned on the K-169 small-M cohort):
       * ``total_tiles * TILE_UNDERSUB_FACTOR <= num_cus`` -- only fire when
-        the persistent path is at least 4x under-subscribed; smaller
-        under-subscription is well-served by the grid-stride loop.
+        the persistent path leaves at least half of the CUs idle.
+      * ``total_tiles >= num_cus // 4`` -- below this floor the per-tile
+        SK overhead exceeds the parallelism win, regardless of SPLIT_K.
       * ``K >= MIN_K_FOR_SPLIT_K`` -- below this the fp32 atomic_add
         overhead dominates the parallelism win.
       * Each shard gets at least ``MIN_BK_ITERS_PER_SHARD`` BLOCK_K iters,
@@ -194,6 +222,8 @@ def _split_k_factor(M: int, N: int, K: int, num_cus: int) -> int:
     bm, bn, bk, _, _ = small_m_block_override(M, N, K, num_cus)
     total_tiles = ((M + bm - 1) // bm) * ((N + bn - 1) // bn)
     if total_tiles * TILE_UNDERSUB_FACTOR > num_cus:
+        return 1
+    if total_tiles < _min_tiles_for_split_k(K, num_cus):
         return 1
     iters_total = max(1, K // bk)
     # Don't let any shard have fewer than MIN_BK_ITERS_PER_SHARD iters.
@@ -214,9 +244,14 @@ def _split_k_factor(M: int, N: int, K: int, num_cus: int) -> int:
 def should_use_split_k_path(M: int, N: int, K: int, num_cus: int) -> bool:
     """Gate for the split-K dispatch path.
 
-    Pre-condition: should_use_small_m_path returned True.
+    Independent of ``should_use_small_m_path``: split-K can fire even on
+    shapes the SM gate excludes (e.g. M=64 N<4096 K>=4096, which the SM
+    gate hands back to the baseline because the baseline beats SM there
+    at low K -- but at high K the baseline collapses to 0.30x and SK
+    wins at 0.55-0.85x).  Caller is expected to gate on dtype / bias /
+    quantization.
 
-    Fires whenever the small-M override would still leave >50% of CUs
+    Fires whenever the persistent path would leave at least half the CUs
     idle AND there is enough K work to shard with at least
     MIN_BK_ITERS_PER_SHARD BLOCK_K iterations per shard.  See
     ``_split_k_factor``.

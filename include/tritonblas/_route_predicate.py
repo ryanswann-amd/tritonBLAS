@@ -12,6 +12,8 @@ The predicate keys solely on ``(M, N, K, dtype)`` where ``dtype`` is matched by
 """
 from __future__ import annotations
 
+import os
+
 # fp16 K-905/K-971 anchors stay as exact-tuple lookups because their shapes
 # structurally collide with K-950 LAND cells (e.g. (1024,1024,16384,bf16) is
 # both a K-912 LAND and a K-905 route-OUT — only an exact tuple can express
@@ -95,6 +97,44 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
     if N == 1792 and 512 <= K <= 768 and (M >= 5000 or 256 <= M <= 2048):
         return True
     return False
+
+
+# K-1109 (S-002) brief deliverable (1): explicit shape-key allowlist for
+# the 8 K-1074 MFMA-issue-stall candidate cells (S26, S31-S35, S37, S39).
+# Brief asked for "minimal diff (<30 LOC) gated behind explicit shape-key
+# allowlist initially, with strict-equality fallback for the validated 8-cell
+# set as a safety net". Gated by env var (default OFF) because the only
+# paired n=30 round-robin timing on c42/MI300X available at PR time
+# (K-1074/output/rr_summary.csv) showed 0/8 cells clear the K-901 +2% LAND
+# margin and 2/8 (S32, S37) are CI95-confirmed regressions; c42 SSH was
+# unreachable at PR time so a fresh n=30 backtest is pending.  Set
+# TRITONBLAS_K1109_P6_ALLOWLIST=1 in the runtime env to enable for further
+# validation. Pin tests in tests/test_k971_route_predicate.py exercise both
+# gate states so any change to the allowlist or the gate semantics surfaces
+# in CI.
+_K1109_P6_K1074_ALLOWLIST = frozenset({
+    ( 8064, 2048, 1024, "torch.bfloat16"),  # S26
+    (18304, 2048, 1024, "torch.bfloat16"),  # S31
+    (20352, 2048, 1024, "torch.bfloat16"),  # S32
+    (22400, 2048, 1024, "torch.bfloat16"),  # S33
+    (24448, 2048, 1024, "torch.bfloat16"),  # S34
+    (26496, 2048, 1024, "torch.bfloat16"),  # S35
+    (25600, 2048,  256, "torch.bfloat16"),  # S37
+    (49152, 2048,  256, "torch.bfloat16"),  # S39
+})
+_K1109_P6_ALLOWLIST_ENV = "TRITONBLAS_K1109_P6_ALLOWLIST"
+
+
+def _k1109_p6_allowlist_admit(M: int, N: int, K: int, dtype) -> bool:
+    """K-1109 brief deliverable (1) — strict-equality safety-net allowlist.
+
+    Returns True iff the env gate is set AND (M, N, K, dtype) is one of the
+    8 K-1074 MFMA-issue-stall candidate cells. Default-OFF; see module-level
+    docstring above the allowlist for the rationale.
+    """
+    if os.environ.get(_K1109_P6_ALLOWLIST_ENV) != "1":
+        return False
+    return (int(M), int(N), int(K), str(dtype)) in _K1109_P6_K1074_ALLOWLIST
 
 
 def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
@@ -218,6 +258,12 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
     """
     if not _dtype_is_bf16(dtype):
         return False
+    # K-1109 brief deliverable (1): strict-equality safety-net allowlist
+    # (env-gated, default OFF). Consulted FIRST so it can admit cells that
+    # the structural envelopes reject (the K-1074 cohort fails C1 by design,
+    # so it would never fire through the envelope path below).
+    if _k1109_p6_allowlist_admit(M, N, K, dtype):
+        return True
     if K < 512:
         return False  # Surrogate-C2: insufficient MFMA work density
     minMN, maxMN = min(M, N), max(M, N)

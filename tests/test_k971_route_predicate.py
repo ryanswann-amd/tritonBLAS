@@ -28,6 +28,8 @@ from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
+    _K1109_P6_K1074_ALLOWLIST,
+    _K1109_P6_ALLOWLIST_ENV,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -431,6 +433,91 @@ def test_p6_does_not_admit_k1044_land_anchors(cid, M, N, K):
     admitting these anchors to in-kernel would erase that gain."""
     assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
         f"P6 surrogate LAND-leak into K-1044 anchor {cid} ({M},{N},{K})")
+
+
+# ---------------------------------------------------------------------------
+# K-1109 brief deliverable (1) — strict-equality allowlist gate.  The
+# allowlist is consulted FIRST inside R_K1037_P6_admit_wpeu1 so it can admit
+# cells that fail the structural envelopes (the K-1074 cohort fails C1 by
+# design).  Default-OFF env gate: TRITONBLAS_K1109_P6_ALLOWLIST=1 to enable.
+# ---------------------------------------------------------------------------
+K1074_COHORT_8 = [
+    ("S26",  8064, 2048, 1024),
+    ("S31", 18304, 2048, 1024),
+    ("S32", 20352, 2048, 1024),
+    ("S33", 22400, 2048, 1024),
+    ("S34", 24448, 2048, 1024),
+    ("S35", 26496, 2048, 1024),
+    ("S37", 25600, 2048,  256),
+    ("S39", 49152, 2048,  256),
+]
+
+
+def test_p6_k1109_allowlist_contents_are_pinned():
+    """The allowlist content is part of the public contract of K-1109's
+    diff — pin the exact tuples so any silent edit fails CI."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1074_COHORT_8)
+    assert _K1109_P6_K1074_ALLOWLIST == expected
+
+
+def test_p6_k1109_allowlist_env_var_name_is_pinned():
+    """Pin the env var name (operators set this to enable; renaming silently
+    would break runbooks)."""
+    assert _K1109_P6_ALLOWLIST_ENV == "TRITONBLAS_K1109_P6_ALLOWLIST"
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_8,
+                         ids=[c[0] for c in K1074_COHORT_8])
+def test_p6_k1109_allowlist_inert_when_env_unset(cid, M, N, K, monkeypatch):
+    """Default-OFF: with the env gate unset, allowlisted cells must NOT
+    admit (preserves K-1037 18/18 + K-1109 24/24 confusion-matrix integrity
+    that the structural surrogate inherits).  Locks the K-1074 paired n=30
+    NULL-RESULT (0/8 LAND, 2/8 regressions) into CI as the production
+    default."""
+    monkeypatch.delenv(_K1109_P6_ALLOWLIST_ENV, raising=False)
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"K-1109 allowlist leaked when env unset on {cid} ({M},{N},{K})")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_8,
+                         ids=[c[0] for c in K1074_COHORT_8])
+def test_p6_k1109_allowlist_admits_when_env_set(cid, M, N, K, monkeypatch):
+    """Gate-ON: with TRITONBLAS_K1109_P6_ALLOWLIST=1, all 8 K-1074 cells
+    admit.  This is the brief's "strict-equality fallback for the validated
+    8-cell set as a safety net" deliverable.  Future fresh n=30 c42/MI300X
+    backtest will determine whether this gate flips on by default."""
+    monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True, (
+        f"K-1109 allowlist failed to admit gated {cid} ({M},{N},{K})")
+
+
+def test_p6_k1109_allowlist_does_not_widen_to_negatives_when_set(monkeypatch):
+    """Gate-ON must NOT admit any held-out K-1017 negative (zero false
+    positive on the K-1037 calibration set even with the gate flipped)."""
+    monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
+    # K-1017 OCC negatives that sit OUTSIDE the K-1074 cohort:
+    held_out = [
+        ("S30", 16256, 2048, 1024),  # OCC ratio 1.7530 — collinearity wall
+        ("S38",   384,  128,  200),  # HBM-bound, K=200
+        ("S07",  2048, 1792,  256),  # OCC shallow-K
+        ("S16",   256,  256, 2048),  # OCC small-mild-rect
+        ("S14",  1024, 1024, 1024),  # OCC square (K-1017 cohort)
+    ]
+    for cid, M, N, K in held_out:
+        assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+            f"K-1109 allowlist false-positive on held-out NEG {cid} "
+            f"({M},{N},{K}) when env set")
+
+
+def test_p6_k1109_allowlist_only_admits_bf16_when_set(monkeypatch):
+    """Gate-ON must still respect the bf16-only carve-out (K-1037 ground
+    truth scope is bf16 only)."""
+    monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
+    M, N, K = 8064, 2048, 1024  # S26 — bf16 entry in the allowlist
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float16) is False
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float32) is False
 
 
 def test_p6_c1_collinearity_wall_is_load_bearing():

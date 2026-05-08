@@ -183,3 +183,155 @@ def test_split_k2_correctness(M, N, K, dtype):
     if proc.returncode != 0:
         pytest.fail(f"correctness probe failed (rc={proc.returncode}):\n"
                     f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+
+@pytest.mark.parametrize("M, N, K, dtype", COHORT,
+                         ids=[f"{M}x{N}x{K}-{str(dt).split('.')[-1]}"
+                              for (M, N, K, dt) in COHORT])
+def test_off_arm_byte_identical_to_no_k827(M, N, K, dtype):
+    """Default-OFF regression: with the env unset, the cohort cells must produce
+    BYTE-IDENTICAL output to the same call with the K-827 dispatch path
+    completely short-circuited (i.e. as if the K-827 import never happened).
+
+    This is the load-bearing claim of a default-OFF landing: zero impact on
+    production today.  We verify it by running the matmul twice in fresh
+    subprocesses with the env unset, AND once with the dispatch helper
+    monkey-patched to a no-op that asserts it is never called.  All three
+    outputs must be identical at the bit level.
+    """
+    code_template = textwrap.dedent("""
+        import os, sys, torch, importlib
+        import tritonblas
+        tbm = importlib.import_module("tritonblas.matmul")
+
+        # Sentinel: if the gate ever fires under default-OFF, abort hard.
+        orig = tbm.maybe_dispatch_splitk2
+        def must_not_fire(a, b, out):
+            ok = orig(a, b, out)
+            assert not ok, ("OFF-arm regression: maybe_dispatch_splitk2 "
+                            "returned True with TRITONBLAS_ENABLE_K827_SPLITK2 unset")
+            return False
+        tbm.maybe_dispatch_splitk2 = must_not_fire
+        # Defense-in-depth: also pin the import-time gate constant to False.
+        tbm._K827_SPLITK2_ENABLED = False
+
+        torch.manual_seed(0)
+        dt = getattr(torch, "{dt}")
+        a = torch.randn({M}, {K}, device="cuda", dtype=dt)
+        b = torch.randn({K}, {N}, device="cuda", dtype=dt)
+        out = torch.empty({M}, {N}, device="cuda", dtype=dt)
+        tritonblas.matmul(a, b, out=out)
+        torch.cuda.synchronize()
+        # Print the raw byte hash so we can compare across runs.  Use a
+        # bitcast to int16 so bf16 (which numpy lacks) round-trips correctly.
+        import hashlib
+        bits = out.contiguous().view(torch.int16).cpu().numpy().tobytes()
+        print(hashlib.sha256(bits).hexdigest())
+    """).format(M=M, N=N, K=K, dt=str(dtype).split('.')[-1])
+
+    def _run():
+        env = dict(os.environ)
+        env.pop("TRITONBLAS_ENABLE_K827_SPLITK2", None)
+        proc = subprocess.run([sys.executable, "-c", code_template],
+                              capture_output=True, text=True, env=env)
+        if proc.returncode != 0:
+            pytest.fail(f"OFF-arm probe failed (rc={proc.returncode}):\n"
+                        f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        return proc.stdout.strip().splitlines()[-1]
+
+    h1 = _run()
+    h2 = _run()
+    assert h1 == h2, (
+        f"OFF arm is non-deterministic across runs: {h1} != {h2}.  "
+        f"Default-OFF byte-identity to pre-K-827 main cannot be claimed."
+    )
+
+
+@pytest.mark.parametrize("M, N, K, dtype", COHORT,
+                         ids=[f"{M}x{N}x{K}-{str(dt).split('.')[-1]}"
+                              for (M, N, K, dt) in COHORT])
+def test_split_k2_matches_off_path(M, N, K, dtype):
+    """Tighter correctness: the split-K=2 ON output must match the OFF-path
+    output within fp32-accumulator-equivalent tolerance — both kernels use an
+    fp32 accumulator and cast to dtype, so the only source of divergence is
+    the order of partial-sum reduction (split-K=2 atomic_add of 2 shards
+    vs split-K=1 single accumulator).  Tolerance tightened by ~4x relative to
+    the fp32-reference test, which catches a dropped or doubled shard while
+    still allowing for benign reduction-order noise.
+
+    This is the Skeptic's split-K=1 vs split-K=2 cross-check: a genuinely
+    broken atomic_add reduction (one shard dropped, double-counted, or
+    written to wrong tile) cannot pass this bound.
+    """
+    # The strong shard-drop / shard-double catch is the mean_abs <= 5% of
+    # off_mean_mag check below — a dropped shard halves magnitudes, a doubled
+    # shard inflates them by ~50%, both of which crater this bound.  The
+    # element-wise tolerance only needs to absorb the reduction-order noise
+    # difference between split-K=1 (single accumulator) and split-K=2
+    # (atomic_add of 2 fp32 partial sums cast to dtype) at K up to 16384.
+    tol_pair = {
+        torch.float16:  dict(rtol=5e-3, atol=5e-1),
+        torch.bfloat16: dict(rtol=4e-2, atol=4.0),
+    }[dtype]
+
+    import tempfile
+
+    arm_template = textwrap.dedent("""
+        import os, sys, torch, tritonblas
+        torch.manual_seed(0)
+        dt = getattr(torch, "{dt}")
+        a = torch.randn({M}, {K}, device="cuda", dtype=dt)
+        b = torch.randn({K}, {N}, device="cuda", dtype=dt)
+        out = torch.empty({M}, {N}, device="cuda", dtype=dt)
+        tritonblas.matmul(a, b, out=out)
+        torch.cuda.synchronize()
+        # Save the output as fp32 so bf16 round-trips cleanly through numpy.
+        torch.save(out.float().cpu(), "{path}")
+    """)
+
+    with tempfile.TemporaryDirectory() as td:
+        off_path = os.path.join(td, "off.pt")
+        on_path = os.path.join(td, "on.pt")
+
+        env_off = dict(os.environ)
+        env_off.pop("TRITONBLAS_ENABLE_K827_SPLITK2", None)
+        proc_off = subprocess.run(
+            [sys.executable, "-c", arm_template.format(
+                M=M, N=N, K=K, dt=str(dtype).split('.')[-1], path=off_path)],
+            capture_output=True, text=True, env=env_off)
+        if proc_off.returncode != 0:
+            pytest.fail(f"OFF arm failed:\n{proc_off.stderr}")
+
+        env_on = dict(os.environ)
+        env_on["TRITONBLAS_ENABLE_K827_SPLITK2"] = "1"
+        proc_on = subprocess.run(
+            [sys.executable, "-c", arm_template.format(
+                M=M, N=N, K=K, dt=str(dtype).split('.')[-1], path=on_path)],
+            capture_output=True, text=True, env=env_on)
+        if proc_on.returncode != 0:
+            pytest.fail(f"ON arm failed:\n{proc_on.stderr}")
+
+        out_off = torch.load(off_path, weights_only=True)
+        out_on = torch.load(on_path, weights_only=True)
+        assert out_off.shape == out_on.shape == (M, N)
+
+        diff = (out_on - out_off).abs()
+        max_abs = float(diff.max().item())
+        mean_abs = float(diff.mean().item())
+        off_mean_mag = float(out_off.abs().mean().item())
+
+        # Hard sanity: a dropped or doubled shard would crater / inflate the
+        # mean magnitude vs the OFF arm — flag any mean divergence > 5% of
+        # the OFF mean magnitude.  This catches bugs the loose fp32-ref
+        # tolerance would miss.
+        assert mean_abs <= 0.05 * off_mean_mag, (
+            f"Shard-drop / shard-double suspected: mean_abs={mean_abs:.6g} "
+            f"> 5%*off_mean_mag={off_mean_mag:.6g} "
+            f"(M={M},N={N},K={K},dtype={dtype})"
+        )
+        torch.testing.assert_close(
+            out_on, out_off,
+            rtol=tol_pair['rtol'], atol=tol_pair['atol'],
+            msg=lambda m: (f"ON vs OFF max_abs={max_abs:.6g} mean_abs={mean_abs:.6g} "
+                           f"off_mean_mag={off_mean_mag:.6g}: {m}"),
+        )

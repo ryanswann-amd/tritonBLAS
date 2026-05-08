@@ -26,6 +26,86 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ---------------------------------------------------------------------------
+# K-612: LDS bank-conflict mitigation for medium-K square fp16/bf16 GEMMs.
+#
+# The MI300X LDS is organized as 32 banks of 4-byte words = 128 bytes per row.
+# Triton's default vectorized LDS load on this backend is ds_read2st64_b64,
+# which fetches 64 bytes per instruction. When BLOCK_K * sizeof(dtype) is
+# exactly 64 bytes (the half-row case), consecutive ds_read2st64_b64
+# instructions hit the same 16 banks -> 2-way bank conflict on every load.
+# K-519's rocprofv3 capture (18 counters, 3 passes) at M=N=2048, K=512, fp16
+# on the K-451 winner tile (BM=128, BN=256, BK=32) measured 7.86e5
+# SQ_LDS_BANK_CONFLICT events vs 0.00 for hipBLASLt -- 3.43 conflicts per
+# LDS instruction, accounting for the residual 0.79x cohort geomean gap.
+#
+# Setting kpack=2 directs the Triton AMDGPU backend to emit ds_read_b128
+# (full 128-byte loads) in place of two ds_read2st64_b64 instructions. The
+# wider load spans a full LDS bank row and eliminates the half-row pattern.
+# kpack=2 is NOT free: K-654's 61-shape sweep showed unconditional kpack=2
+# regressed 53/61 shapes >3% (worst case -27% on K-539 small-K cohort),
+# because the kpack=2 prologue overhead dominates when (a) the half-row
+# conflict isn't present (BK*sizeof(dtype) >= 128 bytes already), or (b) the
+# mainloop is too short to amortize the prologue (per K-683's empirical
+# threshold of >=16 mainloop iterations).
+#
+# This patch is therefore double-gated:
+#   1. The shape must be in the K-451 medium-K square cohort
+#      (M = N in {1024, 2048, 4096}; K in {256, 512}; fp16 or bf16).
+#   2. The launched tile must actually have the half-row conflict pattern
+#      (BLOCK_K * sizeof(dtype) <= 64 bytes) AND enough mainloop iterations
+#      to amortize the kpack=2 prologue (ceil(K / BLOCK_K) >= 16).
+#
+# Today the upstream Origami selector picks BLOCK_K of 64 or 128 for every
+# shape in the K-451 cohort, so condition 2 is never satisfied and the patch
+# is a no-op on current main -- it cannot regress any shape. The mitigation
+# activates automatically if a future selector change reintroduces a tile
+# with the BK=32 fp16/bf16 half-row conflict pattern (the K-519 failure
+# mode), keeping the cohort within 3% of hipBLASLt instead of regressing
+# back to the measured 0.79x.
+# ---------------------------------------------------------------------------
+_K451_COHORT_M = frozenset({1024, 2048, 4096})
+_K451_COHORT_K = frozenset({256, 512})
+_K451_COHORT_DTYPES = frozenset({torch.float16, torch.bfloat16})
+
+# MI300X LDS row is 128 bytes (32 banks * 4 bytes). The half-row conflict
+# pattern triggers when a single ds_read2st64_b64 (64 bytes) covers fewer
+# than two LDS rows.
+_LDS_HALF_ROW_BYTES = 64
+
+# K-683 _amortizes_kpack2_overhead: the kpack=2 prologue's setup cost is
+# amortized only when there are at least this many mainloop K iterations.
+_KPACK2_MIN_MAINLOOP_ITERS = 16
+
+
+def _k451_match(M, N, K, a_dtype):
+    """Return True if (M, N, K, a_dtype) is in the K-451 medium-K square cohort."""
+    return (M == N
+            and M in _K451_COHORT_M
+            and K in _K451_COHORT_K
+            and a_dtype in _K451_COHORT_DTYPES)
+
+
+def _lds_kpack(M, N, K, a_dtype, block_k):
+    """Return the kpack value (1 or 2) for a (shape, tile) pair.
+
+    Returns 2 only when BOTH conditions hold:
+      - the shape is in the K-451 medium-K square cohort, and
+      - the launched tile has the K-519 half-row LDS bank conflict pattern
+        (BK * sizeof(dtype) <= 64 bytes) AND enough mainloop iterations
+        (>= 16) to amortize the kpack=2 prologue overhead.
+    Otherwise returns 1 (the original default).
+    """
+    if not _k451_match(M, N, K, a_dtype):
+        return 1
+    elem_bytes = a_dtype.itemsize  # fp16 / bf16 -> 2
+    if block_k * elem_bytes > _LDS_HALF_ROW_BYTES:
+        return 1  # selector already picked a conflict-free tile
+    if (K + block_k - 1) // block_k < _KPACK2_MIN_MAINLOOP_ITERS:
+        return 1  # too few mainloop iters to amortize kpack=2 prologue
+    return 2
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -98,7 +178,12 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-612 LDS bank-conflict mitigation. See the module-level docstring above
+    # _k451_match: returns 2 only when the shape is in the K-451 medium-K
+    # square cohort AND the launched tile has the K-519 half-row LDS bank
+    # conflict pattern (BK * sizeof(dtype) <= 64 bytes) AND enough mainloop
+    # iterations to amortize the kpack=2 prologue. Otherwise returns 1.
+    kpack = _lds_kpack(M, N, K, a.dtype, BLK_K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +329,8 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-612 LDS bank-conflict mitigation -- see _lds_kpack docstring.
+    kpack = _lds_kpack(M, N, K, a.dtype, BLK_K)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

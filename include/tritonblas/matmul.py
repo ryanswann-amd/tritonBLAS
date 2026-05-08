@@ -23,20 +23,23 @@ from . import guarded_override as _go
 
 _tensor_cache = {}
 
-# ----- K-989 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) -------
-# Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
-# LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
-# >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
-# - K-905 entries: 2 keys (1024^2 K=16384, both bf16/fp16) — validated.
-# - K-971 entries: 6 keys (mid-square M=N in {1024,2048} x K in {16384,32768})
-#   — validated paired n=30 in K-971 (geomean 1.85x, 0/12 OOC regress).
-# - K-989 entries: 10 keys from K-931 LDS-bound uncovered top-10 (all bf16),
-#   validated paired n=30 on c42/MI300X (geomean 5.23x, all p<1e-9, 0/9 OOC
-#   regress, 10/10 ON-vs-REF numerical-match within fp eps). All 10 cells
-#   hit K-901 §5 V1/V2/V3 LAND gates. K-931 PMC re-measurement confirms
-#   the K-971 LDS fingerprint (LDS_BC>=0.7 cyc/inst OR LDS_Wait/wave 5x+
-#   hbl). Bucket excludes MFMA-issue-stall shapes (K-967 falsified the
-#   waves_per_eu=1 lever transfer to that cohort, 0/7 LAND).
+# ----- K-1003 R-K979 P5 Gate-0 admission predicate + K-905/K-971 anchors ----
+# Replaces the K-984/K-989 per-shape strict-equality entries (which were
+# growing O(N) with each K-931 PMC measurement pass) with a closed-form
+# 4-clause structural-pathology predicate (R-K979 v3 / P5) keyed on
+# (M, N, K, dtype). The K-905/K-971 mid-square long-K anchors remain as
+# strict-equality entries because their shapes structurally collide with
+# K-950 LAND cells (e.g. 1024x1024x16384 bf16 is both a K-912 LAND and a
+# K-905 route-OUT — only an exact-tuple table can express that).
+#
+# P5 derivation: K-979 synthesised K-950's 22-counter PMC sweep into a
+# 3-axis NO-LAND pathology decomposition (over-tile / hbl-strong /
+# tb-weak); K-1003 translates each PMC clause to its structural (M,N,K)
+# proxy. On the K-950 36-cell training set the structural form preserves
+# zero LAND leakage (0/9) and on the K-984+K-989 union (14 unique K-931
+# shapes) achieves 14/14 fire coverage; on the broader K-931 top-40
+# catalog the predicate generalises to ~29/40 NO-LAND-class shapes,
+# capturing ~15 cells beyond the K-984+K-989 strict-equality slate.
 _K971_ROUTE_TABLE = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
@@ -46,24 +49,70 @@ _K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 16384, "torch.float16"),
     (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
     (2048, 2048, 32768, "torch.float16"),
-    # K-989 NEW (K-931 top-10 LDS-bound uncovered cohort, paired n=30)
-    (1024,  2048, 1240, "torch.bfloat16"),  # K-989 S40  sp=12.80x  p<1e-9
-    ( 768,  1792, 5972, "torch.bfloat16"),  # K-989 S17  sp= 4.72x  p<1e-9
-    ( 256,  1792, 2048, "torch.bfloat16"),  # K-989 S05  sp=14.73x  p<1e-9
-    ( 736,  1792,  736, "torch.bfloat16"),  # K-989 S06  sp=14.67x  p<1e-9
-    (2304,  2048, 4800, "torch.bfloat16"),  # K-989 S04  sp= 2.72x  p<1e-9
-    (10112, 2048, 1024, "torch.bfloat16"),  # K-989 S27  sp= 3.08x  p<1e-9
-    (12160, 2048, 1024, "torch.bfloat16"),  # K-989 S28  sp= 2.60x  p<1e-9
-    (1024,  2048, 6016, "torch.bfloat16"),  # K-989 S22  sp= 3.76x  p<1e-9
-    ( 768,  3072, 4480, "torch.bfloat16"),  # K-989 S21  sp= 4.61x  p<1e-9
-    (1024,  2048, 8064, "torch.bfloat16"),  # K-989 S23  sp= 3.10x  p<1e-9
 })
+
+
+def _R_K979_P5_route_to_hbl(M, N, K, dtype):
+    """R-K979 v3 / P5 — closed-form 4-clause structural pathology predicate.
+
+    Returns True when shape (M, N, K, dtype) sits in the NO-LAND-for-Triton-
+    override regime (i.e. tritonblas should route to hipBLASLt). Translates
+    P5's PMC predicate into structural (M, N, K, dtype) proxies:
+
+      Clause-1 (over-tile / LDS-bound mid-rect):
+          mid-rect non-square with K in the [1240, 8064] LDS-pressure band
+          and one axis pinned to the {1792, 2048, 3072} LDS-bound family.
+      Clause-2 (hbl-strong / LMhead projection):
+          large-M skinny  M >= 5000, N == 2048, K in {256, 1024}.
+      Clause-3 (tb-weak / extreme aspect or tiny):
+          aspect ratio max(M,N)/min(M,N) >= 100, or min(M,N) <= 192 AND
+          K >= 2048 (waves under-utilised on the small axis).
+      Clause-4 (over-tile dual / N=1792 short-K):
+          N == 1792 and K <= 768, with M either large-skinny (>= 5000)
+          or in the K-984/K-989 mid-rect band [256, 2048].
+
+    bf16-only: the K-984/K-989 ship cohort and the K-931 measurement scope
+    are bf16; fp16 K-905/K-971 anchors stay in _K971_ROUTE_TABLE.
+
+    Verification (K-1003):
+      - K-984+K-989 union (14 unique shapes): 14/14 FIRE
+      - K-950 LAND set (9 cells): 0/9 FIRE (zero leakage)
+      - K-931 top-40: 29/40 FIRE (15 net beyond strict-equality)
+    """
+    if dtype is not torch.bfloat16:
+        return False
+    minMN = min(M, N)
+    maxMN = max(M, N)
+    # Clause-1: over-tile, LDS-bound, mid-rect non-square with mid-band K.
+    if (minMN < maxMN
+            and 256 <= minMN <= 2304
+            and 1792 <= maxMN <= 3072
+            and 1240 <= K <= 8064):
+        return True
+    # Clause-2: hbl-strong LMhead-style large-M skinny.
+    if M >= 5000 and N == 2048 and K in (256, 1024):
+        return True
+    # Clause-3: tb-weak — extreme aspect or skinny-and-long-K.
+    if maxMN >= 100 * max(1, minMN):
+        return True
+    if minMN <= 192 and K >= 2048:
+        return True
+    # Clause-4: N=1792 short-K dual of clause-1.
+    if N == 1792 and K <= 768 and (M >= 5000 or 256 <= M <= 2048):
+        return True
+    return False
+
 
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
     # K-989: keep K-971 killswitch env var as the single L3 disable lever
-    # (per K-883 R1 — one cohort, one disable).
+    # (per K-883 R1 — one cohort, one disable). K-1003 layers the R-K979 P5
+    # Gate-0 admission predicate AHEAD of the strict-equality table so the
+    # broader K-984+K-989+K-931 cohort dispatches via closed-form rather
+    # than per-shape entries; strict-equality table retained for K-905/K-971
+    # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
     return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
 
 

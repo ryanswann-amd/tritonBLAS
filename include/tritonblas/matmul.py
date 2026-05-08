@@ -299,6 +299,88 @@ def _k695_tile_override(M, N, K, a_dtype):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# K-751 / K-736: FP8 e4m3fnuz tall-skinny LARGE-M small-N tile override.
+#
+# Disjoint from K-695 (K-695 covers small-M large-N: M in {16,32,64}, N>=4096).
+# K-751 covers large-M small-N: M in {4096,8192,16384}, N in {16,32,64,128}.
+# Strict-equality (M,N,K) keys -- 12 entries; routed BEFORE K-695 in the
+# dispatcher (mirrors K-722's "narrower-predicate-fires-first via early-return"
+# pattern) so an in-cohort shape can never be re-routed into the K-695
+# predicate envelope and trigger the K-654/K-683 cohort-leakage bug class.
+#
+# Per-N-band winners from the K-751 <=20-candidate sweep on the 4 worst
+# K-717 FP8 shapes (one per N band):
+#   N=16  : (16, 16, 256, 2, 1, 4)   (beats K-717's NW=8 by ~30%)
+#   N=32  : (64, 32, 128, 2, 1, 4)
+#   N=64  : (64, 64, 256, 2, 1, 4)   (NW tightened from K-717's 8 -> 4)
+#   N=128 : (64,128, 128, 2, 1, 8)   (same as K-717)
+# Tuple = (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack, num_warps)
+#
+# Set TRITONBLAS_DISABLE_K751=1 to bypass.
+# ---------------------------------------------------------------------------
+import os as _os_k751
+_K751_GATE_ENABLED = _os_k751.environ.get("TRITONBLAS_DISABLE_K751", "0") != "1"
+
+_FP8_TSKINNY_TILE_TABLE: Dict[Tuple[int, int, int], Tuple[int, int, int, int, int, int]] = {
+    # Mode A: tiny-N (N<=32) padded BLOCK_N=16 MFMA, deepen BK to amortize K loop.
+    (4096,  16, 2048): (16, 16, 256, 2, 1, 4),
+    (4096,  16, 4096): (16, 16, 256, 2, 1, 4),
+    (4096,  32, 2048): (64, 32, 128, 2, 1, 4),
+    (4096,  32, 4096): (64, 32, 128, 2, 1, 4),
+    (8192,  16, 2048): (16, 16, 256, 2, 1, 4),
+    (8192,  16, 4096): (16, 16, 256, 2, 1, 4),
+    (16384, 16, 2048): (16, 16, 256, 2, 1, 4),
+    (16384, 16, 4096): (16, 16, 256, 2, 1, 4),
+    # Mode B: M=16384 N>=64 BM=BN=256 cliff -- right-size BMxBN to fill 304 CUs.
+    (16384, 64,  2048): (64,  64, 256, 2, 1, 4),
+    (16384, 64,  4096): (64,  64, 256, 2, 1, 4),
+    (16384, 128, 2048): (64, 128, 128, 2, 1, 8),
+    (16384, 128, 4096): (64, 128, 128, 2, 1, 8),
+}
+
+# Runtime gate-fire telemetry. Bounded by definition (12 closed keys).
+_FP8_TSKINNY_FIRE_COUNT: int = 0
+_FP8_TSKINNY_FIRE_BY_SHAPE: Dict[Tuple[int, int, int], int] = {}
+
+
+def _fp8_tskinny_lds_fits(BM: int, BN: int, BK: int, NS: int,
+                          lds_cap: int = 65536) -> bool:
+    """LDS double-buffer budget guard (FP8 = 1 byte/element)."""
+    return NS * (BM * BK + BK * BN) <= lds_cap
+
+
+def _fp8_tskinny_tile_override(M, N, K, a_dtype, work_stealing):
+    """Strict-equality FP8 tall-skinny large-M tile override.
+
+    Returns (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack, num_warps) if the
+    (M,N,K) is in the K-751 12-entry cohort table AND a_dtype is
+    torch.float8_e4m3fnuz AND not work_stealing AND the tile fits LDS;
+    otherwise None.
+    """
+    if not _K751_GATE_ENABLED:
+        return None
+    if _FP8_E4M3FNUZ is None or a_dtype is not _FP8_E4M3FNUZ:
+        return None
+    if work_stealing:
+        return None
+    ov = _FP8_TSKINNY_TILE_TABLE.get((M, N, K))
+    if ov is None:
+        return None
+    if not _fp8_tskinny_lds_fits(ov[0], ov[1], ov[2], ov[3]):
+        return None
+    return ov
+
+
+def _fp8_tskinny_record_fire(M, N, K) -> None:
+    """Record an override firing event; used by the K-773 leakage audit."""
+    global _FP8_TSKINNY_FIRE_COUNT
+    _FP8_TSKINNY_FIRE_COUNT += 1
+    _FP8_TSKINNY_FIRE_BY_SHAPE[(M, N, K)] = (
+        _FP8_TSKINNY_FIRE_BY_SHAPE.get((M, N, K), 0) + 1
+    )
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # K-693: tall-skinny FP16/BF16 N=64 persistent-path tile override.
 #
 # Origami over-tiles BM (256 macrotile at M >= 4096) and under-stages BK
@@ -537,12 +619,34 @@ def persistent_matmul_lt(
     if _lds_cfg.kpack != 1:
         kpack = _lds_cfg.kpack
 
+    # K-751: FP8 e4m3fnuz tall-skinny LARGE-M small-N strict-equality tile
+    # override (12 entries). MUST be queried strictly BEFORE the K-695 block
+    # below so an in-cohort (M,N,K) cannot be re-routed into the K-695
+    # predicate envelope and trigger the K-654/K-683 cohort-leakage class
+    # (mirrors K-722's "narrower-predicate-fires-first via early-return"
+    # conflict-resolution pattern). When K-751 fires we bind ALL of
+    # (BLK_M, BLK_N, BLK_K, num_stages, kpack, num_warps) and skip K-695
+    # explicitly via _k751_fired so the K-695 predicate cannot clobber.
+    _k751_fired = False
+    _fp8_ts_ov = _fp8_tskinny_tile_override(M, N, K, a.dtype, work_stealing)
+    if _fp8_ts_ov is not None:
+        BLK_M, BLK_N, BLK_K, num_stages, kpack, num_warps = _fp8_ts_ov
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = (K % BLK_K) == 0
+        _fp8_tskinny_record_fire(M, N, K)
+        _k751_fired = True
+
     # K-695: tile override for FP8 e4m3fnuz tall-skinny cohort. LDS-fit guard
     # falls back to Origami on the (rare) BN/BK combo where the override
     # exceeds the 64KiB MI300X workgroup LDS budget. Applied after K-683 so
     # the override wins on its narrow FP8 predicate (no overlap: K-683 is
-    # FP16/BF16-only).
-    _ovr = _k695_tile_override(M, N, K, a.dtype)
+    # FP16/BF16-only). Skipped iff K-751 already fired (defensive: predicates
+    # are disjoint by M-band today, but routing-order discipline forecloses
+    # the K-654/K-683 leakage class for any future shape-table extension.)
+    _ovr = None if _k751_fired else _k695_tile_override(M, N, K, a.dtype)
     if _ovr is not None and not work_stealing:
         _bm, _ns, _kp = _ovr
         if _ns * (_bm * BLK_K + BLK_K * BLK_N) <= 65536:

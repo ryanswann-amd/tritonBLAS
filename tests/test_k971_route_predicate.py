@@ -27,6 +27,12 @@ import torch
 from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1,
+    R_K1142_E1_route_to_hbl,
+    is_k1121_e1_admit_safe,
+    K1142_E1_NS,
+    K1142_E1_KS,
+    K1142_E1_M_FLOOR,
+    K1142_E1_K_FLOOR,
     K971_ROUTE_TABLE,
     _K1109_P6_K1074_ALLOWLIST,
     _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
@@ -377,17 +383,41 @@ def test_p6_envelope_b_boundary():
 
 
 @pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
-def test_p6_admit_short_circuits_route_out_to_in_kernel(cid, M, N, K):
-    """When P6 admit fires, _k971_route_to_hbl must return False so the
-    cell dispatches in-kernel (where matmul.py sets waves_per_eu=1).
-    Verifies the integration path: P6 admit overrides P5 route-OUT for
-    cells in the MFMA-issue-stall structural fingerprint.
-    Witness: S29 (14208, 2048, 1024) is otherwise routed-OUT by P5
-    Clause-2 (M>=5000, N==2048, K==1024) — P6 admit must short-circuit."""
+def test_p6_admit_supersedes_only_when_e1_does_not_fire(cid, M, N, K):
+    """K-1151 (S-002) — K-1121 pivot inversion of the K-1109 P6 short-circuit.
+
+    Pre-K-1151: P6 admit short-circuited route-OUT for S24 / S29 so they
+    dispatched in-kernel with waves_per_eu=1 — at K-1121 paired n=30 this
+    was confirmed slower than hipBLASLt (S24 hbl/tb=1.304x, S29 1.352x)
+    and was the empirical root cause of the K-1121 pivot.
+
+    Post-K-1151: the productionised K-1142 E1 envelope route-OUT precedes
+    the P6 admit gate, so S24 and S29 (which sit inside E1 with M=4480 and
+    M=14208 respectively) route OUT to hipBLASLt regardless of P6's admit
+    verdict.  The P6 admit predicate STILL fires structurally on these
+    cells (R_K1037_P6_admit_wpeu1 returns True so the K-1109 NULL-RESULT
+    pins continue to hold) but it is no longer load-bearing for the route
+    decision on the K-1121 cohort.
+
+    This test pins the K-1151 inversion: P6-positive cells inside the
+    productionised E1 envelope route OUT (route_to_hbl == True), while
+    the underlying P6 admit predicate continues to classify them as
+    structural P6 positives (separate test below)."""
+    # Both S24 and S29 are inside E1 by construction.
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is True, (
+        f"K-1142 E1 must fire on K-1037 P6 positive {cid} ({M},{N},{K}) "
+        f"so K-1151 routes the K-1121-pivoted cell OUT")
+    # K-1151 full-dispatch: routes OUT (E1 supersedes P6 admit).
     assert _k971_route_to_hbl(
         M, N, K, torch.bfloat16, torch.bfloat16,
-        enable_streamk=False, work_stealing=False) is False, (
-        f"P6 admit failed to short-circuit route-OUT for {cid} ({M},{N},{K})")
+        enable_streamk=False, work_stealing=False) is True, (
+        f"K-1151 productionised E1 must route P6-positive K-1121 anchor "
+        f"{cid} ({M},{N},{K}) OUT (supersedes K-1037 P6 admit)")
+    # P6 admit predicate STILL fires structurally — the K-1109 NULL-RESULT
+    # pin tests below depend on this remaining True.
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True, (
+        f"R_K1037_P6_admit_wpeu1 must still classify {cid} as a P6 "
+        f"positive — only the dispatch consequence changes under K-1151")
 
 
 @pytest.mark.parametrize("cid,M,N,K", P6_LAND_ANCHORS,
@@ -605,3 +635,251 @@ def test_p6_c1_collinearity_wall_is_load_bearing():
     assert R_K1037_P6_admit_wpeu1(16256, 2048, 1024, torch.bfloat16) is False  # S30
     assert R_K1037_P6_admit_wpeu1(24448, 2048, 1024, torch.bfloat16) is False  # S34
     assert R_K1037_P6_admit_wpeu1(14208, 2048, 1024, torch.bfloat16) is True   # S29
+
+
+# ---------------------------------------------------------------------------
+# K-1151 R_K1142_E1_route_to_hbl — productionised K-1142 E1 envelope
+# (axis-aligned structural extrapolation of the K-1121 13-cell strict-equality
+# cohort) with the K-1142 minimum two-axis carve-out.
+#
+# Pins:
+#   (a) all 13 K-1121 anchors fire True (route OUT to hipBLASLt)
+#   (b) the 2 K-1142 inverse-predicate FPs fire False (excluded by carve-out)
+#   (c) the 2 K-1131 HBL-leaning E1 admit candidates fire True
+#   (d) bf16-only carve-out (fp16/fp32 short-circuit to False)
+#   (e) full-dispatch composition: E1 route-OUT supersedes K-1037 P6 admit
+#       so S24 / S29 (which P6 would otherwise admit back to in-kernel)
+#       route OUT to hipBLASLt — preserves the K-1121 pivot at runtime.
+#   (f) is_k1121_e1_admit_safe helper rejects the 2 FPs and accepts every
+#       anchor — the natural unit-test guard for any future structural
+#       relaxation of the K-1142 carve-out.
+# ---------------------------------------------------------------------------
+
+# K-1121 anchor cells (paired n=30 K-1142 reconfirmation, K-1143 cross-arch
+# reconfirmation on gfx950 — see knowledge/k1142_*.md and k1143_*.md).
+K1121_ANCHORS_13 = [
+    # (sid, M, N, K, source-cohort)
+    ("S18",  5972, 1792,  768, "K-1031"),
+    ("S24",  4480, 3072,  768, "K-1051"),  # also fires K-1037 P6 envelope B
+    ("S25",  6016, 2048, 1024, "K-1051"),
+    ("S26",  8064, 2048, 1024, "K-1031"),
+    ("S29", 14208, 2048, 1024, "K-1051"),  # also fires K-1037 P6 envelope A
+    ("S30", 16256, 2048, 1024, "K-1051"),
+    ("S31", 18304, 2048, 1024, "K-1031"),
+    ("S32", 20352, 2048, 1024, "K-1031"),
+    ("S33", 22400, 2048, 1024, "K-1031"),
+    ("S34", 24448, 2048, 1024, "K-1031"),
+    ("S35", 26496, 2048, 1024, "K-1031"),
+    ("S37", 25600, 2048,  256, "K-1031"),
+    ("S39", 49152, 2048,  256, "K-1031"),
+]
+
+# K-1142 inverse-predicate false positives — cells inside the natural
+# axis-aligned envelope E1 that hipBLASLt does NOT actually win at paired
+# n=30 (FP1 is a 2.7% slowdown TB-TIE; FP2 is +1.5% TB-TIE).  Both must
+# remain route-IN under the K-1142 carve-out (M >= 4480) so productionising
+# E1 does not silently regress them.
+K1142_INVERSE_PRED_FPS = [
+    ("FP1",  256, 2048, 256, 0.973, "TB-TIE — −2.7% per K-1142 paired n=30"),
+    ("FP2", 2048, 1792, 256, 1.015, "TB-TIE — +1.5% per K-1142 paired n=30"),
+]
+
+# K-1131 HBL-leaning E1 admit candidates — cells inside E1 that K-1131
+# held-out neighbour validation confirmed as productionisation-safe
+# (paired-n speedup >= K-1007 1.05x admission floor).  Productionised E1
+# must continue to route them OUT — otherwise the +3.23% K-1142 geomean
+# uplift on the K-931 ∩ E1 cohort is lost.  The exact (M, N, K) values
+# fall inside the K-1121 anchor convex hull on the M axis (between S18
+# and S39); the same predicate that fires on the anchors fires on these.
+K1131_E1_ADMIT_CANDIDATES = [
+    # (cid, M, N, K) -- both cells share the K=1024 / N=2048 family and
+    # sit clear of the M=4480 carve-out.
+    ("K1131A", 10112, 2048, 1024),
+    ("K1131B", 12160, 2048, 1024),
+]
+
+# K-931 always-uncovered "neighbour" cells OUTSIDE the K-1142 envelope on
+# at least one axis — used to pin that the productionised E1 predicate
+# does NOT reach beyond the K-1142 audit (no envelope drift on
+# unaudited cells).  Mix of (a) E1 N-axis miss, (b) E1 K-axis miss,
+# (c) carve-out M-floor miss, (d) carve-out fires but cell is wider than
+# E1 — they all must fire False under R_K1142_E1_route_to_hbl.
+K931_NEIGHBOURS_OUT_OF_E1 = [
+    ("N01",  1024, 2048, 1240),  # K=1240 outside E1 K-set
+    ("N02",  2304, 2048, 4800),  # K=4800 outside E1 K-set (S04)
+    ("N03",   768, 1792, 5972),  # K=5972 outside (S17)
+    ("N04",  1024, 2048, 6016),  # K=6016 outside (S22)
+    ("N05",   768, 3072, 4480),  # K=4480 outside (S21)
+    ("N06",   512,  192, 2048),  # N=192 outside E1 N-set (S10)
+    ("N07",    30, 786432, 200), # N=786432 outside (S36)
+    ("N08",   256, 1792, 2048),  # K=2048 outside (S05)
+    ("N09",   736, 1792,  736),  # K=736 outside (S06)
+    ("N10",  1024, 2048, 8064),  # K=8064 outside (S23)
+]
+
+
+@pytest.mark.parametrize("sid,M,N,K,src", K1121_ANCHORS_13,
+                         ids=[c[0] for c in K1121_ANCHORS_13])
+def test_k1142_e1_fires_on_k1121_anchors(sid, M, N, K, src):
+    """Every K-1121 strict-equality anchor must fire under the
+    productionised K-1142 E1 envelope predicate so K-1151 ships the same
+    route-OUT verdicts that K-1121's strict-equality table produced at
+    paired n=30."""
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is True, (
+        f"K-1142 E1 missed K-1121 anchor {sid} ({M},{N},{K}) — "
+        f"productionisation regression: K-1121 paired-n=30 verdict not preserved")
+
+
+@pytest.mark.parametrize("fid,M,N,K,hbl_over_tb,note", K1142_INVERSE_PRED_FPS,
+                         ids=[c[0] for c in K1142_INVERSE_PRED_FPS])
+def test_k1142_e1_excludes_inverse_predicate_fps(fid, M, N, K, hbl_over_tb, note):
+    """Both K-1142 inverse-predicate false positives must be EXCLUDED by
+    the productionised E1 predicate — they sit inside E1 by N/K but fail
+    the M >= 4480 carve-out (K-1142 §5).  Re-admitting either cell
+    silently re-introduces the K-1142 paired-n=30 FP and is a regression
+    of the K-1151 brief's "no cell regresses >2%" gate (FP1 is the −2.7%
+    case)."""
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is False, (
+        f"K-1142 inverse-predicate FP {fid} ({M},{N},{K}) hbl/tb={hbl_over_tb} "
+        f"would be re-admitted ({note}) — K-1142 carve-out violated")
+    # is_k1121_e1_admit_safe is the symmetric guardrail
+    assert is_k1121_e1_admit_safe(M, N, K, torch.bfloat16) is False, (
+        f"is_k1121_e1_admit_safe should reject K-1142 FP {fid}")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1131_E1_ADMIT_CANDIDATES,
+                         ids=[c[0] for c in K1131_E1_ADMIT_CANDIDATES])
+def test_k1142_e1_fires_on_k1131_admit_candidates(cid, M, N, K):
+    """K-1131 held-out neighbour validation confirmed these cells as
+    HBL-WIN at paired n=30; the productionised E1 envelope must continue
+    to route them OUT for the K-1142 +3.23% geomean uplift to land."""
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is True, (
+        f"K-1131 E1 admit candidate {cid} ({M},{N},{K}) not routed OUT — "
+        f"loses K-1142 K-931 ∩ E1 cohort uplift")
+
+
+@pytest.mark.parametrize("nid,M,N,K", K931_NEIGHBOURS_OUT_OF_E1,
+                         ids=[c[0] for c in K931_NEIGHBOURS_OUT_OF_E1])
+def test_k1142_e1_does_not_reach_beyond_envelope(nid, M, N, K):
+    """K-931 always-uncovered cells OUTSIDE E1 must NOT be routed by the
+    productionised E1 predicate — pins K-1151 to the K-1142 audit scope
+    so no unaudited cell silently inherits a route-OUT verdict."""
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is False, (
+        f"K-1142 E1 reached beyond audited envelope on {nid} ({M},{N},{K})")
+
+
+def test_k1142_e1_is_bf16_only():
+    """fp16 / fp32 / int8 must all short-circuit to False — K-1142 audit
+    scope is bf16-only (mirrors K-1121 / K-1051 / K-1031 ground truth).
+    The K-1093 fp16 cohort is governed by its own strict-equality table."""
+    M, N, K = 14208, 2048, 1024  # S29 — would fire under bf16
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is True
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.float16) is False
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.float32) is False
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.int8) is False
+
+
+def test_k1142_e1_carveout_floors_match_kb_constants():
+    """Pin K-1142's published carve-out floors so a future PR cannot
+    silently relax them.  The M-floor is the load-bearing axis (anchor
+    minimum 4480 = S24's M); the K-floor is structural (E1's K-axis lower
+    bound) and excludes nothing in the K-1142 audit per §5.1."""
+    assert K1142_E1_M_FLOOR == 4480
+    assert K1142_E1_K_FLOOR == 256
+    assert K1142_E1_NS == frozenset({1792, 2048, 3072})
+    assert K1142_E1_KS == frozenset({256, 768, 1024})
+
+
+def test_k1142_e1_supersedes_p6_admit_on_s24_s29():
+    """K-1121 pivot — direct hipBLASLt route-OUT supersedes K-1037 P6
+    in-kernel admission for the 13-cell MFMA-issue-stall cohort.  Pre-K-1151
+    the K-1037 P6 admit gate would intercept S24 (envelope B) and S29
+    (envelope A) and dispatch them in-kernel with wpeu=1.  Under K-1151,
+    the K-1142 E1 envelope is consulted FIRST and routes both cells OUT
+    to hipBLASLt at the K-1121 paired-n=30-confirmed speedup.
+
+    Pin both halves: the P6 admit gate still fires structurally (so its
+    NULL-RESULT pin tests above remain valid), but the full-dispatch
+    decision routes OUT regardless because E1 short-circuits first."""
+    # P6 admit still classifies S24 / S29 as positives at the structural level
+    assert R_K1037_P6_admit_wpeu1( 4480, 3072,  768, torch.bfloat16) is True   # S24
+    assert R_K1037_P6_admit_wpeu1(14208, 2048, 1024, torch.bfloat16) is True   # S29
+    # E1 also fires
+    assert R_K1142_E1_route_to_hbl( 4480, 3072,  768, torch.bfloat16) is True
+    assert R_K1142_E1_route_to_hbl(14208, 2048, 1024, torch.bfloat16) is True
+    # Full dispatch routes OUT (E1 wins over P6 admit per K-1151 ordering)
+    assert _k971_route_to_hbl(
+         4480, 3072,  768, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
+    assert _k971_route_to_hbl(
+        14208, 2048, 1024, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
+
+
+@pytest.mark.parametrize("sid,M,N,K,src", K1121_ANCHORS_13,
+                         ids=[c[0] for c in K1121_ANCHORS_13])
+def test_full_dispatch_routes_k1121_anchors_out(sid, M, N, K, src):
+    """End-to-end dispatch: every K-1121 anchor routes OUT to hipBLASLt
+    via the productionised E1 envelope (regardless of which lower-priority
+    predicate would have caught it).  This is the K-1151 functional
+    contract — the K-1121 paired-n=30 verdicts are preserved without
+    needing the 13-row strict-equality K971_ROUTE_TABLE extension."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
+
+
+@pytest.mark.parametrize("fid,M,N,K,hbl_over_tb,note", K1142_INVERSE_PRED_FPS,
+                         ids=[c[0] for c in K1142_INVERSE_PRED_FPS])
+def test_full_dispatch_does_not_route_k1142_fps(fid, M, N, K, hbl_over_tb, note):
+    """End-to-end dispatch: neither K-1142 inverse-predicate FP routes
+    OUT — the productionised E1 carve-out keeps them in-kernel where
+    paired-n=30 evidence shows tritonblas is not slower (FP1) or wins by
+    a tie-band 1.5% margin (FP2).  Failure here means K-1151 has
+    regressed the K-1151 brief's "no cell regresses >2%" gate."""
+    routed = _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    # FP1/FP2 are NOT in any other route-OUT predicate either (they fail
+    # P5 K-floor 512, fail P6 envelopes, are absent from K971_ROUTE_TABLE).
+    assert routed is False, (
+        f"K-1142 FP {fid} ({M},{N},{K}) routed OUT despite carve-out "
+        f"({note}) — K-1151 regression gate violated")
+
+
+def test_is_k1121_e1_admit_safe_accepts_every_k1121_anchor():
+    """Symmetric coverage to test_k1142_e1_excludes_inverse_predicate_fps:
+    the helper must return True for every K-1121 anchor so any future
+    structural-relaxation PR can use it as a unit-test guard without
+    chasing false negatives."""
+    for sid, M, N, K, _src in K1121_ANCHORS_13:
+        assert is_k1121_e1_admit_safe(M, N, K, torch.bfloat16) is True, (
+            f"is_k1121_e1_admit_safe rejected K-1121 anchor {sid} "
+            f"({M},{N},{K}) — false positive in the guardrail")
+
+
+def test_is_k1121_e1_admit_safe_outside_envelope_silent():
+    """Cells OUTSIDE E1 are out of K-1142 audit scope and the helper
+    must return True (silent) — the helper only flags cells inside E1
+    that fail the carve-out, so future productionisers can use it as a
+    drop-in admit gate without false rejections elsewhere."""
+    # K-984/K-989 LAND anchors outside E1 (e.g. K not in {256,768,1024}).
+    assert is_k1121_e1_admit_safe(2304, 2048, 4800, torch.bfloat16) is True  # S04
+    assert is_k1121_e1_admit_safe(1024, 2048, 1240, torch.bfloat16) is True  # S40
+    # Non-bf16 — out of audit scope.
+    assert is_k1121_e1_admit_safe(256, 2048, 256, torch.float16) is True
+
+
+def test_k1142_e1_does_not_leak_on_k950_land():
+    """K-950 LAND set must not leak through the productionised E1
+    predicate.  L04 = (768, 2048, 1024, bf16) is the only K-950 cell
+    inside the E1 N/K envelope; the M=4480 carve-out (K-1142 §5)
+    excludes it cleanly with margin 768 → 4480 = 3712.  This test pins
+    that exclusion so any future relaxation of the M-floor immediately
+    surfaces in CI (it would re-introduce a K-950 LAND leak)."""
+    for cid, M, N, K, dtype, cohort in K950_LAND_CELLS:
+        if str(dtype) != "torch.bfloat16":
+            continue
+        assert R_K1142_E1_route_to_hbl(M, N, K, dtype) is False, (
+            f"K-1142 E1 leaked into K-950 LAND cell {cid} "
+            f"({M},{N},{K}) {dtype} cohort={cohort}")

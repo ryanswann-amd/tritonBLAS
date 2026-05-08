@@ -307,6 +307,114 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# K-1151 (S-002): productionisation of the K-1142 E1 axis-aligned envelope
+# with the K-1142 minimum two-axis carve-out as a hipBLASLt route-OUT
+# predicate.  Replaces what would otherwise be a 13-row strict-equality
+# extension to ``K971_ROUTE_TABLE`` (the K-1121 lineage) with a single
+# 4-axis structural predicate that
+#
+#   1. routes-OUT every K-1121 anchor (13/13 — paired n=30 K-1142 verdict),
+#   2. routes-OUT the 2 K-1127 HBL-leaning E1 cells found by K-1131,
+#   3. excludes the 2 K-1142 inverse-predicate FPs (FP1=256x2048x256,
+#      FP2=2048x1792x256) at margin 0 to the K-1121 anchor set, and
+#   4. is collinear with the K-1037 P6 admit verdict on S24 / S29 — the
+#      E1 route-OUT is consulted BEFORE P6 admit so the K-1121 pivot
+#      ("direct hipBLASLt route-OUT supersedes the K-1037 P6 in-kernel
+#      admission for the 13-cell MFMA-issue-stall cohort") is preserved.
+#
+# Envelope:
+#     E1 := { (M, N, K, bf16) :
+#             N in {1792, 2048, 3072} AND
+#             K in {256, 768, 1024} }
+# Carve-out (K-1142 §5):
+#     (M >= 4480) AND (K >= 256)
+#         M-floor 4480 = K-1121 anchor S24's M (margin 0); excludes
+#             FP1 (M=256) and FP2 (M=2048) cleanly.
+#         K-floor 256 = K-1121 anchor S37/S39's K; excludes nothing in
+#             this audit but pins the predicate inside E1's K-axis lower
+#             bound for envelope-relativity (per K-1142 §5.1).
+#
+# Independent gfx950 reconfirmation: K-1143 paired n=30 on rainier MI355X
+# preserves 32/32 verdicts (CI95-lower 1.21x-1.92x) so this productionisation
+# ships universally on gfx942 AND gfx950 without an arch-gate.
+# ---------------------------------------------------------------------------
+K1142_E1_NS = frozenset({1792, 2048, 3072})
+K1142_E1_KS = frozenset({256, 768, 1024})
+K1142_E1_M_FLOOR = 4480
+K1142_E1_K_FLOOR = 256
+
+
+def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
+    """K-1151 / K-1142 productionised E1 envelope route-OUT predicate.
+
+    Returns True iff (M, N, K, bf16) sits inside the K-1142 envelope E1
+    AND clears the K-1142 minimum two-axis carve-out — i.e. the cell is
+    one a future productioniser of the K-1121 strict-equality set should
+    route OUT to hipBLASLt without re-introducing either of the two
+    K-1142-confirmed inverse-predicate false positives.
+
+    Coverage relative to the K-1121 lineage:
+        * 13/13 K-1121 strict-equality anchors fire True
+          (S18, S24, S25, S26, S29, S30, S31, S32, S33, S34, S35, S37, S39).
+        * 2/2 K-1127 HBL-leaning E1 admit candidates (validated by K-1131
+          held-out neighbour tests) fire True.
+        * 2/2 K-1142 inverse-predicate FPs fire False
+          (FP1=(256,2048,256), FP2=(2048,1792,256)) — both excluded by the
+          M >= 4480 carve-out.
+
+    bf16-only by design (matches K-1051 / K-1031 / K-1121 / K-1142 ground
+    truth scope; the K-1093 fp16 cohort is governed independently by its
+    own strict-equality table).
+
+    Composition with the K-1037 P6 admit gate: callers MUST consult this
+    predicate BEFORE ``R_K1037_P6_admit_wpeu1``.  The K-1121 pivot
+    documents that P6's wpeu=1 in-kernel admission is structurally
+    dominated by hipBLASLt for these 13 anchors at paired n=30; the same
+    dominance extends to the two K-1131 HBL-leaning neighbours inside E1.
+    """
+    if not _dtype_is_bf16(dtype):
+        return False
+    if N not in K1142_E1_NS:
+        return False
+    if K not in K1142_E1_KS:
+        return False
+    # K-1142 §5 carve-out: M-floor at the K-1121 anchor minimum (4480) is
+    # the load-bearing axis; the K-floor pins the predicate inside E1's
+    # K-axis lower bound (purely structural, excludes nothing in audit).
+    if M < K1142_E1_M_FLOOR:
+        return False
+    if K < K1142_E1_K_FLOOR:
+        return False
+    return True
+
+
+def is_k1121_e1_admit_safe(M: int, N: int, K: int, dtype) -> bool:
+    """K-1142 productionisation guardrail (helper).
+
+    Returns True if (M, N, K, dtype) is **safe** to admit under any future
+    structural relaxation that widens K-1121 toward E1 — i.e. the cell is
+    NOT one of the two K-1142-confirmed inverse-predicate false positives.
+
+    Equivalent to::
+
+        not (E1.contains(cell) and not carveout.passes(cell))
+
+    The function is exposed for unit-test use by any future PR that
+    proposes a structural relaxation of the K-1142 carve-out: admitting a
+    cell where ``is_k1121_e1_admit_safe`` returns False will silently
+    re-introduce one of the K-1142 paired-n=30 FPs and is rejected by
+    the K-1151 regression suite.
+    """
+    if not _dtype_is_bf16(dtype):
+        return True  # non-bf16 is out of K-1142's audited scope
+    if N not in K1142_E1_NS or K not in K1142_E1_KS:
+        return True  # outside E1 envelope — audit is silent
+    if M >= K1142_E1_M_FLOOR and K >= K1142_E1_K_FLOOR:
+        return True  # passes K-1142 carve-out
+    return False
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -316,14 +424,25 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     (predicate + strict-equality + streamk/work-stealing/dtype carve-outs)
     without monkey-patching ``os.environ``.
 
+    K-1151: K-1142 E1 envelope route-OUT is consulted BEFORE P6 admit so
+    the K-1121 pivot (direct hipBLASLt route-OUT supersedes the K-1037 P6
+    in-kernel admission for the 13-cell MFMA-issue-stall cohort + the 2
+    K-1131 HBL-leaning neighbours inside E1) is preserved at paired n=30.
+
     K-1089 P6 admit gate: structural surrogate of K-1037 P6 takes priority
-    over P5 route-OUT for cells in the MFMA-issue-stall fingerprint. When
-    P6 admit fires, the caller dispatches in-kernel with waves_per_eu=1.
+    over P5 route-OUT for cells in the MFMA-issue-stall fingerprint that
+    are NOT covered by the K-1142 E1 envelope. When P6 admit fires, the
+    caller dispatches in-kernel with waves_per_eu=1.
     """
     if disable_env_set:
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
+    # K-1151: K-1142 E1 productionisation precedes the K-1089 P6 admit gate
+    # so K-1121 anchors S24 / S29 (which P6 would otherwise admit back to
+    # in-kernel) route-OUT to hipBLASLt at paired-n=30-confirmed speedup.
+    if R_K1142_E1_route_to_hbl(int(M), int(N), int(K), a_dtype):
+        return True
     # K-1089: P6 admit overrides P5 route-OUT for MFMA-stall structural
     # signature; cells fall through to in-kernel dispatch.
     if R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype):

@@ -26,6 +26,7 @@ from ._route_predicate import (
     K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
+    R_K1142_E1_route_to_hbl as _R_K1142_E1_route_to_hbl,
 )
 
 
@@ -42,6 +43,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    # K-1151 (S-002): K-1142 E1 envelope productionisation precedes the
+    # K-1089 P6 admit gate so the K-1121 13-cell MFMA-issue-stall cohort
+    # (and the 2 K-1131 HBL-leaning E1 neighbours) route-OUT to hipBLASLt
+    # rather than admitting back to in-kernel via P6.  The K-1142 carve-out
+    # (M >= 4480, K >= 256) excludes the two paired-n=30 inverse-predicate
+    # FPs (FP1=256x2048x256, FP2=2048x1792x256) at margin 0 to anchors.
+    if _R_K1142_E1_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
     # K-1089 (S-002): R-K1037 P6 structural surrogate admits MFMA-issue-stall
     # cells back to in-kernel dispatch with waves_per_eu=1 (set in the
     # persistent dispatch path below). When P6 admits, route-OUT (P5 + the

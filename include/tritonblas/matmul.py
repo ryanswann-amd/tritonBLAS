@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,26 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-967 [S-002] — DO-NOT-LAND prototype (NO-LAND verdict 2026-05-08).
+# Tested whether K-888's wpeu=1 lever transfers from K-850 N2 mid-square
+# (LDS port contention) to K-931 MFMA-issue-stall (top-1: S29 14208x2048x1024
+# bf16, waves/CU=11.79, MFMA% ratio 0.72x). Result: paired n=10 round-robin
+# speedup 0.994x, CI95 [-1.47%, +0.58%] — falsified. Bottleneck class label
+# predicts sign: occupancy regulation only helps when the secondary pressure
+# is memory-port contention, not MFMA pipeline issue rate. Default OFF
+# (TB_K967_PROTO=0); do NOT enable without a fresh PMC re-validation.
+_TB_K967_MFMA_CELLS = frozenset([(14208, 2048, 1024)])
+
+def _tb_k967_overrides(M, N, K, dtype):
+    if os.environ.get("TB_K967_PROTO", "0") not in ("1", "true", "TRUE", "on", "ON"):
+        return None
+    if dtype is not torch.bfloat16:
+        return None
+    if (int(M), int(N), int(K)) not in _TB_K967_MFMA_CELLS:
+        return None
+    return 1  # waves_per_eu = 1 (reduce co-resident waves on MFMA-issue-bound cell)
 
 
 
@@ -101,6 +122,11 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-967: env-gated waves_per_eu override on MFMA-issue-stall cohort.
+    _k967_wpeu = _tb_k967_overrides(M, N, K, a.dtype)
+    if _k967_wpeu is not None:
+        waves_per_eu = _k967_wpeu
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

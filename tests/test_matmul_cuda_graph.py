@@ -106,3 +106,70 @@ def test_lru_eviction():
             f"expected cache bounded to 3, got {len(_matmul_mod._graph_cache)}"
     finally:
         _matmul_mod._GRAPH_CACHE_MAXSIZE = saved
+
+
+def test_out_dtype_mismatch_on_cache_hit_raises():
+    """If a caller passes `out=` on a cache HIT with a dtype that differs from
+    the captured static_out, the silent copy_() back would either raise deep
+    in PyTorch with a confusing error or implicitly cast.  We check it
+    explicitly with a clear message."""
+    M, N, K = 16, 128, 128
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    # Prime the cache with fp16 output.
+    _ = tritonblas.matmul(a, b, use_cuda_graph=True)
+    assert len(_matmul_mod._graph_cache) == 1
+    # Cache HIT with fp32 out= -- must raise, not silently downcast.
+    bad_out = torch.empty(M, N, dtype=torch.float32, device="cuda")
+    with pytest.raises(RuntimeError, match="dtype"):
+        tritonblas.matmul(a, b, out=bad_out, use_cuda_graph=True)
+
+
+def test_out_shape_mismatch_on_cache_hit_raises():
+    """Shape mismatch on cache hit must raise with a clear message rather
+    than silently broadcasting in the final copy_()."""
+    M, N, K = 16, 128, 128
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    _ = tritonblas.matmul(a, b, use_cuda_graph=True)
+    bad_out = torch.empty(M, N + 1, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="shape"):
+        tritonblas.matmul(a, b, out=bad_out, use_cuda_graph=True)
+
+
+def test_graph_perf_regression_tiny_shape():
+    """PRD success criterion: the graph replay path must deliver a meaningful
+    speedup over the non-graph path on the named tiny shape (M=16,N=128,K=128).
+    A regression that silently disables capture (e.g. gate flipped, fall-through
+    bug, replay failing back to the slow path) would let the tiny-cohort win
+    silently regress -- this assertion bounds that risk.
+
+    Conservative bar of 3x: observed graph_speedup is ~8x on MI300X at the time
+    of the patch; 3x leaves headroom for jitter on shared CI runners while still
+    being well above the 1.0x noise floor (and the 0.55x ratio-vs-hipBLASLt bar
+    in the PRD requires ~7-8x over the non-graph baseline anyway)."""
+    M, N, K = 16, 128, 128
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+
+    def _time(fn, n_warm=20, n_iter=200):
+        for _ in range(n_warm):
+            fn()
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(n_iter):
+            fn()
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) * 1000.0 / n_iter  # us
+
+    t_normal = _time(lambda: tritonblas.matmul(a, b))
+    t_graph = _time(lambda: tritonblas.matmul(a, b, use_cuda_graph=True))
+    speedup = t_normal / t_graph
+    assert speedup >= 3.0, (
+        f"graph fast path regressed: speedup={speedup:.2f}x "
+        f"(t_normal={t_normal:.2f}us, t_graph={t_graph:.2f}us); "
+        f"expected >= 3x on tiny shape (M={M},N={N},K={K})"
+    )

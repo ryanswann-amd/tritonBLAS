@@ -144,6 +144,14 @@ def _graph_replay_matmul(a: torch.Tensor, b: torch.Tensor,
     risk of returning the captured buffer directly: any caller that holds
     the result across a subsequent call (accumulating into a list, async
     use, retaining for backward) would otherwise see their data mutated.
+
+    The cache key is keyed on inputs only (shape, dtype, stride, device,
+    streamk, work_stealing) -- output shape/stride is a deterministic
+    function of inputs.  When the caller supplies `out=`, we explicitly
+    validate that its shape/dtype/device match the captured static_out
+    buffer; a silent shape/dtype mismatch in the copy_() back to `out`
+    would either raise deep in PyTorch with a confusing message or, worse,
+    succeed via implicit broadcast/cast.
     """
     global _graph_replay_calls
     _graph_replay_calls += 1
@@ -162,13 +170,41 @@ def _graph_replay_matmul(a: torch.Tensor, b: torch.Tensor,
     else:
         _graph_cache.move_to_end(key)  # mark MRU
 
+    static_out = entry["static_out"]
+
+    # Validate caller-supplied `out=` against the captured static_out
+    # buffer.  Cache key only covers inputs, so a caller passing an
+    # incompatible out= on a cache hit would silently misbehave in
+    # the final copy_() back -- catch it explicitly with a clear error.
+    if out is not None:
+        if out.shape != static_out.shape:
+            raise RuntimeError(
+                f"tritonblas.matmul(use_cuda_graph=True): out= shape "
+                f"{tuple(out.shape)} does not match expected output shape "
+                f"{tuple(static_out.shape)}"
+            )
+        if out.dtype != static_out.dtype:
+            raise RuntimeError(
+                f"tritonblas.matmul(use_cuda_graph=True): out= dtype "
+                f"{out.dtype} does not match captured output dtype "
+                f"{static_out.dtype} for this (shape, input-dtype) cache entry. "
+                f"Call clear_graph_cache() if you need to re-capture with a "
+                f"different output dtype."
+            )
+        if out.device != static_out.device:
+            raise RuntimeError(
+                f"tritonblas.matmul(use_cuda_graph=True): out= device "
+                f"{out.device} does not match captured device "
+                f"{static_out.device}"
+            )
+
     # Copy live inputs into the captured static buffers, then replay.
     entry["static_a"].copy_(a)
     entry["static_b"].copy_(b)
     entry["graph"].replay()
     if out is None:
-        out = torch.empty_like(entry["static_out"])
-    out.copy_(entry["static_out"])
+        out = torch.empty_like(static_out)
+    out.copy_(static_out)
     return out
 
 

@@ -26,6 +26,30 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# Narrow guarded override (K-912, validated by K-888 on c42/MI300X gfx942):
+# waves_per_eu=1 on the K-850 N2 mid-square fp16 mechanistic class. Lower
+# co-resident wave count cuts TCP/LDS port contention (MemUnitBusy −17.2%,
+# MemUnitStalled −14.9% PMC); kernel binary is bit-identical so the gain is
+# pure occupancy-regulation. K-888 ablation proved Triton-AMD schedule_hint
+# is a no-op on this kernel, so we do NOT set sched_hint. Geomean ON/OFF =
+# 1.047× across 4 cells, 100% paired-iter wins (n=30 HIP-graph kernel-only).
+# EXACT (M,N,K,dtype) match per K-883/K-891 — no range gates.
+_K912_WPEU1_FP16_CELLS = frozenset({
+    (3072, 3072, 4096),
+    (3072, 3072, 8192),
+    (4096, 4096, 4096),
+    (4096, 4096, 8192),
+})
+
+
+def _k912_wpeu1_override(M, N, K, a_dtype, b_dtype):
+    return (
+        a_dtype == torch.float16
+        and b_dtype == torch.float16
+        and (M, N, K) in _K912_WPEU1_FP16_CELLS
+    )
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -101,6 +125,11 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-912 narrow gate: only the persistent_matmul kernel (non-WS path)
+    # was validated by K-888; do not extend to ws_persistent_matmul.
+    if not work_stealing and _k912_wpeu1_override(M, N, K, a.dtype, b.dtype):
+        waves_per_eu = 1
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

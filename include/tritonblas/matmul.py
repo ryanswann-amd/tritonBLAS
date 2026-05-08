@@ -19,21 +19,41 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 # (M==N==1024, K>=16384, dtype in {fp16,bf16}). K-905 mechanistically
 # root-caused this cohort as LDS-bound on the persistent kernel
 # (SQ_LDS_BANK_CONFLICT 8.39 M cyc/disp vs hipBLASLt 0; SQ_WAIT_INST_LDS
-# 41x hipBLASLt). The brief specified BLK_K=128 to halve ds_read iters per
-# K-step, but Origami already picks BLK_K=256 on this cohort (the LDS-cap
-# ceiling), so widening BK further is structurally infeasible. The real
-# remaining lever is the ds_read WIDTH itself: kpack=2 packs adjacent K
-# elements so the Triton-AMD AMD backend lowers each LDS load to a single
-# ds_read_b128 instead of two ds_read_b64 — halving the ds_read instruction
-# count at the same byte volume (per K-580 / K-905 R5 ISA fingerprint).
-# num_stages=2 is pinned as the smallest LDS double-buffer footprint
-# (matches the existing Origami pick on cohort A; pinned defensively in
-# case Origami drifts to NS=3 which would 2x the LDS footprint and revive
-# the bank-conflict pressure).
-# Default-on; set TB_K923_DISABLE=1 to bypass for rollback / A/B comparison.
+# 41x hipBLASLt).
+#
+# Mechanism (verified under rocprofv2 on the anchor cell 1024x1024x16384 bf16):
+#   - kpack=2 packs adjacent K elements so the Triton-AMD backend lowers
+#     each LDS load to a single ds_read_b128 instead of two ds_read_b64
+#     on gfx942 fp16/bf16 — halving the ds_read instruction count at the
+#     same byte volume.
+#   - num_stages=2 pins the smallest LDS double-buffer footprint (matches
+#     the existing Origami pick on cohort A; pinned defensively in case
+#     Origami drifts to NS=3 which would 2x the LDS footprint and revive
+#     bank-conflict pressure).
+#   - SQ_LDS_BANK_CONFLICT  8.39M -> 4.19M cyc/disp (HALVED)
+#   - SQ_WAIT_INST_LDS     36.80M -> 17.93M cyc/disp (HALVED)
+# Origami already picks BLOCK_SIZE_K=256 on this cohort (LDS-cap ceiling),
+# so the brief's BK widening is structurally infeasible.
+#
+# OPT-IN BY DEFAULT: end-to-end paired n=30 hot-cache HIP-graph timing on
+# c42/MI300X showed in-cohort geomean 0.9952x vs the composite-14 baseline
+# (target was >=1.05x), with one in-cohort cell (1024x1024x24576 bf16)
+# regressing to 0.9722x. The mechanism shifts as predicted (LDS counters
+# halved) but does not translate to wall-clock speedup on every cohort
+# cell — likely because Origami's existing NS=2/BK=256 pick already
+# captures most of the available LDS headroom, leaving only kpack=2 doing
+# net work and that lever is not uniformly positive.
+#
+# The override is therefore landed as OPT-IN: set TB_K923_ENABLE=1 to
+# activate (e.g. for further A/B investigation, ISA fingerprinting,
+# downstream tuning experiments). Default behaviour is unchanged from main.
 def _k923_lds_narrow_override(M, N, K, a_dtype, BLK_K, num_stages, kpack):
-    """Returns possibly-overridden (BLK_K, num_stages, kpack) for cohort A."""
-    if os.environ.get("TB_K923_DISABLE", "0") == "1":
+    """Returns possibly-overridden (BLK_K, num_stages, kpack) for cohort A.
+
+    Off by default. Activated only when TB_K923_ENABLE=1 AND the cohort A
+    predicate (M==N==1024 AND K>=16384 AND dtype in {fp16,bf16}) matches.
+    """
+    if os.environ.get("TB_K923_ENABLE", "0") != "1":
         return BLK_K, num_stages, kpack
     if not (M == 1024 and N == 1024 and K >= 16384):
         return BLK_K, num_stages, kpack
@@ -131,8 +151,10 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # K-923 narrow LDS-pressure mitigation (cohort A). No-op for any shape
-    # outside M==N==1024, K>=16384, fp16/bf16. See _k923_lds_narrow_override.
+    # K-923 narrow LDS-pressure mitigation (cohort A). No-op unless
+    # TB_K923_ENABLE=1 AND M==N==1024, K>=16384, fp16/bf16.
+    # See _k923_lds_narrow_override docstring for the verification + opt-in
+    # rationale (in-cohort geomean did not meet the >=1.05x acceptance gate).
     BLK_K, num_stages, kpack = _k923_lds_narrow_override(
         M, N, K, a.dtype, BLK_K, num_stages, kpack
     )

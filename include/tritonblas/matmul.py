@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -21,6 +22,29 @@ from . import guarded_override as _go
 
 
 _tensor_cache = {}
+
+# ----- K-971 (extends K-930/K-905 cohort A LDS-bound route-OUT) -------------
+# Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
+# LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
+# >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
+# K-905 entries are the validated 2 keys; K-971 adds 6 mid-square / long-K
+# keys per K-913 + K-931 PMC sweep. Paired n=30 verified on c42/MI300X.
+_K971_ROUTE_TABLE = frozenset({
+    (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
+    (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
+    (1024, 1024, 32768, "torch.bfloat16"),  # K-971 (K-905 N4: hbl/off=1.73x)
+    (1024, 1024, 32768, "torch.float16"),
+    (2048, 2048, 16384, "torch.bfloat16"),  # K-971 (K-905 N2: hbl/off=1.37x)
+    (2048, 2048, 16384, "torch.float16"),
+    (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
+    (2048, 2048, 32768, "torch.float16"),
+})
+
+def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
+    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
+
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
@@ -433,6 +457,8 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        return torch.matmul(a, b)
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -492,6 +518,9 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        torch.matmul(a, b, out=out)
+        return None
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 

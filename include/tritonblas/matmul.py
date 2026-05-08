@@ -27,18 +27,23 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 # K/BLOCK_K = 256 mainloop iterations vs hipBLASLt's 32 (BLOCK_K=256 there).
 #
 # Override widens BLOCK_K from 32 to 128 (4x fewer mainloop iterations).
-# Per the K-709 8-shape ablation: gmean 2.16x lift, min 1.73x, max 2.55x,
-# 0/8 cells regress. Widening BLOCK_N (16->32) ALSO was tried and lost to
-# wider_bk-only (gmean 1.96x): collapsing N=32 into a single N-tile gives
-# up CU-level parallelism that wider-BK preserves. The predicate is
-# tightened (vs the broader K-668 envelope of N<=256, K>=1024) to the worst
-# sub-cohort only -- per K-692 lessons, single-modal-config gates must be
-# narrow enough that the override beats Origami's natural pick on every
-# in-envelope shape (avoid the K-654-class leakage pattern).
+# Per the K-709 ablation on the gated 8-shape sub-cohort (4 vars: baseline,
+# smaller_bm, smaller_ns, combined, plus production), the BLOCK_K=128 single-
+# knob override (`production`) is the only variant that beats baseline on
+# every in-envelope cell: gmean 2.16x lift, min 1.73x, max 2.55x, 0/8
+# regressions. The other three variants (smaller_bm, smaller_ns, combined)
+# all REGRESS vs baseline -- they trim a knob that isn't the bottleneck and
+# leave the 256-iteration mainloop intact.
+#
+# Widening BLOCK_N (16->32) collapses two CU-level N-tiles at N=32 into one,
+# losing parallelism, and was rejected for the same reason. The predicate is
+# intentionally tighter than the K-668 envelope (N<=256, K>=1024) per the
+# K-692 / K-654 lesson: a single-modal-config gate must beat Origami on
+# every in-envelope cell or it leaks regressions at the high-N corner.
 #
 # Kill-switch:        TRITONBLAS_DISABLE_K709=1     (disables override)
 # Ablation variants:  TRITONBLAS_K709_VARIANT in {production, baseline,
-#                       smaller_bm, smaller_ns, combined, wider_bk, wider_bn}
+#                       smaller_bm, smaller_ns, combined}
 # ---------------------------------------------------------------------------
 
 _K709_FP_DTYPES = (torch.float16, torch.bfloat16)
@@ -63,28 +68,20 @@ def _k709_should_override(M, N, K, a_dtype, b_dtype, enable_streamk):
 def _k709_apply_override(selector):
     """Mutate selector tile attrs in-place per the chosen ablation variant.
 
-    Default (production) widens BLOCK_K from 32 to 128: 4x fewer mainloop
+    `production` (default) widens BLOCK_K from 32 to 128: 4x fewer mainloop
     iterations directly addresses the dominant VALU-bound loop-overhead
-    bottleneck. Per K-709 ablation on the 8-shape cohort (M>=2048, N=32,
-    K>=4096, fp16/bf16), wider_bk gives geomean 2.16x lift (min 1.73x,
-    max 2.55x) -- never regresses within the gated envelope, and beats
-    the BK+BN combination (gmean 1.96x) because BLOCK_N=16 keeps two
-    N-tiles per row at N=32 which preserves CU-level parallelism that
-    BLOCK_N=32 collapses.
+    bottleneck. The other three variants exist solely so the 4-variant
+    ablation requested in the K-709 brief is reproducible from a single
+    binary; they are NOT shipped configs.
 
-    Other variants are kept for ablation reproducibility.
+    Selector mutation is in-place. The caller MUST guard with
+    _k709_should_override so out-of-envelope shapes are bit-identical
+    no-ops on the selector (verified by tests/test_k709_override.py).
     """
     variant = os.environ.get("TRITONBLAS_K709_VARIANT", "production").lower()
     mt = selector._result.config.mt
     if variant == "production":
         mt.k = 128
-    elif variant == "wider_bk":
-        mt.k = 128
-    elif variant in ("wider_bk_bn", "wider_bn_bk"):
-        mt.k = 128
-        mt.n = 32
-    elif variant == "wider_bn":
-        mt.n = 32
     elif variant == "smaller_bm":
         if mt.m > 16:
             mt.m = max(16, mt.m // 2)
@@ -94,7 +91,8 @@ def _k709_apply_override(selector):
         if mt.m > 16:
             mt.m = max(16, mt.m // 2)
         selector._num_stages = 1
-    # else: unknown variant -> no-op (treated as baseline)
+    # else (unknown / baseline): no-op (treated as baseline; baseline is
+    # also short-circuited earlier in _k709_should_override).
 
 
 

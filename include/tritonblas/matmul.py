@@ -26,6 +26,7 @@ from ._route_predicate import (
     K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
+    _p8_mfma_issue_stall_routeout as _R_K1144_P8_mfma_issue_stall_routeout,
 )
 
 
@@ -42,6 +43,18 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    # K-1144 (S-002): P8 MFMA-issue-stall direct hipBLASLt route-OUT for
+    # the triply-validated 25-cell envelope (13 K-1121 anchors + 12 K-1131
+    # neighbors).  Consulted BEFORE the K-1089 P6 admit so K-1121's paired
+    # n=30 measurement evidence (hipBLASLt wins on S24, S29 at ~1.20-1.22x;
+    # K-1131 N11 at >=1.15x) overrides the K-1089 envelope admit on the
+    # small subset of cells where the two envelopes overlap.  K-1074's
+    # paired n=30 LAND audit and K-1098's clause-by-clause backtest
+    # falsified the K-1089 admit on those cells; P8 codifies the
+    # correction.  No double-routing: for cells already routed OUT by P5
+    # Clause-2 / K-1062 Clause-4, P8's strict-equality match returns the
+    # same True verdict (frozenset O(1) lookup; harmless).
+    if _R_K1144_P8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1089 (S-002): R-K1037 P6 structural surrogate admits MFMA-issue-stall
     # cells back to in-kernel dispatch with waves_per_eu=1 (set in the
     # persistent dispatch path below). When P6 admits, route-OUT (P5 + the

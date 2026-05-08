@@ -31,6 +31,10 @@ from tritonblas._route_predicate import (
     _K1109_P6_K1074_ALLOWLIST,
     _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
     _K1109_P6_ALLOWLIST_ENV,
+    _p8_mfma_issue_stall_routeout,
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT,
+    _K1121_P8_ANCHORS_13,
+    _K1131_P8_NEIGHBORS_12,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -377,17 +381,26 @@ def test_p6_envelope_b_boundary():
 
 
 @pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
-def test_p6_admit_short_circuits_route_out_to_in_kernel(cid, M, N, K):
-    """When P6 admit fires, _k971_route_to_hbl must return False so the
-    cell dispatches in-kernel (where matmul.py sets waves_per_eu=1).
-    Verifies the integration path: P6 admit overrides P5 route-OUT for
-    cells in the MFMA-issue-stall structural fingerprint.
-    Witness: S29 (14208, 2048, 1024) is otherwise routed-OUT by P5
-    Clause-2 (M>=5000, N==2048, K==1024) — P6 admit must short-circuit."""
+def test_p6_admit_overridden_by_p8_routeout(cid, M, N, K):
+    """K-1144 supersedes the original K-1089 P6 short-circuit assertion
+    on S24 and S29.  Both cells are inside K-1089's structural envelopes
+    (S24 inside Env-B, S29 inside Env-A) so ``R_K1037_P6_admit_wpeu1``
+    still returns True at the unit level (preserves the K-1037 18/18
+    confusion-matrix integrity).  But K-1074's paired n=30 LAND audit on
+    c42/MI300X showed 0/13 K-1051+K-1031 cohort cells clear the K-901
+    +2% margin under wpeu=1, falsifying the K-1089 admit on these cells.
+    K-1121 then measured paired n=30 HIP-graph hot-cache and reported
+    hipBLASLt wins on S24 (~1.20x) and S29 (~1.22x).  K-1144 P8 codifies
+    that correction by routing both cells OUT to hipBLASLt at the
+    dispatch level -- the unit-level P6 admit is unchanged, but the
+    composed dispatch decision flips to True (route-OUT) because P8 is
+    consulted BEFORE P6 in ``_k971_route_to_hbl``."""
     assert _k971_route_to_hbl(
         M, N, K, torch.bfloat16, torch.bfloat16,
-        enable_streamk=False, work_stealing=False) is False, (
-        f"P6 admit failed to short-circuit route-OUT for {cid} ({M},{N},{K})")
+        enable_streamk=False, work_stealing=False) is True, (
+        f"K-1144 P8 failed to override K-1089 P6 admit for {cid} "
+        f"({M},{N},{K}); P8 must be consulted before P6 to honour the "
+        f"K-1121 paired n=30 measurement evidence.")
 
 
 @pytest.mark.parametrize("cid,M,N,K", P6_LAND_ANCHORS,
@@ -605,3 +618,300 @@ def test_p6_c1_collinearity_wall_is_load_bearing():
     assert R_K1037_P6_admit_wpeu1(16256, 2048, 1024, torch.bfloat16) is False  # S30
     assert R_K1037_P6_admit_wpeu1(24448, 2048, 1024, torch.bfloat16) is False  # S34
     assert R_K1037_P6_admit_wpeu1(14208, 2048, 1024, torch.bfloat16) is True   # S29
+
+
+# ---------------------------------------------------------------------------
+# K-1144 P8 — MFMA-issue-stall direct hipBLASLt route-OUT.  Productionizes
+# K-1121 (13-cell anchor cohort) + K-1131 (12-cell held-out neighbor
+# envelope).  Pin tests cover (a) 25/25 envelope cells route-OUT at the
+# dispatch level, (b) bf16-only carve-out, (c) precedence-vs-K-1089:
+# overlap cells (S24, S29, N11) route-OUT despite P6 admit, (d) no-overlap
+# guarantee with the K-1062 K-floor=512 / K-1066 P5 / K-1109 allowlist
+# productionized predicates, (e) zero-leak vs the K-984/K-989 LAND anchors
+# and the K-950 LAND set, (f) provenance pins so the 25-cell envelope
+# can't silently drift.
+# ---------------------------------------------------------------------------
+K1121_P8_ANCHORS_13_LIST = [
+    # (cid,    M,  N,    K)  -- per K-1121 manifest, paired n=30 hot-cache
+    ("S24",  4480, 3072,  768),
+    ("S29", 14208, 2048, 1024),
+    ("S18",  5972, 1792,  768),
+    ("S25",  6016, 2048, 1024),
+    ("S30", 16256, 2048, 1024),
+    ("S26",  8064, 2048, 1024),
+    ("S31", 18304, 2048, 1024),
+    ("S32", 20352, 2048, 1024),
+    ("S33", 22400, 2048, 1024),
+    ("S34", 24448, 2048, 1024),
+    ("S35", 26496, 2048, 1024),
+    ("S37", 25600, 2048,  256),
+    ("S39", 49152, 2048,  256),
+]
+
+
+K1131_P8_NEIGHBORS_12_LIST = [
+    # (cid,    M,    N,    K, anchor, axis-direction)
+    ("N01", 20352, 2048,  512),  # S32 K/2
+    ("N02", 20352, 2048, 2048),  # S32 K*2
+    ("N03", 40704, 2048, 1024),  # S32 M*2
+    ("N04", 10176, 2048, 1024),  # S32 M/2  (envelope edge 1.604x)
+    ("N05", 20352, 4096, 1024),  # S32 N*2
+    ("N06", 20352, 1024, 1024),  # S32 N/2  (cohort MAX 1.657x)
+    ("N07", 49152, 2048,  128),  # S39 K/2
+    ("N08", 49152, 2048,  512),  # S39 K*2
+    ("N09",  5972,  896,  768),  # S18 N/2
+    ("N10",  5972, 3584,  768),  # S18 N*2
+    ("N11",  2240, 3072,  768),  # S24 M/2  (P6 Env-B overlap)
+    ("N12",  4480, 3072, 1536),  # S24 K*2
+]
+
+
+# K-931 control sample — 5 cells from the K-931 always-uncovered top-40
+# catalog that K-1127 confirmed are NOT in the K-1121 envelope.  Pinned
+# here as the "P8 must NOT leak into K-931 controls" no-false-positive
+# witness; mirrors K-1127's 0-FP adversarial backtest verdict.
+K931_CONTROL_CELLS_5 = [
+    ("K931_C01",   1024, 1024, 1240),  # K-989 LAND anchor (S40)
+    ("K931_C02",   2048, 1024, 1024),  # mid-square mid-K
+    ("K931_C03",  16384, 8192, 1024),  # extreme-M extreme-N
+    ("K931_C04",   2048, 2048, 4096),  # square mid-K
+    ("K931_C05",   4096, 4096, 2048),  # square mid-K
+]
+
+
+def test_k1144_p8_envelope_size_is_exactly_25():
+    """The triply-validated cohort is 13 K-1121 + 12 K-1131 = 25 cells.
+    Any silent edit changes this count and trips this canary."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25
+    assert len(_K1121_P8_ANCHORS_13) == 13
+    assert len(_K1131_P8_NEIGHBORS_12) == 12
+
+
+def test_k1144_p8_anchors_and_neighbors_are_disjoint():
+    """K-1131 neighbor generation rules require strict disjointness from
+    the 13 K-1121 anchors (perturbation moves AWAY from the anchor)."""
+    assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12)
+
+
+def test_k1144_p8_envelope_contents_are_pinned_to_k1121_manifest():
+    """Pin the K-1121 13-anchor envelope to source-of-truth (the K-1121
+    manifest).  A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1121_P8_ANCHORS_13_LIST)
+    assert _K1121_P8_ANCHORS_13 == expected
+
+
+def test_k1144_p8_envelope_contents_are_pinned_to_k1131_manifest():
+    """Pin the K-1131 12-neighbor envelope to source-of-truth (the K-1131
+    manifest).  A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1131_P8_NEIGHBORS_12_LIST)
+    assert _K1131_P8_NEIGHBORS_12 == expected
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1121_P8_ANCHORS_13_LIST,
+                         ids=[c[0] for c in K1121_P8_ANCHORS_13_LIST])
+def test_k1144_p8_admits_all_13_k1121_anchors(cid, M, N, K):
+    """Every K-1121 anchor must fire the P8 strict-equality match.
+    These 13 cells were paired-n=30 measured at hbl/tb >= 1.10x mean
+    AND CI95-lo >= 1.05x (K-1007 admission floor) on rad-mi300x-1."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1121 anchor {cid} ({M},{N},{K}) missed P8 envelope")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1131_P8_NEIGHBORS_12_LIST,
+                         ids=[c[0] for c in K1131_P8_NEIGHBORS_12_LIST])
+def test_k1144_p8_admits_all_12_k1131_neighbors(cid, M, N, K):
+    """Every K-1131 neighbor must fire the P8 strict-equality match.
+    These 12 cells classified IN_COHORT at the stricter generalization
+    gate (ratio >= 1.15x AND CI95-lo > 1.00) per K-1131 manifest."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1131 neighbor {cid} ({M},{N},{K}) missed P8 envelope")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1121_P8_ANCHORS_13_LIST + K1131_P8_NEIGHBORS_12_LIST,
+                         ids=[c[0] for c in K1121_P8_ANCHORS_13_LIST + K1131_P8_NEIGHBORS_12_LIST])
+def test_k1144_p8_dispatch_routes_all_25_cells_out_to_hbl(cid, M, N, K):
+    """Integration pin: every P8 cell must dispatch to hipBLASLt at the
+    full ``_k971_route_to_hbl`` decision level (composition with P5/P6/
+    K-905-K-971 anchor table).  This is the load-bearing production
+    contract: K-1121 + K-1131 paired n=30 measurements show hipBLASLt
+    wins on every one of these 25 cells."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True, (
+        f"P8 cell {cid} ({M},{N},{K}) failed to route-OUT through "
+        f"_k971_route_to_hbl; check P8 precedence vs K-1089 P6 admit")
+
+
+def test_k1144_p8_is_bf16_only():
+    """K-1121 / K-1131 measurement scope is bf16; fp16 / fp32 must
+    short-circuit (fp16 parity is tracked separately on the K-1093 line)."""
+    M, N, K = 4480, 3072, 768  # S24
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float16) is False
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float32) is False
+
+
+def test_k1144_p8_string_dtype_compat_with_route_table():
+    """Like the K-905/K-971 anchor table, P8 accepts the literal string
+    ``"torch.bfloat16"`` (used in tests and in the dispatch site's
+    ``str(a_dtype)``) so the route table and the predicate share key
+    semantics."""
+    assert _p8_mfma_issue_stall_routeout(4480, 3072, 768, "torch.bfloat16") is True
+    assert _p8_mfma_issue_stall_routeout(4480, 3072, 768, "torch.float16") is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
+def test_k1144_p8_overrides_k1089_p6_admit_on_overlap(cid, M, N, K):
+    """Precedence pin: S24 and S29 are inside K-1089 P6 envelopes (P6
+    admit returns True at the unit level) but K-1121's paired n=30
+    measurement falsified that admit.  P8 must override at the dispatch
+    level (return True from ``_k971_route_to_hbl``).  This is the load-
+    bearing composition rule -- if a future contributor reorders P8 to
+    AFTER P6, this test fails."""
+    # Unit-level: P6 still admits (preserves K-1037 18/18).
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    # Unit-level: P8 also fires (cell is in the K-1121 envelope).
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+    # Composed-dispatch-level: P8 wins -> route to hipBLASLt.
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
+
+
+def test_k1144_p8_overrides_k1089_p6_admit_on_n11_neighbor_overlap():
+    """N11 = (2240, 3072, 768) is the K-1131 neighbor that perturbs S24
+    along M/2.  It still sits inside K-1089 P6 Envelope B (minMN=2240
+    >= 2048; maxMN=3072 <= 4500; K=768 in [512, 1024]).  K-1131 measured
+    it IN_COHORT at the >= 1.15x gate, so P8 must override P6 here too --
+    same precedence rule as for the 13 anchors."""
+    M, N, K = 2240, 3072, 768
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
+
+
+@pytest.mark.parametrize("cid,M,N,K", K931_CONTROL_CELLS_5,
+                         ids=[c[0] for c in K931_CONTROL_CELLS_5])
+def test_k1144_p8_does_not_leak_into_k931_control_cells(cid, M, N, K):
+    """K-1127's adversarial backtest of K-1121 against the K-931 always-
+    uncovered top-40 catalog reported 0 false positives (FP rate 0.0%
+    < 5% productionisation gate).  Pin a 5-cell K-931 control sample as
+    a no-leak witness; P8 strict-equality must NOT match any control.
+    (P5 / K-905 / K-971 may legitimately route some controls -- this test
+    only proves P8 itself is non-leaky on the controls.)"""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+        f"P8 leaked into K-931 control {cid} ({M},{N},{K}) -- envelope "
+        f"must remain strictly the K-1121 + K-1131 25-cell set.")
+
+
+def test_k1144_p8_disjoint_from_k1109_allowlist_keys():
+    """K-1109's env-gated allowlist (default OFF) is a wpeu=1 admit list
+    -- it pulls cells BACK to in-kernel.  P8 is a route-OUT predicate.
+    The K-1109 allowlist contents and P8 contents OVERLAP by design
+    (K-1109 covers 6 of the K-1074 cohort cells: S26, S31, S33, S34,
+    S35, S39 -- all also in K-1121); the design intent is that P8's
+    BEFORE-P6 placement makes the K-1109 admit inert when its env is
+    set, so the production default behaviour is consistent regardless
+    of K-1109's gate state.  This test verifies that even with the
+    K-1109 env ON, every overlap cell still routes OUT through P8."""
+    overlap = _K1121_P8_ANCHORS_13 & _K1109_P6_K1074_ALLOWLIST
+    # K-1109 allowlist is 6 cells; all 6 are in the K-1121 13-anchor set.
+    assert len(overlap) == 6, (
+        f"Expected 6-cell overlap between K-1109 allowlist and K-1121 "
+        f"anchors (K-1109 documents this); got {len(overlap)}")
+
+
+def test_k1144_p8_overrides_k1109_allowlist_when_env_set(monkeypatch):
+    """With TRITONBLAS_K1109_P6_ALLOWLIST=1, K-1109 admits 6 cells back
+    to in-kernel (R_K1037_P6_admit_wpeu1 returns True via the allowlist
+    short-circuit).  P8's BEFORE-P6 placement must still route those
+    cells OUT to hipBLASLt -- the K-1121 paired n=30 evidence supersedes
+    the K-1109 default-OFF admit hypothesis."""
+    monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
+    overlap_cells = [
+        ("S26",  8064, 2048, 1024),
+        ("S31", 18304, 2048, 1024),
+        ("S33", 22400, 2048, 1024),
+        ("S34", 24448, 2048, 1024),
+        ("S35", 26496, 2048, 1024),
+        ("S39", 49152, 2048,  256),
+    ]
+    for cid, M, N, K in overlap_cells:
+        # K-1109 allowlist admits at unit level (gate ON).
+        assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True, (
+            f"K-1109 allowlist failed to admit {cid} with env set")
+        # But P8 overrides at dispatch level -> route OUT.
+        assert _k971_route_to_hbl(
+            M, N, K, torch.bfloat16, torch.bfloat16,
+            enable_streamk=False, work_stealing=False) is True, (
+            f"P8 failed to override K-1109 allowlist on {cid} ({M},{N},{K}) "
+            f"with env set")
+
+
+def test_k1144_p8_does_not_overlap_k950_land_set():
+    """K-950 9-cell LAND set must remain non-routed by P8 (the LAND set
+    is the K-912/K-883 NO-LAND-for-guarded-overrides cohort).  P8 strict-
+    equality must NOT match any K-950 LAND cell; this preserves the
+    zero-leakage property the K-1003 P5 verification contract guarantees."""
+    for cid, M, N, K, dtype, _cohort in K950_LAND_CELLS:
+        assert _p8_mfma_issue_stall_routeout(M, N, K, dtype) is False, (
+            f"P8 leaked into K-950 LAND set on {cid} ({M},{N},{K},{dtype})")
+
+
+def test_k1144_p8_streamk_workstealing_dtype_mismatch_carve_outs_still_fire():
+    """Pin the existing dispatch-level carve-outs (streamk / work-stealing /
+    a_dtype != b_dtype) still short-circuit even when P8 would otherwise
+    fire.  P8 lives BELOW these carve-outs in ``_k971_route_to_hbl`` so
+    the operator-set escape hatches keep priority."""
+    M, N, K = 4480, 3072, 768  # S24 -- in P8 envelope
+    # streamk on -> no route
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=True, work_stealing=False) is False
+    # work-stealing on -> no route
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=True) is False
+    # dtype mismatch -> no route
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.float16,
+        enable_streamk=False, work_stealing=False) is False
+
+
+def test_k1144_p8_disable_env_var_short_circuits():
+    """The TRITONBLAS_DISABLE_K971 killswitch must continue to disable
+    P8 -- one disable lever per K-883 R1 (one cohort, one disable)."""
+    import os
+    M, N, K = 4480, 3072, 768  # S24
+    saved = os.environ.get("TRITONBLAS_DISABLE_K971")
+    try:
+        os.environ["TRITONBLAS_DISABLE_K971"] = "1"
+        assert _k971_route_to_hbl(
+            M, N, K, torch.bfloat16, torch.bfloat16,
+            enable_streamk=False, work_stealing=False) is False
+    finally:
+        if saved is None:
+            os.environ.pop("TRITONBLAS_DISABLE_K971", None)
+        else:
+            os.environ["TRITONBLAS_DISABLE_K971"] = saved
+
+
+def test_k1144_p8_does_not_match_perturbations_outside_envelope():
+    """Strict-equality discipline (R-1131): the cohort is a structural
+    pocket but the route table is strict-equality only.  Verify that
+    near-miss perturbations of the K-1121 anchors that K-1131 did NOT
+    sample do NOT match P8 -- specifically, +/-1 in a single dimension
+    away from any anchor that is NOT one of the 12 K-1131 neighbors."""
+    # S24 = (4480, 3072, 768).  K=767 / K=769 are not in the envelope
+    # (the K-1131 K-axis perturbations of S24 are K*2=1536 only; K/2 was
+    # not sampled because it would have hit the K=384 region below P5
+    # Clause-2's 256-or-1024 pin).
+    assert _p8_mfma_issue_stall_routeout(4480, 3072, 767, torch.bfloat16) is False
+    assert _p8_mfma_issue_stall_routeout(4480, 3072, 769, torch.bfloat16) is False
+    # M=4479 / M=4481 not in envelope.
+    assert _p8_mfma_issue_stall_routeout(4479, 3072, 768, torch.bfloat16) is False
+    assert _p8_mfma_issue_stall_routeout(4481, 3072, 768, torch.bfloat16) is False

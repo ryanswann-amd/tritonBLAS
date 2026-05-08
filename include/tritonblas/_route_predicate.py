@@ -307,6 +307,163 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# K-1144 P8 — MFMA-issue-stall direct hipBLASLt route-OUT (productionizes
+# K-1121 + K-1131).
+#
+# Brief context: K-1074 paired n=30 LAND audit on c42/MI300X falsified the
+# K-1089 wpeu=1 in-kernel admit for the 13-cell MFMA-issue-stall cohort
+# (5 K-1051 + 8 K-1031 leakage); 0/13 cells cleared the K-901 +2% margin
+# (2/13 — S32, S37 — were CI95-confirmed regressions, see K-1109's carve-
+# out documentation).  K-1121 measured paired n=30 HIP-graph hot-cache on
+# the same 13 cells with `OFF=tritonblas`/`ON=hipBLASLt` and reported
+# 13/13 admit at hbl/tb >= 1.10x (cohort geomean 1.226x, range
+# 1.158x-1.365x; CI95-lower clears the K-1007 >=1.05x admission floor on
+# every cell).  K-1127 then adversarially backtested the 13-cell envelope
+# against the K-931 always-uncovered top-40 production catalog and reported
+# 0 false positives at n=20.  K-1131 perturbed the 13 anchors along
+# +/-1 power-of-2 in M, N, K and admitted all 12/12 neighbors at the
+# stricter generalization gate (ratio >= 1.15x AND CI95-lo > 1.00; geomean
+# 1.367x, max 1.657x, scatter 0.0%).  Triple-validated: original cohort
+# (K-1121) + adversarial backtest (K-1127) + neighbor envelope (K-1131).
+#
+# Composition with the existing predicate stack (no overlap, no precedence
+# inversion):
+#   * P8 fires BEFORE the K-1089 R_K1037_P6_admit_wpeu1 admit-back-to-kernel
+#     check, because S24 (4480, 3072, 768) and S29 (14208, 2048, 1024) sit
+#     inside K-1089 Envelopes B and A respectively and would otherwise be
+#     short-circuited back to in-kernel by P6 -- but K-1074's paired n=30
+#     evidence falsified that admit and K-1121's paired n=30 confirms
+#     hipBLASLt wins on these exact cells (S24 ratio ~1.20x, S29 ratio
+#     ~1.22x).  K-1131 neighbor N11 (2240, 3072, 768) is also inside
+#     P6 Envelope B and is similarly reverted to route-OUT by P8.  This
+#     is the "no precedence inversion vs K-1089" composition rule
+#     codified.
+#   * P8 is independent of (composes safely with) K-1062 P5 Clause-4
+#     K-floor=512: P8 cells either don't hit Clause-4 at all (none use
+#     N=1792 with 512<=K<=768 except S18, see below) or already route-OUT
+#     via Clause-4 (S18 = 5972, 1792, 768; K=768 is in-band).  Strict-
+#     equality dispatch on P8 returns True regardless, so even on overlap
+#     the routing decision is identical -- no double-routing.
+#   * P8 is also independent of K-1066 R-K979 P5 generalized clauses.
+#     Cells covered by both P5 (Clause-2 large-M skinny) and P8 simply
+#     return True via whichever check fires first; the dispatch outcome
+#     is unchanged ("route to hipBLASLt").  Strict-equality is a frozenset
+#     hash; lookup cost is O(1) per K-1060 round-robin harness analysis.
+#   * P8 is also independent of the K-1109 env-gated allowlist.  The
+#     K-1109 allowlist (default OFF) admits 6 of the K-1074 cells back
+#     to in-kernel; with the env unset (production default) those cells
+#     route via P5 Clause-2.  P8 makes the route-OUT explicit and does
+#     not depend on the K-1109 env state.  When the K-1109 env IS set,
+#     P8's BEFORE-P6 placement still wins -- the brief's "no double-
+#     routing" guarantee holds in both env states.
+#
+# Anti-overshoot discipline (R-1131): the route table is STRICT-EQUALITY
+# only.  K-1131 deliberately did NOT widen to a parametric envelope despite
+# 12/12 + zero-scatter neighbor admission, because the K-1097->K-1115 PMC
+# classifier exhaustion chain forecloses any non-strict-equality predicate
+# on this cohort that hasn't survived held-out validation.  Future shape-
+# class consolidation (R-1121.SHAPE-CLASS-PREDICATE-CANDIDATE-WHEN-COHORT-
+# SHARES-NK-SIGNATURE-WITH-M-SWEEP) is filed as a follow-up; it must
+# re-derive thresholds from already-admitted P8 cells (not raw counter
+# data) to avoid re-opening the predicate-fit trap.
+#
+# 25 cells = 13 K-1121 anchors + 12 K-1131 neighbors, all bf16.
+# K-1121 admission gate: hbl/tb >= 1.10x mean AND CI95-lo >= 1.05x (K-1007).
+# K-1131 generalization gate: ratio >= 1.15x AND CI95-lo > 1.00.
+# All cells satisfy both gates per source manifests.
+# ---------------------------------------------------------------------------
+
+# K-1121 anchors (5 K-1051 PMC counter-matrix cells + 8 K-1031 leakage
+# cohort cells).  Per-cell mean speedup (hbl/tb) annotated from K-1121's
+# paired n=30 HIP-graph hot-cache on rad-mi300x-1 / MI300X / ROCm 7.2;
+# range 1.158x-1.365x; cohort geomean 1.226x.
+_K1121_P8_ANCHORS_13 = frozenset({
+    # ----- K-1051 PMC counter-matrix cells (overlap with K-1089 P6) -----
+    ( 4480, 3072,  768, "torch.bfloat16"),  # S24  ~1.20x  (P6 Env-B overlap)
+    (14208, 2048, 1024, "torch.bfloat16"),  # S29  ~1.22x  (P6 Env-A overlap)
+    ( 5972, 1792,  768, "torch.bfloat16"),  # S18  ~1.16x  (P5 C4 K=768)
+    ( 6016, 2048, 1024, "torch.bfloat16"),  # S25  ~1.21x  (P5 C2)
+    (16256, 2048, 1024, "torch.bfloat16"),  # S30  ~1.24x  (P5 C2)
+    # ----- K-1031 leakage MFMA-issue-stall candidates -----
+    ( 8064, 2048, 1024, "torch.bfloat16"),  # S26  ~1.22x  (P5 C2)
+    (18304, 2048, 1024, "torch.bfloat16"),  # S31  ~1.27x  (P5 C2)
+    (20352, 2048, 1024, "torch.bfloat16"),  # S32  ~1.25x  (P5 C2; K-1109 carve-out)
+    (22400, 2048, 1024, "torch.bfloat16"),  # S33  ~1.21x  (P5 C2)
+    (24448, 2048, 1024, "torch.bfloat16"),  # S34  ~1.19x  (P5 C2)
+    (26496, 2048, 1024, "torch.bfloat16"),  # S35  ~1.24x  (P5 C2)
+    (25600, 2048,  256, "torch.bfloat16"),  # S37  ~1.30x  (P5 C2; K-1109 carve-out)
+    (49152, 2048,  256, "torch.bfloat16"),  # S39  ~1.37x  (P5 C2)
+})
+
+# K-1131 held-out neighbors (12 cells perturbed +/-1 power-of-2 from 4
+# representative anchors: S32 peak, S39 extreme-M / shallow-K, S18 only-
+# non-2K-N, S24 only-N=3072).  Per-cell mean speedup (hbl/tb) annotated
+# from K-1131's paired n=30 + 10k-resample paired bootstrap on rad-mi300x-1;
+# range 1.15x-1.657x; cohort geomean 1.367x; envelope-edge cells N04/N06.
+_K1131_P8_NEIGHBORS_12 = frozenset({
+    # ----- S32 (20352, 2048, 1024) family — full 6-axis coverage -----
+    (20352, 2048,  512, "torch.bfloat16"),  # N01 S32 K/2  IN_COHORT
+    (20352, 2048, 2048, "torch.bfloat16"),  # N02 S32 K*2  IN_COHORT
+    (40704, 2048, 1024, "torch.bfloat16"),  # N03 S32 M*2  IN_COHORT
+    (10176, 2048, 1024, "torch.bfloat16"),  # N04 S32 M/2  ratio 1.604x (envelope edge)
+    (20352, 4096, 1024, "torch.bfloat16"),  # N05 S32 N*2  IN_COHORT
+    (20352, 1024, 1024, "torch.bfloat16"),  # N06 S32 N/2  ratio 1.657x (cohort MAX)
+    # ----- S39 (49152, 2048, 256) family — K-axis only (extreme-M) -----
+    (49152, 2048,  128, "torch.bfloat16"),  # N07 S39 K/2  IN_COHORT
+    (49152, 2048,  512, "torch.bfloat16"),  # N08 S39 K*2  IN_COHORT
+    # ----- S18 (5972, 1792, 768) family — N-axis only (only non-2K N) -----
+    ( 5972,  896,  768, "torch.bfloat16"),  # N09 S18 N/2  IN_COHORT
+    ( 5972, 3584,  768, "torch.bfloat16"),  # N10 S18 N*2  IN_COHORT
+    # ----- S24 (4480, 3072, 768) family — M/2 + K*2 (only N=3072) -----
+    ( 2240, 3072,  768, "torch.bfloat16"),  # N11 S24 M/2  IN_COHORT (P6 Env-B overlap)
+    ( 4480, 3072, 1536, "torch.bfloat16"),  # N12 S24 K*2  IN_COHORT
+})
+
+# Composed 25-cell P8 envelope.  Anchors and neighbors are deliberately
+# kept as separate constants so reviewers (and the K-1131 manifest auditor)
+# can see provenance at a glance; the dispatch path consults the union.
+_P8_MFMA_ISSUE_STALL_ROUTEOUT = _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25, (
+    "K-1144 P8 envelope must be exactly 25 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors); a duplicate or stray entry has crept in.")
+# Cross-check: the two sub-sets must be disjoint by construction
+# (K-1131 perturbed AWAY from the K-1121 anchors).
+assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
+    "rules require strict disjointness from the 13 K-1121 anchors.")
+
+
+def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1144 P8 — direct hipBLASLt route-OUT for the triply-validated
+    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors).
+
+    Returns True iff (M, N, K, dtype) matches one of the 25 strict-equality
+    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
+    (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
+    parity is tracked separately on the K-1093 / K-1125 line).
+
+    This predicate is consulted **before** the K-1089 P6 admit-back-to-
+    kernel check inside ``_k971_route_to_hbl`` so K-1121's measurement
+    evidence (hipBLASLt wins on S24, S29 at ~1.20x, ~1.22x respectively)
+    overrides the K-1089 envelope admit for the small subset of cells
+    where the two envelopes overlap (S24 and S29 inside P6 Env-B and
+    Env-A; K-1131 N11 inside P6 Env-B).  K-1074's paired n=30 LAND audit
+    plus K-1098's clause-by-clause backtest established that the K-1089
+    admit was falsified for these cells -- P8 codifies the correction.
+
+    For cells that are NOT in any P6 envelope, P8's strict-equality match
+    is functionally identical to the existing P5 Clause-2 route-OUT
+    decision (both return True -> route to hipBLASLt).  The dispatch
+    outcome is unchanged for those cells; P8 just makes the routing
+    rationale source-of-truth attributable to the K-1121 + K-1131
+    measurement campaign rather than P5's structural pathology heuristic.
+    """
+    if not _dtype_is_bf16(dtype):
+        return False
+    return (int(M), int(N), int(K), str(dtype)) in _P8_MFMA_ISSUE_STALL_ROUTEOUT
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -316,14 +473,24 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     (predicate + strict-equality + streamk/work-stealing/dtype carve-outs)
     without monkey-patching ``os.environ``.
 
-    K-1089 P6 admit gate: structural surrogate of K-1037 P6 takes priority
-    over P5 route-OUT for cells in the MFMA-issue-stall fingerprint. When
-    P6 admit fires, the caller dispatches in-kernel with waves_per_eu=1.
+    Precedence (top-down, first match wins):
+      1. K-1144 P8 strict-equality MFMA-issue-stall route-OUT (overrides
+         K-1089 P6 admit for S24/S29/N11; identity for cells already
+         routed by P5; see _p8_mfma_issue_stall_routeout docstring).
+      2. K-1089 P6 admit gate -> in-kernel wpeu=1 dispatch (returns False
+         from this function so caller falls through to in-kernel).
+      3. K-1066 R-K979 P5 closed-form structural pathology -> hipBLASLt.
+      4. K-905 / K-971 strict-equality anchor table -> hipBLASLt.
     """
     if disable_env_set:
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
+    # K-1144: P8 (K-1121 + K-1131 measurement-validated 25-cell envelope)
+    # takes precedence over P6 admit so K-1121's paired n=30 evidence
+    # overrides K-1089 envelope admit for the S24/S29/N11 overlap.
+    if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
+        return True
     # K-1089: P6 admit overrides P5 route-OUT for MFMA-stall structural
     # signature; cells fall through to in-kernel dispatch.
     if R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype):

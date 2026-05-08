@@ -29,6 +29,7 @@ from tritonblas._route_predicate import (
     R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
     _K1109_P6_K1074_ALLOWLIST,
+    _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
     _K1109_P6_ALLOWLIST_ENV,
 )
 from tritonblas.matmul import _k971_route_to_hbl
@@ -440,16 +441,31 @@ def test_p6_does_not_admit_k1044_land_anchors(cid, M, N, K):
 # allowlist is consulted FIRST inside R_K1037_P6_admit_wpeu1 so it can admit
 # cells that fail the structural envelopes (the K-1074 cohort fails C1 by
 # design).  Default-OFF env gate: TRITONBLAS_K1109_P6_ALLOWLIST=1 to enable.
+#
+# Reviewer-consensus carve-out (4/4 REVISE votes on prior K-1109 attempt):
+# the original 8-cell K-1074 cohort had two cells with CI95-confirmed
+# regressions in the paired n=30 timing (S32, S37).  Those two are EXCLUDED
+# from the allowlist and pinned in K1074_REGRESSION_CARVE_OUT_PINS so any
+# silent re-add fails CI.  The shipped allowlist is therefore 6 cells.
 # ---------------------------------------------------------------------------
-K1074_COHORT_8 = [
+K1074_COHORT_6 = [
     ("S26",  8064, 2048, 1024),
     ("S31", 18304, 2048, 1024),
-    ("S32", 20352, 2048, 1024),
     ("S33", 22400, 2048, 1024),
     ("S34", 24448, 2048, 1024),
     ("S35", 26496, 2048, 1024),
-    ("S37", 25600, 2048,  256),
     ("S39", 49152, 2048,  256),
+]
+
+# Pinned regression evidence — keys are (cid, M, N, K, dtype),
+# values are the K-1074 paired n=30 timing measurements.  These cells must
+# stay OUT of the allowlist; if anybody re-adds them to
+# _K1109_P6_K1074_ALLOWLIST without first refuting this evidence with a
+# fresh paired backtest, K1074_REGRESSION_CARVE_OUT_PINS fails.
+K1074_REGRESSION_CARVE_OUT_PINS = [
+    # (cid,    M,  N,    K, dtype,            mean_pct, ci95_lo, ci95_hi)
+    ("S32", 20352, 2048, 1024, "torch.bfloat16",   -0.5101, -0.872,  -0.1481),
+    ("S37", 25600, 2048,  256, "torch.bfloat16",   -0.6806, -1.1294, -0.2318),
 ]
 
 
@@ -457,7 +473,7 @@ def test_p6_k1109_allowlist_contents_are_pinned():
     """The allowlist content is part of the public contract of K-1109's
     diff — pin the exact tuples so any silent edit fails CI."""
     expected = frozenset(
-        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1074_COHORT_8)
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1074_COHORT_6)
     assert _K1109_P6_K1074_ALLOWLIST == expected
 
 
@@ -467,26 +483,82 @@ def test_p6_k1109_allowlist_env_var_name_is_pinned():
     assert _K1109_P6_ALLOWLIST_ENV == "TRITONBLAS_K1109_P6_ALLOWLIST"
 
 
-@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_8,
-                         ids=[c[0] for c in K1074_COHORT_8])
+def test_p6_k1109_regression_carve_out_pins():
+    """K-1109 reviewer-consensus regression-guard.  The two K-1074 cells
+    whose paired n=30 timing showed CI95 entirely below zero (S32, S37)
+    must NEVER appear in the allowlist.  Pinning the (M,N,K,dtype) tuples
+    here as the canonical exclusion set means a future contributor who
+    silently re-adds either cell will trip both this test AND the
+    contents-pinned test above; the docstring carries the exact CI95
+    evidence so the reviewer reading the diff sees WHY.
+
+    Source: workspace output/k1109_k1074_timing.json (derived from
+    K-1074/output/rr_summary.csv, c42/MI300X HIP-graph hot-cache, n=30
+    paired)."""
+    # 1) Exclusion frozenset is correctly populated.
+    expected_exclusions = frozenset(
+        (M, N, K, dtype) for _cid, M, N, K, dtype, *_ in
+        K1074_REGRESSION_CARVE_OUT_PINS)
+    assert _K1109_P6_K1074_REGRESSION_EXCLUSIONS == expected_exclusions
+    # 2) Exclusions and allowlist are disjoint (the contract).
+    assert _K1109_P6_K1074_REGRESSION_EXCLUSIONS.isdisjoint(
+        _K1109_P6_K1074_ALLOWLIST), (
+        "REGRESSION GUARD: a K-1074 cell with CI95-confirmed regression in "
+        "paired n=30 timing was re-added to _K1109_P6_K1074_ALLOWLIST. "
+        "See the docstring on _K1109_P6_K1074_ALLOWLIST in "
+        "include/tritonblas/_route_predicate.py for the timing evidence.")
+    # 3) For each excluded cell, the recorded CI95 upper bound is below
+    #    zero — i.e. the regression evidence pinned here is real.
+    for cid, M, N, K, dtype, mean_pct, ci_lo, ci_hi in \
+            K1074_REGRESSION_CARVE_OUT_PINS:
+        assert ci_hi < 0.0, (
+            f"REGRESSION-EVIDENCE PIN: {cid} ({M},{N},{K},{dtype}) "
+            f"CI95 upper bound is {ci_hi}, expected < 0 (i.e. confirmed "
+            f"regression).  If this assertion fails because the timing was "
+            f"re-measured, the cell should also be considered for re-add to "
+            f"the allowlist.")
+
+
+@pytest.mark.parametrize("cid,M,N,K,dtype,_mean,_lo,_hi",
+                         K1074_REGRESSION_CARVE_OUT_PINS,
+                         ids=[r[0] for r in K1074_REGRESSION_CARVE_OUT_PINS])
+def test_p6_k1109_regressing_cells_never_admit_even_when_env_set(
+        cid, M, N, K, dtype, _mean, _lo, _hi, monkeypatch):
+    """Hazard pin: even with the gate flipped ON, the two K-1074 cells with
+    CI95-confirmed regressions in paired n=30 timing must NOT admit (since
+    they are not in the allowlist; this test lives next to the carve-out
+    documentation so a contributor who re-adds them sees the failing test
+    cite this exact reason)."""
+    monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"REGRESSION HAZARD: K-1074 cell {cid} ({M},{N},{K}) admitted "
+        f"into wpeu=1 route despite CI95-confirmed regression in paired "
+        f"n=30 timing.  See _K1109_P6_K1074_REGRESSION_EXCLUSIONS in "
+        f"include/tritonblas/_route_predicate.py.")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_6,
+                         ids=[c[0] for c in K1074_COHORT_6])
 def test_p6_k1109_allowlist_inert_when_env_unset(cid, M, N, K, monkeypatch):
     """Default-OFF: with the env gate unset, allowlisted cells must NOT
     admit (preserves K-1037 18/18 + K-1109 24/24 confusion-matrix integrity
     that the structural surrogate inherits).  Locks the K-1074 paired n=30
-    NULL-RESULT (0/8 LAND, 2/8 regressions) into CI as the production
-    default."""
+    NULL-RESULT (0/6 cleared the K-901 +2% LAND margin) into CI as the
+    production default."""
     monkeypatch.delenv(_K1109_P6_ALLOWLIST_ENV, raising=False)
     assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
         f"K-1109 allowlist leaked when env unset on {cid} ({M},{N},{K})")
 
 
-@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_8,
-                         ids=[c[0] for c in K1074_COHORT_8])
+@pytest.mark.parametrize("cid,M,N,K", K1074_COHORT_6,
+                         ids=[c[0] for c in K1074_COHORT_6])
 def test_p6_k1109_allowlist_admits_when_env_set(cid, M, N, K, monkeypatch):
-    """Gate-ON: with TRITONBLAS_K1109_P6_ALLOWLIST=1, all 8 K-1074 cells
-    admit.  This is the brief's "strict-equality fallback for the validated
-    8-cell set as a safety net" deliverable.  Future fresh n=30 c42/MI300X
-    backtest will determine whether this gate flips on by default."""
+    """Gate-ON: with TRITONBLAS_K1109_P6_ALLOWLIST=1, the 6 non-regressing
+    K-1074 cells admit.  This is the brief's "strict-equality fallback for
+    the validated 8-cell set as a safety net" deliverable, with the two
+    regression-confirmed cells (S32, S37) carved out per reviewer
+    consensus.  A future fresh n=30 c42/MI300X backtest will determine
+    whether this gate flips on by default."""
     monkeypatch.setenv(_K1109_P6_ALLOWLIST_ENV, "1")
     assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True, (
         f"K-1109 allowlist failed to admit gated {cid} ({M},{N},{K})")

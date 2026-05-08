@@ -100,37 +100,62 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 # K-1109 (S-002) brief deliverable (1): explicit shape-key allowlist for
-# the 8 K-1074 MFMA-issue-stall candidate cells (S26, S31-S35, S37, S39).
-# Brief asked for "minimal diff (<30 LOC) gated behind explicit shape-key
-# allowlist initially, with strict-equality fallback for the validated 8-cell
-# set as a safety net". Gated by env var (default OFF) because the only
-# paired n=30 round-robin timing on c42/MI300X available at PR time
-# (K-1074/output/rr_summary.csv) showed 0/8 cells clear the K-901 +2% LAND
-# margin and 2/8 (S32, S37) are CI95-confirmed regressions; c42 SSH was
-# unreachable at PR time so a fresh n=30 backtest is pending.  Set
-# TRITONBLAS_K1109_P6_ALLOWLIST=1 in the runtime env to enable for further
-# validation. Pin tests in tests/test_k971_route_predicate.py exercise both
-# gate states so any change to the allowlist or the gate semantics surfaces
-# in CI.
+# the K-1074 MFMA-issue-stall candidate cells (originally 8 cells: S26,
+# S31-S35, S37, S39).  Brief asked for "minimal diff (<30 LOC) gated behind
+# explicit shape-key allowlist initially, with strict-equality fallback for
+# the validated 8-cell set as a safety net".
+#
+# Gated by env var (default OFF) because the only paired n=30 round-robin
+# timing on c42/MI300X available at PR time (k1109_k1074_timing.json,
+# derived from K-1074/output/rr_summary.csv) showed 0/8 cells clear the
+# K-901 +2% LAND margin.  Set TRITONBLAS_K1109_P6_ALLOWLIST=1 in the
+# runtime env to enable for further validation.
+#
+# REGRESSION CARVE-OUT (per K-1109 reviewer consensus, 4/4 REVISE votes):
+# Two of the original 8 cells — S32 (20352,2048,1024) and S37
+# (25600,2048,256) — are CI95-confirmed REGRESSIONS in the same n=30 paired
+# timing (S32: mean -0.51%, CI95 [-0.872, -0.148]; S37: mean -0.68%, CI95
+# [-1.129, -0.232]).  Shipping a "safety net" allowlist that admits known-
+# regressing cells, even default-OFF, is a hazard not a safety net — the
+# gate exists precisely so operators can flip it on without a code change,
+# so the contents must never include cells where paired evidence already
+# proves harm.  S32 and S37 are therefore EXCLUDED.  The
+# K1074_REGRESSION_CARVE_OUT_PINS test in tests/test_k971_route_predicate.py
+# documents this with the exact CI95 numbers so any silent re-add of those
+# cells fails CI loudly.
+#
+# Pin tests exercise both gate states so any change to the allowlist or
+# gate semantics surfaces in CI.
 _K1109_P6_K1074_ALLOWLIST = frozenset({
-    ( 8064, 2048, 1024, "torch.bfloat16"),  # S26
-    (18304, 2048, 1024, "torch.bfloat16"),  # S31
-    (20352, 2048, 1024, "torch.bfloat16"),  # S32
-    (22400, 2048, 1024, "torch.bfloat16"),  # S33
-    (24448, 2048, 1024, "torch.bfloat16"),  # S34
-    (26496, 2048, 1024, "torch.bfloat16"),  # S35
-    (25600, 2048,  256, "torch.bfloat16"),  # S37
-    (49152, 2048,  256, "torch.bfloat16"),  # S39
+    ( 8064, 2048, 1024, "torch.bfloat16"),  # S26  mean +0.51%, CI95 [+0.13,+0.88]
+    (18304, 2048, 1024, "torch.bfloat16"),  # S31  mean -2.96%, CI95 [-7.06,+1.14]  (overlaps zero)
+    (22400, 2048, 1024, "torch.bfloat16"),  # S33  mean +1.34%, CI95 [-0.06,+2.75]
+    (24448, 2048, 1024, "torch.bfloat16"),  # S34  mean +0.65%, CI95 [+0.47,+0.83]
+    (26496, 2048, 1024, "torch.bfloat16"),  # S35  mean +0.77%, CI95 [-0.15,+1.69]
+    (49152, 2048,  256, "torch.bfloat16"),  # S39  mean +0.24%, CI95 [-0.18,+0.66]
+    # EXCLUDED — CI95-confirmed regressions in K-1074 paired n=30 timing:
+    #   S32 (20352,2048,1024): mean -0.51%, CI95 [-0.872, -0.148]
+    #   S37 (25600,2048, 256): mean -0.68%, CI95 [-1.129, -0.232]
 })
 _K1109_P6_ALLOWLIST_ENV = "TRITONBLAS_K1109_P6_ALLOWLIST"
+
+# Pinned regression evidence for the two cells excluded from the allowlist.
+# Re-adding either cell to _K1109_P6_K1074_ALLOWLIST without first refuting
+# this evidence will fail the K1074_REGRESSION_CARVE_OUT_PINS test.
+_K1109_P6_K1074_REGRESSION_EXCLUSIONS = frozenset({
+    (20352, 2048, 1024, "torch.bfloat16"),  # S32
+    (25600, 2048,  256, "torch.bfloat16"),  # S37
+})
 
 
 def _k1109_p6_allowlist_admit(M: int, N: int, K: int, dtype) -> bool:
     """K-1109 brief deliverable (1) — strict-equality safety-net allowlist.
 
     Returns True iff the env gate is set AND (M, N, K, dtype) is one of the
-    8 K-1074 MFMA-issue-stall candidate cells. Default-OFF; see module-level
-    docstring above the allowlist for the rationale.
+    6 K-1074 MFMA-issue-stall candidate cells whose paired n=30 timing did
+    NOT fall entirely below the zero line (S32 and S37 carved out per
+    reviewer consensus — see comment block above the allowlist). Default-OFF;
+    see module-level docstring above the allowlist for the rationale.
     """
     if os.environ.get(_K1109_P6_ALLOWLIST_ENV) != "1":
         return False

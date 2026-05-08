@@ -248,6 +248,55 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+# ---------------------------------------------------------------------------
+# K-695: FP8 e4m3fnuz tall-skinny (small-M, large-N) tile override.
+# Origami over-tiles BM and under-stages BK on this cohort, costing up to
+# 2.10x vs hipBLASLt. The override is a single (M,N,K)->(BM,NS,KP) table
+# populated from the per-shape sweep winner (see workspace
+# output/tile_table.json and output/gate_tile_table.json). Shapes whose
+# sweep winner == Origami default (vs_origami < 1.03) are intentionally
+# omitted so the predicate doesn't fire where it doesn't help; this skips
+# (16,4096,16384) and the entire (M=64,N=8192) sub-band. See K-695.
+_FP8_E4M3FNUZ = getattr(torch, "float8_e4m3fnuz", None)
+_K695_GATE_TABLE = {
+    # M=16 (8 shapes; (16,4096,16384) omitted: sweep winner == Origami default)
+    (16, 4096, 4096):   (32, 2, 1),
+    (16, 4096, 8192):   (32, 2, 1),
+    (16, 8192, 4096):   (32, 2, 1),
+    (16, 8192, 8192):   (32, 2, 1),
+    (16, 8192, 16384):  (32, 2, 1),
+    (16, 16384, 4096):  (32, 2, 1),
+    (16, 16384, 8192):  (32, 2, 1),
+    (16, 16384, 16384): (32, 2, 1),
+    # M=32 (9 shapes)
+    (32, 4096, 4096):   (32, 2, 1),
+    (32, 4096, 8192):   (32, 2, 1),
+    (32, 4096, 16384):  (32, 2, 1),
+    (32, 8192, 4096):   (32, 2, 1),
+    (32, 8192, 8192):   (32, 2, 1),
+    (32, 8192, 16384):  (32, 2, 1),
+    (32, 16384, 4096):  (32, 2, 1),
+    (32, 16384, 8192):  (32, 2, 1),
+    (32, 16384, 16384): (32, 2, 1),
+    # M=64,N=4096 (3 shapes; NS=1 because Origami picks BK=512 here)
+    (64, 4096, 4096):   (32, 1, 2),
+    (64, 4096, 8192):   (32, 1, 2),
+    (64, 4096, 16384):  (32, 1, 1),  # sweep winner is KP=1 at this K
+    # (64,8192,*) omitted: Origami already optimal on this sub-band
+    # M=64,N=16384 (3 shapes)
+    (64, 16384, 4096):  (32, 2, 1),
+    (64, 16384, 8192):  (32, 2, 1),
+    (64, 16384, 16384): (32, 2, 1),
+}
+
+
+def _k695_tile_override(M, N, K, a_dtype):
+    """Return (BM, NS, KP) override for the K-695 cohort, else None."""
+    if _FP8_E4M3FNUZ is None or a_dtype is not _FP8_E4M3FNUZ:
+        return None
+    return _K695_GATE_TABLE.get((M, N, K))
+# ---------------------------------------------------------------------------
+
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -396,8 +445,9 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
-    # K-580: select LDS swizzle config (kpack/num_warps) for bank-conflict mitigation.
-    # Defaults to (kpack=1, num_warps=8) outside the medium-K residual band.
+    # K-580/K-683: select LDS swizzle config (kpack/num_warps) for
+    # bank-conflict mitigation. Defaults to (kpack=1, num_warps=8) outside
+    # the medium-K residual band.
     _lds_cfg = select_lds_config(
         M, N, K,
         a_dtype=str(a.dtype), b_dtype=str(b.dtype), c_dtype=str(c.dtype),
@@ -409,6 +459,20 @@ def persistent_matmul_lt(
     # Outside that band, preserve K-667's kpack value (default=1, =2 on cohort).
     if _lds_cfg.kpack != 1:
         kpack = _lds_cfg.kpack
+
+    # K-695: tile override for FP8 e4m3fnuz tall-skinny cohort. LDS-fit guard
+    # falls back to Origami on the (rare) BN/BK combo where the override
+    # exceeds the 64KiB MI300X workgroup LDS budget. Applied after K-683 so
+    # the override wins on its narrow FP8 predicate (no overlap: K-683 is
+    # FP16/BF16-only).
+    _ovr = _k695_tile_override(M, N, K, a.dtype)
+    if _ovr is not None and not work_stealing:
+        _bm, _ns, _kp = _ovr
+        if _ns * (_bm * BLK_K + BLK_K * BLK_N) <= 65536:
+            BLK_M, num_stages, kpack = _bm, _ns, _kp
+            total_blocks_M = triton.cdiv(M, BLK_M)
+            total_tiles = total_blocks_M * total_blocks_N
+            total_programs = total_tiles
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

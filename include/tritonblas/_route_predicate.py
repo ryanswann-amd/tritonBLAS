@@ -52,9 +52,11 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
       Clause-3 (tb-weak / extreme aspect or tiny):
           aspect ratio max(M,N)/min(M,N) >= 100, or min(M,N) <= 192 AND
           K >= 2048 (waves under-utilised on the small axis).
-      Clause-4 (over-tile dual / N=1792 short-K):
-          N == 1792 and K <= 768, with M either large-skinny (>= 5000)
-          or in the K-984/K-989 mid-rect band [256, 2048].
+      Clause-4 (over-tile dual / N=1792 shallow-K):
+          N == 1792 and 512 <= K <= 768 (K-1031 raised the K floor from
+          0 to 512 to silence the K=256 leak surfaced by K-1017 PMCs),
+          with M either large-skinny (>= 5000) or in the K-984/K-989
+          mid-rect band [256, 2048].
 
     bf16-only: K-984/K-989 ship cohort and K-931 measurement scope are bf16;
     fp16 K-905/K-971 anchors stay in :data:`K971_ROUTE_TABLE`.
@@ -82,8 +84,8 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
         return True
     if minMN <= 192 and K >= 2048:
         return True
-    # Clause-4: N=1792 short-K dual of clause-1.
-    if N == 1792 and K <= 768 and (M >= 5000 or 256 <= M <= 2048):
+    # Clause-4: N=1792 shallow-K dual of clause-1.  K-1031 K-floor=512.
+    if N == 1792 and 512 <= K <= 768 and (M >= 5000 or 256 <= M <= 2048):
         return True
     return False
 

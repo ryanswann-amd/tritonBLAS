@@ -49,6 +49,24 @@ def _maybe_wrap(fn, probe_tensor):
 # because Python attribute-proxy overhead (~3us per dispatch via __getattr__ /
 # __slots__) consumes ~half of the +6-7% cohort lift K-451 measured. Inlining
 # avoids any proxy and preserves the full lift.
+#
+# K-569 LDS bank-conflict mitigation (refines the K-451 universal-winner):
+# K-519's 18-counter rocprofv3 capture at M=N=2048,K=512,fp16 found that the
+# K-451 winner (BLOCK_K=32, num_stages=3) suffers SQ_LDS_BANK_CONFLICT/disp
+# = 7.86e+05 (= 3.43 conflicts per LDS instr) vs 0 for hipBLASLt, driving
+# SQ_WAIT_INST_LDS 2.89x higher and kernel cycles 1.56x higher. Root cause:
+# at fp16, BLOCK_K=32 makes each LDS-tile row = 32*2 = 64 bytes = 16 banks,
+# i.e. half the 32-bank LDS port width. With an 8-warp WG, lanes 0-15 and
+# 16-31 collide on the same bank set every cycle.
+#
+# Fix: BLOCK_K 32 -> 64 widens the row to 128 B = full 32 banks (1-1 lane-
+# to-bank), eliminating the strided 2-way conflict. num_stages 3 -> 2 keeps
+# total LDS at 48 KiB (within the 64 KiB MI300X per-WG budget). Same LDS
+# footprint, but properly aligned. Doubles the per-iter MFMA count too,
+# halving the address-arithmetic VALU bloat (closing K-519's 1.36x density
+# gap toward ~1.10x). hipBLASLt achieves zero conflicts via the same BK=64
+# approach plus explicit LBSPPA/LBSPPB padding -- we inherit the alignment
+# half of that mechanism.
 _K451_COHORT_M = frozenset({1024, 2048, 4096})
 _K451_COHORT_K = frozenset({256, 512})
 _K451_COHORT_DTYPES = frozenset({torch.float16, torch.bfloat16})
@@ -111,10 +129,12 @@ def persistent_matmul_lt(
     # universal-winner config from the 5312-config sweep. Branched BEFORE the
     # Origami @property reads to skip the wasted descriptor lookups that would
     # otherwise consume ~3-4us per dispatch (half of the +7.19% cohort lift).
+    # K-569: BLK_K 32->64, num_stages 3->2 to eliminate LDS bank conflicts
+    # (see header comment). Same 48 KiB LDS footprint, alignment now 1-1.
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 256, 64
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms
@@ -254,10 +274,11 @@ def streamk_matmul_lt(
     _, N = b.shape
 
     # K-451 medium-K square fp16/bf16 cohort gate (see persistent_matmul_lt).
+    # K-569: BLK_K 32->64, num_stages 3->2 -- LDS bank-conflict mitigation.
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 256, 64
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms

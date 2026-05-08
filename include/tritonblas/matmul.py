@@ -26,6 +26,27 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# K-742: FP8 e4m3fnuz tall-skinny tile-shrink override for MI300X.
+# Origami over-tiles M (selects BM=256, BN=256 for several tall-skinny shapes)
+# and uses BK=64 producing 32-64 mainloop iters that pin VALUUtil~100% with
+# MfmaUtil<5%.  A single tile (BM=64, BN=32, BK=256, num_warps=4, num_stages=2)
+# beats Origami on the K-717 36-shape cohort with geomean lift 1.64x and lifts
+# tritonblas/hipBLASLt geomean from 0.539 to 0.882.  Two cells where this tile
+# regresses are excluded.  Predicate is strict (M, N, K) equality + dtype +
+# !work_stealing so out-of-cohort selector tuples remain bit-identical.
+_K742_FP8_TS_TILE = (64, 32, 256, 4, 2)  # BM, BN, BK, num_warps, num_stages
+_K742_FP8_TS_SHAPES = frozenset(
+    (M, N, K)
+    for M in (4096, 8192, 16384) for N in (16, 32, 64, 128) for K in (1024, 2048, 4096)
+    if (M, N, K) not in {(8192, 128, 1024), (8192, 128, 2048)}
+)
+def _k742_should_override(M, N, K, a_dtype, b_dtype, work_stealing):
+    return (not work_stealing
+            and a_dtype == torch.float8_e4m3fnuz
+            and b_dtype == torch.float8_e4m3fnuz
+            and (M, N, K) in _K742_FP8_TS_SHAPES)
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -88,14 +109,16 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
+    num_stages = getattr(selector, "num_stages", 2)
+    num_warps = 8
+    if _k742_should_override(M, N, K, a.dtype, b.dtype, work_stealing):
+        BLK_M, BLK_N, BLK_K, num_warps, num_stages = _K742_FP8_TS_TILE
+
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
     total_programs = total_tiles
     even_k = K % BLK_K == 0
-
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

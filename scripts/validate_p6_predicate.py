@@ -245,16 +245,61 @@ def phase_predicate(out_csv: Path) -> int:
 
 # ---------------------------------------------------------------------------
 # Phase 2 — paired n=20 HIP-graph bench (MI300X only).
+#
+# IMPORTANT: each (cell, arm) pair runs in a fresh subprocess to avoid the
+# K-888 / K-967 in-process Triton-cache gotcha — once Triton's autotune
+# selects a kernel for a given shape on first call, the env-flip on the
+# next call inside the same process does NOT re-trigger selection (the
+# selector caches per-shape).  K-1037 round_robin_n30 used the same
+# subprocess-per-arm protocol; this is the canonical paired methodology.
 # ---------------------------------------------------------------------------
+def _bench_one_inproc(M, N, K, dtype_name, enable_p6, n_inner) -> list[float]:
+    """Single-process kernel-only HIP-graph timing for ONE (cell, arm).
+
+    Called as a fresh subprocess by phase_paired so each arm starts with a
+    clean Triton autotune cache + fresh tritonblas module state.
+    """
+    import torch
+    DTYPE_MAP = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
+    dtype = DTYPE_MAP[dtype_name]
+    os.environ["TRITONBLAS_ENABLE_K1037_P6"] = "1" if enable_p6 else "0"
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
+    import tritonblas  # noqa: F401
+    from tritonblas import matmul as tb_matmul
+
+    a = torch.randn(M, K, dtype=dtype, device="cuda")
+    b = torch.randn(K, N, dtype=dtype, device="cuda")
+    # Warm BOTH paths so JIT compile + autotune complete before timing.
+    for _ in range(5):
+        torch.matmul(a, b)
+    for _ in range(5):
+        tb_matmul(a, b)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _ = tb_matmul(a, b)
+    torch.cuda.synchronize()
+
+    starts = [torch.cuda.Event(enable_timing=True) for _ in range(n_inner)]
+    ends   = [torch.cuda.Event(enable_timing=True) for _ in range(n_inner)]
+    for i in range(n_inner):
+        starts[i].record()
+        graph.replay()
+        ends[i].record()
+    torch.cuda.synchronize()
+    return [s.elapsed_time(e) * 1e3 for s, e in zip(starts, ends)]
+
+
 def phase_paired(out_csv: Path, n_pairs: int) -> int:
+    import json
+    import subprocess
     import torch
     if not torch.cuda.is_available():
         sys.exit("phase=paired requires CUDA / ROCm")
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
     import tritonblas  # noqa: F401
-
-    DTYPE_MAP = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
 
     BENCH_COHORT = (
         [(c, M, N, K, dt) for c, M, N, K, dt, _, _ in K1017_18CELL]
@@ -264,49 +309,54 @@ def phase_paired(out_csv: Path, n_pairs: int) -> int:
     )
     # 18 + 3 + 2 + 4 = 27 cells (>= 6 negatives requested)
 
-    def _bench(M, N, K, dtype, enable_p6: bool, n: int) -> float:
-        os.environ["TRITONBLAS_ENABLE_K1037_P6"] = "1" if enable_p6 else "0"
-        a = torch.randn(M, K, dtype=dtype, device="cuda")
-        b = torch.randn(K, N, dtype=dtype, device="cuda")
-        # warm cache + capture
-        for _ in range(5):
-            torch.matmul(a, b)  # warm hipBLASLt path too
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            from tritonblas import matmul as tb_matmul
-            _ = tb_matmul(a, b)
-        torch.cuda.synchronize()
-        starts = [torch.cuda.Event(enable_timing=True) for _ in range(n)]
-        ends   = [torch.cuda.Event(enable_timing=True) for _ in range(n)]
-        for i in range(n):
-            starts[i].record()
-            graph.replay()
-            ends[i].record()
-        torch.cuda.synchronize()
-        times_us = [s.elapsed_time(e) * 1e3 for s, e in zip(starts, ends)]
-        return float(statistics.median(times_us))
+    def _spawn(M, N, K, dt, enable_p6, n_inner) -> float:
+        """Spawn a fresh subprocess for ONE (cell, arm) sample, return median us."""
+        env = dict(os.environ)
+        env["TRITONBLAS_ENABLE_K1037_P6"] = "1" if enable_p6 else "0"
+        cmd = [
+            sys.executable, str(Path(__file__).resolve()),
+            "--bench-arm",
+            "--M", str(M), "--N", str(N), "--K", str(K),
+            "--dtype", dt,
+            "--enable-p6", "1" if enable_p6 else "0",
+            "--n-inner", str(n_inner),
+        ]
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"subprocess failed: {result.stderr[-2000:]}")
+        # Last non-empty stdout line is JSON {"median_us": ...}
+        for line in reversed(result.stdout.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                return float(json.loads(line)["median_us"])
+        raise RuntimeError(f"no median_us in subprocess output: {result.stdout[-2000:]}")
 
     rows = []
     for cid, M, N, K, dt in BENCH_COHORT:
-        dtype = DTYPE_MAP[dt]
         try:
-            off_ts = [_bench(M, N, K, dtype, enable_p6=False, n=20)
+            off_ts = [_spawn(M, N, K, dt, enable_p6=False, n_inner=20)
                       for _ in range(n_pairs)]
-            on_ts  = [_bench(M, N, K, dtype, enable_p6=True,  n=20)
+            on_ts  = [_spawn(M, N, K, dt, enable_p6=True,  n_inner=20)
                       for _ in range(n_pairs)]
-            speedup = statistics.median(off_ts) / statistics.median(on_ts)
+            off_med = statistics.median(off_ts)
+            on_med  = statistics.median(on_ts)
+            speedup = off_med / on_med
             rows.append({"cid": cid, "M": M, "N": N, "K": K, "dtype": dt,
-                         "off_us_med": statistics.median(off_ts),
-                         "on_us_med":  statistics.median(on_ts),
-                         "speedup_off_over_on": speedup})
-            print(f"{cid:12} ({M:5},{N:6},{K:5}) {dt:18}  off={off_ts[0]:.2f}us  "
-                  f"on={on_ts[0]:.2f}us  speedup={speedup:.4f}x")
+                         "off_us_med": off_med, "on_us_med": on_med,
+                         "speedup_off_over_on": speedup,
+                         "n_pairs": n_pairs, "n_inner": 20})
+            print(f"{cid:12} ({M:5},{N:6},{K:5}) {dt:18}  "
+                  f"off_med={off_med:.2f}us  on_med={on_med:.2f}us  "
+                  f"speedup={speedup:.4f}x", flush=True)
         except Exception as e:                                  # noqa: BLE001
             rows.append({"cid": cid, "M": M, "N": N, "K": K, "dtype": dt,
                          "off_us_med": float("nan"), "on_us_med": float("nan"),
                          "speedup_off_over_on": float("nan"),
+                         "n_pairs": n_pairs, "n_inner": 20,
                          "error": str(e)})
-            print(f"{cid:12} ({M:5},{N:6},{K:5}) ERROR: {e}")
+            print(f"{cid:12} ({M:5},{N:6},{K:5}) ERROR: {e}", flush=True)
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="") as f:
@@ -324,17 +374,36 @@ def phase_paired(out_csv: Path, n_pairs: int) -> int:
 
 
 def main() -> int:
+    import json
     p = argparse.ArgumentParser()
     p.add_argument("--phase",
                    choices=["predicate", "paired"],
-                   required=True)
+                   default=None)
     p.add_argument("--output", type=Path,
                    default=Path("output/p6_predicate_verdicts.csv"))
     p.add_argument("--n-pairs", type=int, default=20)
+    # Subprocess-arm hooks (called by phase_paired's per-arm spawn).
+    p.add_argument("--bench-arm", action="store_true",
+                   help="Internal: run one (cell, arm) sample as fresh subprocess")
+    p.add_argument("--M", type=int)
+    p.add_argument("--N", type=int)
+    p.add_argument("--K", type=int)
+    p.add_argument("--dtype", type=str)
+    p.add_argument("--enable-p6", type=int, default=0)
+    p.add_argument("--n-inner", type=int, default=20)
     args = p.parse_args()
+    if args.bench_arm:
+        times = _bench_one_inproc(args.M, args.N, args.K, args.dtype,
+                                  bool(args.enable_p6), args.n_inner)
+        print(json.dumps({"median_us": statistics.median(times),
+                          "n": len(times)}))
+        return 0
     if args.phase == "predicate":
         return phase_predicate(args.output)
-    return phase_paired(args.output, args.n_pairs)
+    if args.phase == "paired":
+        return phase_paired(args.output, args.n_pairs)
+    print("--phase {predicate|paired} required (or --bench-arm)", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

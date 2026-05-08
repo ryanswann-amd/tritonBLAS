@@ -114,6 +114,135 @@ class TestEstimateTritonLdsBytes:
         assert lds == lds_bf16 / 4
 
 
+class TestNS1FalseAttractorInvariant:
+    """Regression guard for K-745: codifies the LDS-estimator branch behaviour
+    that motivates the documented "NS=1 + larger BK" false attractor on the
+    K-570 large-K square FP16/BF16 cohort (MI300X / gfx942).
+
+    The NOTE in `estimate_triton_lds_bytes` documents that the ns==1 branch
+    admits BK in {128,256} at the 256x256 fp16/bf16 tile that ns==2 statically
+    rejects. A 22-tile x 18-shape paired CUDA-graph sweep on MI300X falsified
+    the resulting hypothesis (best NS=1 tile per cell regresses -13.7%..-27.6%
+    vs HEAD; the (256,256,128,NS=1) candidate is ~5x slower than HEAD).
+
+    These assertions guard the branch arithmetic the NOTE relies on so the
+    docstring cannot silently rot if the estimator math changes — if any of
+    these flip, either the NOTE must be revised or the underlying false
+    attractor has changed and the empirical sweep must be re-run.
+
+    Pure arithmetic — no GPU required.
+    """
+
+    # gfx942 LDS capacity (bytes), matches hardware.lds_capacity on MI300X.
+    GFX942_LDS = 65536
+    # FP16 / BF16 element size in bytes.
+    BYTES_FP16 = 2
+
+    def test_brief_tile_fits_at_ns1(self):
+        """The (BM=BN=256, BK=128) fp16/bf16 tile fits at NS=1 (max-branch).
+
+        max(256*128*2, 128*256*2) = 65536 — exactly the gfx942 LDS budget.
+        This is the LDS-budget arithmetic that makes the K-745 brief tile
+        look attractive on paper.
+        """
+        lds = estimate_triton_lds_bytes(
+            256, 256, 128, self.BYTES_FP16, self.BYTES_FP16, 1
+        )
+        assert lds == 65536
+        assert lds <= self.GFX942_LDS
+
+    def test_brief_tile_infeasible_at_ns2(self):
+        """The same (256,256,128) tile is INFEASIBLE_LDS at NS=2.
+
+        (2-1) * (256*128*2 + 128*256*2) = 131072 > 65536. This is why
+        Triton's NS=2 default rejects the tile and why dropping NS to 1
+        appears to "unlock" larger BK at the 256x256 geometry.
+        """
+        lds = estimate_triton_lds_bytes(
+            256, 256, 128, self.BYTES_FP16, self.BYTES_FP16, 2
+        )
+        assert lds == 131072
+        assert lds > self.GFX942_LDS
+
+    def test_origami_pick_fits_at_ns2(self):
+        """Origami's currently-shipped (256,256,64,NS=2) pick fits exactly.
+
+        (2-1) * (256*64*2 + 64*256*2) = 65536 — exactly the gfx942 LDS budget.
+        This is the HEAD pick on the M=N>=4096 sub-cohort that the NS=1 +
+        larger-BK hypothesis was attempting to displace.
+        """
+        lds = estimate_triton_lds_bytes(
+            256, 256, 64, self.BYTES_FP16, self.BYTES_FP16, 2
+        )
+        assert lds == 65536
+        assert lds <= self.GFX942_LDS
+
+    def test_ns1_halves_lds_vs_ns2_at_square_tile(self):
+        """At square BM==BN tiles: NS=1 LDS is half of NS=2 LDS.
+
+        max(A,B) = A (when A==B), and (ns-1)*(A+B) = A+B at ns=2. So the
+        NS=1 branch halves the LDS budget vs NS=2 for square tiles — the
+        "free" budget that motivated the K-745 hypothesis. Asserted across
+        the square-tile geometries that bracket the K-570 cohort.
+        """
+        for bm_bn in (128, 256):
+            for bk in (32, 64, 128, 256):
+                ns1 = estimate_triton_lds_bytes(
+                    bm_bn, bm_bn, bk, self.BYTES_FP16, self.BYTES_FP16, 1
+                )
+                ns2 = estimate_triton_lds_bytes(
+                    bm_bn, bm_bn, bk, self.BYTES_FP16, self.BYTES_FP16, 2
+                )
+                # NS=1 = max(A,B) = A; NS=2 = (ns-1)*(A+B) = A+B = 2A
+                assert ns2 == 2 * ns1, (
+                    f"({bm_bn},{bm_bn},{bk},fp16): "
+                    f"NS=2={ns2} should be 2*NS=1={ns1}"
+                )
+
+    def test_ns1_admits_bk128_at_256x256_that_ns2_rejects(self):
+        """The branch-asymmetry the K-745 NOTE codifies: at (BM=BN=256,BK=128)
+        on gfx942, the NS=1 branch admits the tile where the NS=2 branch
+        rejects it. This is the static LDS-budget invariant; the run-time
+        consequence (~5x slowdown) is empirically falsified per the NOTE and
+        not re-asserted here.
+        """
+        bk = 128
+        ns1 = estimate_triton_lds_bytes(
+            256, 256, bk, self.BYTES_FP16, self.BYTES_FP16, 1
+        )
+        ns2 = estimate_triton_lds_bytes(
+            256, 256, bk, self.BYTES_FP16, self.BYTES_FP16, 2
+        )
+        assert ns1 <= self.GFX942_LDS, (
+            f"NS=1 (256,256,{bk},fp16) should fit gfx942 LDS budget"
+        )
+        assert ns2 > self.GFX942_LDS, (
+            f"NS=2 (256,256,{bk},fp16) should exceed gfx942 LDS budget"
+        )
+        assert check_triton_lds_capacity(
+            256, 256, bk, self.BYTES_FP16, self.BYTES_FP16,
+            self.GFX942_LDS, 1,
+        ) is True
+        assert check_triton_lds_capacity(
+            256, 256, bk, self.BYTES_FP16, self.BYTES_FP16,
+            self.GFX942_LDS, 2,
+        ) is False
+
+    def test_bk256_at_256x256_infeasible_at_both_ns1_and_ns2(self):
+        """Sanity bound on the NOTE's "BK in {128,256} admitted at NS=1"
+        wording: for the 256x256 fp16/bf16 tile, BK=256 is infeasible at
+        NS=1 too (max(256*256*2, 256*256*2) = 131072 > 65536). So the NOTE's
+        admitted-tile set at NS=1 is {BK=128} only on the 256x256 tile, and
+        the K-745 brief's "BK=128 or 256" wording is bounded by this LDS
+        constraint, not by branch arithmetic.
+        """
+        ns1 = estimate_triton_lds_bytes(
+            256, 256, 256, self.BYTES_FP16, self.BYTES_FP16, 1
+        )
+        assert ns1 == 131072
+        assert ns1 > self.GFX942_LDS
+
+
 class TestCheckTritonLdsCapacity:
     """Test check_triton_lds_capacity: capacity check."""
 

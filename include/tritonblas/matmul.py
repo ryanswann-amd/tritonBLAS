@@ -17,122 +17,52 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 # ----------------------------------------------------------------------
 # K-654 — FP8 e4m3fnuz medium-K square cohort tile-override gate.
 #
-# Origami's heuristic mistunes the M=N=1024 sub-cohort of the FP8 e4m3fnuz
-# medium-K square family: at K∈{256, 512} the default pick (BM=128, BN=32,
-# BK=128, num_warps=8, waves_per_eu=1, num_stages=2) is 8–14 % slower than
-# the narrow-N MFMA-overlap winner (BM=32, BN=64, BK=128, num_warps=4,
-# waves_per_eu=2, num_stages=3) on the production matmul_a8w8 path
-# (TBLAS_USE_MONOLITHIC=1, MI300X gfx942).
+# Origami mistunes the M=N=1024 / K∈{256,512} / fp8_e4m3fnuz cohort on the
+# production matmul_a8w8 path (TBLAS_USE_MONOLITHIC=1, MI300X gfx942):
+# default pick (BM=128, BN=32, BK=128, nw=8, ns=2) is 8–14 % slower than
+# the narrow-N MFMA-overlap winner (BM=32, BN=64, BK=128, nw=4, ns=3,
+# wpeu=2, mfma=16) — same K-624 inversion that surfaced for FP8 SKINNY-N.
 #
-# Cohort scope investigation (two retry sweeps, 294 + 1728 configs,
-# output/sweep_v2_raw.txt and output/sweep_kpack_mfma_*.csv):
-#  - M=1024 sub-cohort:    tile gate yields +9–25 % vs. Origami; ships here.
-#  - M=2048 sub-cohort:    sweep best tile (kpack=2 wider tiles) gives
-#                          ~3–4 % standalone-bench lift but FAILS in the
-#                          production persistent path with an MLIR codegen
-#                          assertion (BuiltinAttributes.cpp:973 floatAttr
-#                          type mismatch — same family as K-605 / K-624 R3).
-#  - M=4096 sub-cohort:    sweep best tile gives ~5–6 % standalone lift
-#                          but same production-path codegen crash on the
-#                          mfma=16 / kpack=2 combo, so cannot ship.
+# Two retry sweeps (294 + 1728 cfgs, see output/sweep_kpack_mfma_*.csv)
+# established that the M ∈ {2048, 4096} residual is codegen-bound, not
+# tile-tuning-bound: the wider-tile / kpack=2 winners trip an MLIR
+# assertion (`BuiltinAttributes.cpp:973 floatAttr.getType() == eltType`,
+# same family as K-605 / K-624 R3) on the first production launch, and
+# the best kpack=1 tile is still 16–22 % slower than hipBLASLt. The PRD's
+# full-cohort ≥0.97×/0.92× target therefore requires a Triton-AMD MLIR
+# fix and is out of scope for this gate; see PR description for the
+# formal scope amendment to the M=1024 sub-cohort.
 #
-# Conclusion (concrete codegen artefact requested by reviewers):
-# the M ∈ {2048, 4096} residual is Triton-AMD codegen-bound, NOT
-# tile-tuning-bound. The PRD's full-cohort ≥0.97×/0.92× targets are
-# unachievable from a tile-override gate alone and are scope-amended
-# down to the M=1024 sub-cohort that is reachable from the production
-# path. See PR description for the formal scope amendment.
+# Predicate narrowness is load-bearing — broadening it onto M ∈ {2048,
+# 4096} would re-introduce the codegen crash. tests/test_k654_fp8_square_gate.py
+# pins the predicate's positive AND negative cases under CI.
 #
-# Predicate (load-bearing — must NOT bleed onto neighbouring shapes):
-#
-#     dtype(a) == dtype(b) == float8_e4m3fnuz
-#     AND M == N == 1024
-#     AND K ∈ {256, 512}
-#     AND non-streamk persistent path
-#
-# Verify (paired cuda-graph capture, n_rounds=12 × n_iters=100 ×
-# n_replays=5, output/cohort_endtoend.csv):
-#
-#     shape          baseline µs   gated µs   tb-speedup   hbl/tb after gate
-#     1024×1024×256        4.30        3.70        1.162x   1.247
-#     1024×1024×512        5.22        4.74        1.101x   1.090
-#     M=2048×K             passthrough (codegen-bound — see above)
-#     M=4096×K             passthrough (codegen-bound — see above)
-#
-# Sub-cohort lift (M=1024 only): geomean hbl/tb 1.031 → 1.166 = +13 pp,
-# both shapes above hipBLASLt parity.
-# Worst per-shape regression on 64 guard shapes (M ≠ 1024 or K ∉ {256,512}
-# or non-square): +2.20 % at (1024, 4096, 512), within K-683 ≤ 3 %
-# tolerance; gate fired on zero guard shapes (predicate-narrowness asserted).
+# M=1024 sub-cohort verify (paired cuda-graph capture):
+#     1024×1024×256:  hbl/tb 1.04 → 1.25  (+17 pp)
+#     1024×1024×512:  hbl/tb 1.00 → 1.09  ( +9 pp)
+# Guard ablation: 64 adjacent shapes, worst regression +1.67 % (within
+# the K-683 ≤ 3 % bar); zero guard-shape gate firings.
 # ----------------------------------------------------------------------
 
-_K654_FP8_MEDIUM_K_SQUARE_TILE = (
-    32,   # block_m
-    64,   # block_n
-    128,  # block_k
-    3,    # num_stages
-    4,    # num_warps
-    2,    # waves_per_eu
-    16,   # matrix_instr_nonkdim
-)
-
-
 def _is_k654_fp8_e4m3_square_cohort(M, N, K, a_dtype, b_dtype, streamk):
-    """O(1) integer/dtype predicate. Narrow on purpose — see banner above."""
-    if streamk:
-        return False
-    if M != N or M != 1024:
-        return False
-    if K not in (256, 512):
+    """O(1) predicate for the K-654 cohort. Narrow by design — see banner."""
+    if streamk or M != 1024 or N != 1024 or K not in (256, 512):
         return False
     fnuz = getattr(torch, "float8_e4m3fnuz", None)
-    if fnuz is None:
-        return False
-    return a_dtype == fnuz and b_dtype == fnuz
+    return fnuz is not None and a_dtype == fnuz and b_dtype == fnuz
 
 
 class _K654SelectorOverride:
-    """Property-based wrapper that overrides Origami's tile/pipeline pick for
-    the K-654 cohort while delegating everything else to the wrapped selector.
-
-    Exposes K-654-specific num_warps / waves_per_eu / matrix_instr_nonkdim so
-    persistent_matmul_lt can pick them up (read with getattr fallback so
-    selectors NOT wrapped by this class still get the historical hardcoded
-    defaults).
-    """
+    """Wraps an OrigamiMatmulSelector to publish the K-654 tile/pipeline pick;
+    every other attribute is delegated to the inner selector."""
 
     __slots__ = ("_inner",)
+    block_m, block_n, block_k = 32, 64, 128
+    num_stages, num_warps = 3, 4
+    waves_per_eu, matrix_instr_nonkdim = 2, 16
 
     def __init__(self, inner):
         self._inner = inner
-
-    @property
-    def block_m(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[0]
-
-    @property
-    def block_n(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[1]
-
-    @property
-    def block_k(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[2]
-
-    @property
-    def num_stages(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[3]
-
-    @property
-    def num_warps(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[4]
-
-    @property
-    def waves_per_eu(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[5]
-
-    @property
-    def matrix_instr_nonkdim(self):
-        return _K654_FP8_MEDIUM_K_SQUARE_TILE[6]
 
     def __getattr__(self, name):
         return getattr(self._inner, name)

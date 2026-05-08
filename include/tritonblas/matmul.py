@@ -1,7 +1,8 @@
 import functools
+import os
 import random
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from torch.library import triton_op, wrap_triton
@@ -938,6 +939,58 @@ def matmul(
     return _matmul_out(a, b, out, enable_streamk, sk_grid, work_stealing)
 
 
+# --- K-648/K-692: FP8 e4m3fnuz skinny-M / large-N tile-override gate (MI300X) ---
+# Origami over-tiles BM and over-stages BK on the FP8 e4m3fnuz skinny-M / large-N
+# cohort, inflating kernel time vs. a fixed BM=32 / BN=128 / nw=4 / ns=2
+# launch-floor config (with K-bucketed BK = 128 if K ≥ 4096 else 64).
+#
+# K-692 paired A/B (HIP-graph, n=30, MI300X gfx942) on the original 27-shape
+# cohort (M ∈ {16,32,64} × N ∈ {4096,8192,16384} × K ∈ {1024,2048,4096}) showed
+# the override REGRESSES on M ∈ {32,64} for several N/K buckets (worst 0.752×
+# at M=64, N=8192, K=1024 — 6 of 27 shapes <0.95×). The gate is therefore
+# tightened to M=16 only — the sub-cohort where the override wins on every
+# shape (kernel-only speedup 1.26×–2.62×, geomean ≈1.85×).
+class _K648Override:
+    """Selector wrapper for the K-648/K-692 gate cohort.
+
+    Pins the 5 tile/launch parameters to the validated override; everything
+    else (group_m, num_sms, _hardware, …) is delegated to the inner Origami
+    selector via __getattr__.
+    """
+
+    def __init__(self, inner, BM, BN, BK, ns, nw):
+        self._inner = inner
+        self.block_m = BM
+        self.block_n = BN
+        self.block_k = BK
+        self.num_stages = ns
+        self.num_warps = nw
+
+    def __getattr__(self, name):
+        # __getattr__ only fires for attrs not set on self → safe delegation.
+        return getattr(self._inner, name)
+
+
+def _k648_should_override(M: int, N: int, K: int, a_dtype, enable_streamk: bool) -> bool:
+    """Tightened K-692 cohort predicate.
+
+    Fires only on FP8 e4m3fnuz, non-streamk, M ≤ 16, N ≥ 4096, K ≥ 1024 —
+    the sub-band where the override wins on every shape (paired A/B, MI300X).
+
+    Controlled by env var ``TRITONBLAS_DISABLE_K648`` (default unset). Set to
+    ``1`` only to reproduce the pre-patch HEAD baseline for A/B benchmarking.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_K648") == "1":
+        return False
+    return (
+        not enable_streamk
+        and a_dtype == torch.float8_e4m3fnuz
+        and M <= 16
+        and N >= 4096
+        and K >= 1024
+    )
+
+
 def matmul_a8w8(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -953,10 +1006,23 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    # K-653: per-shape tile override for FP8 e5m2fnuz x e4m3fnuz square cohort.
+    # Mutually exclusive with K-692 (different dtype predicate).
     if (a.dtype is torch.float8_e5m2fnuz and b.dtype is torch.float8_e4m3fnuz):
         cfg = _FP8_SQUARE_TILE_OVERRIDES.get((M, N, K))
         if cfg is not None:
             selector = _TileOverride(selector, *cfg)
+    # K-648/K-692: tighten to M=16 FP8 e4m3fnuz skinny-M sub-cohort.
+    # Predicate is dtype==float8_e4m3fnuz AND M<=16 AND N>=4096 AND K>=1024,
+    # which does not overlap K-653 (mixed e5m2/e4m3) or K-695 (M in 16..64
+    # but K-695 only fires inside persistent_matmul_lt's path; here in
+    # matmul_a8w8 the M=16 sub-cohort gets K-692's swept modal tile).
+    if _k648_should_override(M, N, K, a.dtype, enable_streamk):
+        selector = _K648Override(
+            selector, BM=32, BN=128,
+            BK=(128 if K >= 4096 else 64),
+            ns=2, nw=4,
+        )
     config = matmul_preamble(selector) if work_stealing else None
     # K-349: FP8 cohort tile override + force monolithic kernel for non-streamk/non-WS.
     is_fp8 = (not enable_streamk) and (not work_stealing) and \

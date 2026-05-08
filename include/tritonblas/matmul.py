@@ -377,6 +377,80 @@ def matmul_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 
+# ============================================================================
+# K-424: FP8 small-M skinny dispatch gate (matmul_a8w8 entry path)
+# ============================================================================
+# Ports the K-163 / K-278 / K-299 persistent + work-stealing / K-split
+# dispatch-gate pattern from fp16/bf16 to the FP8 (matmul_a8w8) path.
+#
+# Cohort: M <= 128, 2048 <= N <= 8192, 2048 <= K <= 8192, dtype in {e4m3fn,
+# e4m3fnuz, e5m2, e5m2fnuz}.
+#
+# Two pathologies on this cohort:
+#
+#  (a) M=1 hard-fails inside the default persistent kernel
+#      (`make_scale_view` rank-1 assertion, see K-251 A17).  The path is
+#      currently unusable -- routing M=1 to the streamk kernel turns
+#      9 hard failures into successful runs at ~0.5x of hipBLASLt.
+#
+#  (b) M <= 32, K = 8192 stalls the default persistent K-loop pipeline
+#      (~110 us vs hipBLASLt ~36 us, ratio ~0.34x).  StreamK splits each
+#      output tile across CUs along K and recovers ~70 us, lifting the
+#      sub-cohort to ~0.55x (1.6x speedup over default persistent).
+#
+# Outside (a)/(b), the default persistent path is the fastest FP8 mode on
+# this cohort (geomean ~0.65x of hipBLASLt for M >= 16, K < 8192) -- the
+# K-251 finding that "persistent dominates ws_persistent on FP8" is
+# preserved.  The gate therefore only fires on the two corners that
+# need help; everything else stays on the default path.
+#
+# Sentinel default (work_stealing=None) preserves explicit user overrides:
+# the gate only fires when the caller did not pass work_stealing or
+# enable_streamk explicitly, normalising the flags via bool() before any
+# downstream call so the existing kernel ABI is unchanged.
+# ============================================================================
+
+_FP8_DTYPES = tuple(
+    dt for dt in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+        getattr(torch, "float8_e5m2", None),
+        getattr(torch, "float8_e5m2fnuz", None),
+    ) if dt is not None
+)
+
+
+def _fp8_smallm_skinny_route(a, b, enable_streamk, work_stealing):
+    """K-424 dispatch gate.
+
+    Returns one of:
+      "streamk"  -- route through ws_streamk (M=1 or M<=32 + K=8192 sub-corner),
+      None       -- leave dispatch unchanged (default persistent or explicit override).
+    """
+    # Respect any explicit user override.
+    if work_stealing is not None:
+        return None
+    if enable_streamk:
+        return None
+    # FP8 only.
+    if a.dtype not in _FP8_DTYPES:
+        return None
+    # 2-D only.
+    if a.dim() != 2 or b.dim() != 2:
+        return None
+    M = a.shape[0]
+    K = a.shape[1]
+    N = b.shape[1]
+    # Outer cohort gate: small-M skinny FP8.
+    if not (M <= 128 and 2048 <= N <= 8192 and 2048 <= K <= 8192):
+        return None
+    # M=1: persistent path hard-fails (`make_scale_view` rank-1).
+    # M<=32, K=8192: persistent K-loop pipeline stalls; streamk wins ~1.5x.
+    if M == 1 or (M <= 32 and K >= 8192):
+        return "streamk"
+    return None
+
+
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
     c: torch.Tensor, selector, config: MatmulConfig,
@@ -384,8 +458,11 @@ def matmul_a8w8_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    # Normalize sentinel before downstream call (kernel ABI expects bool).
+    work_stealing = bool(work_stealing)
+
     if enable_streamk:
-        return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
+        return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
@@ -502,12 +579,21 @@ def matmul_a8w8(
     b_scale: torch.Tensor,
     c: torch.Tensor,
     enable_streamk=False,
-    work_stealing=False,
+    work_stealing=None,
     sk_grid=None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-424: dispatch gate for the FP8 small-M skinny cohort.  See the
+    # `_fp8_smallm_skinny_route` docstring above for the cohort definition
+    # and the per-corner mechanism.  Only fires when the caller did not
+    # explicitly pass enable_streamk / work_stealing.
+    route = _fp8_smallm_skinny_route(a, b, enable_streamk, work_stealing)
+    if route == "streamk":
+        enable_streamk = True
+    work_stealing = bool(work_stealing)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

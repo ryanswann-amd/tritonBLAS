@@ -218,7 +218,11 @@ class GemmContext:
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=tl.int32)
+            # K-424 (per K-251 root cause): out_dtype must match acc_dtype.
+            # int32 was hard-coded for INT8 quantized; FP8 (e4m3fn/fnuz, e5m2/fnuz)
+            # uses float32 accumulators and otherwise trips the MLIR
+            # `floatAttr.getType() == eltType` assertion.
+            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
         

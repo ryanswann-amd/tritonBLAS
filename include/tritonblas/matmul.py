@@ -52,7 +52,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +64,24 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    # K-491: Two-tile dispatch for medium-K square FP16/BF16 cohort.
+    # K-442: BM=BN=256, BK=64 wins on M=N in {2048,4096}, K in {256,512}.
+    # K-423/K-442: BM=BN=128, BK=64 wins on M=N=1024 (BM=256 LDS-oversized for short K).
+    # Launcher already pins NS=2, NW=8, WPEU=0 (matches K-442 winner reachable config).
+    if (
+        not streamk
+        and M == N
+        and M in (1024, 2048, 4096)
+        and K in (256, 512)
+        and a_dtype in (torch.float16, torch.bfloat16)
+        and b_dtype in (torch.float16, torch.bfloat16)
+    ):
+        bm = 128 if M == 1024 else 256
+        selector._result.config.mt.m = bm
+        selector._result.config.mt.n = bm
+        selector._result.config.mt.k = 64
+        selector._select_ws_params()
+    return selector
 
 
 def persistent_matmul_lt(

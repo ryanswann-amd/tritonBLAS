@@ -321,9 +321,41 @@ _GATED_K = {4096, 8192}
 _GATED_N = {1024, 2048, 4096, 8192}
 _GATED_DTYPES = {torch.float16, torch.bfloat16}
 
+# Master toggle. Tests / benches flip this to compare gated vs ungated runs
+# without monkey-patching internals. Set via set_gate_enabled().
+#
+# Default: DISABLED. The K-513 192-shape cohort comparison on MI300X
+# (rocm7.2 / pytorch 2.10) showed end-to-end median latency of every gated
+# bucket regressing 1-5% versus the K-144 persistent kernel. Per-bucket data
+# is in ``output/cohort_192_compare.csv`` in the K-513 workspace. The kernel
+# itself is correct (see ``test_splitk_smallm_dispatch.py``, 115 cases) and
+# the gate machinery is here so that future tuning (e.g., reduced launch
+# overhead, different SPLIT_K choices, or a different driver) can re-enable
+# dispatch by flipping this flag and/or updating ``_BUCKET_WINNERS`` without
+# any further refactor. As of K-513 the gate is opt-in only.
+_GATE_ENABLED = False
+
+
+def set_gate_enabled(enabled: bool) -> bool:
+    """Enable or disable the K-513 split-K dispatch gate.
+
+    Returns the previous value. Used by the 192-cohort comparison harness so
+    it can measure baseline vs gated without monkey-patching ``_BUCKET_WINNERS``.
+    """
+    global _GATE_ENABLED
+    prev = _GATE_ENABLED
+    _GATE_ENABLED = bool(enabled)
+    return prev
+
+
+def is_gate_enabled() -> bool:
+    return _GATE_ENABLED
+
 
 def should_dispatch_splitk_smallm(M, N, K, a_dtype, b_dtype, c_dtype):
     """Narrow gate: True only for the 32 in-scope shapes."""
+    if not _GATE_ENABLED:
+        return False
     if a_dtype != b_dtype or a_dtype != c_dtype:
         return False
     if a_dtype not in _GATED_DTYPES:
@@ -342,6 +374,8 @@ __all__ = [
     "should_dispatch_splitk_smallm",
     "get_splitk_smallm_config",
     "install_winners",
+    "set_gate_enabled",
+    "is_gate_enabled",
     "_matmul_splitk_smallm_kernel",
     "_splitk_reduction_kernel",
 ]

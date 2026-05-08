@@ -25,7 +25,6 @@ from . import guarded_override as _go
 from ._route_predicate import (
     K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
-    R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
 )
 
 
@@ -42,11 +41,6 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
-    # K-1089 (S-002): R-K1037 P6 structural surrogate admits MFMA-issue-stall
-    # cells back to in-kernel dispatch with waves_per_eu=1 (set in the
-    # persistent dispatch path below). When P6 admits, route-OUT (P5 + the
-    # K-905/K-971 strict-equality table) is short-circuited for the cell.
-    if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype): return False
     if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
     return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
 
@@ -135,14 +129,6 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
-
-    # K-1089: structural surrogate of K-1037 P6 admits the MFMA-issue-stall
-    # cohort to in-kernel dispatch with waves_per_eu=1 (K-1051 confirmed via
-    # 4-iter PMC research that wpeu=1 wins are predictable on K-1032 cells).
-    # The route-OUT short-circuit in `_k971_route_to_hbl` already vetoes
-    # routing for these cells; we only need to set the in-kernel knob here.
-    if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a.dtype):
-        waves_per_eu = 1
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

@@ -390,6 +390,29 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+def _largeK_square_streamk_gate(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
+    """Auto-enable StreamK for the K-570 large-K square fp16/bf16 cohort on MI300X.
+
+    K-657 ablation showed Origami's selected (BM,BN,BK,NS) on these shapes is
+    LDS-bound — every shape sits at 65536-byte per-stage LDS, so num_stages+1
+    or kpack=2 either overflow or regress (K-657 NULL-RESULT). Independent
+    kernel-only HIP-graph A/B (K-670) finds StreamK at Origami's selected
+    streamk-mode tile recovers 5-16% per shape on the listed cells with no
+    regression elsewhere (K-654 strict-cohort-membership compliance).
+    """
+    if dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if M != N:
+        return False
+    if M == 1024 and K == 4096:
+        return True
+    if M == 2048 and K in (4096, 8192):
+        return True
+    if M == 4096 and K >= 4096:
+        return True
+    return False
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -404,6 +427,8 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    if not enable_streamk and _largeK_square_streamk_gate(M, N, K, a.dtype):
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -461,6 +486,8 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if not enable_streamk and _largeK_square_streamk_gate(M, N, K, a.dtype):
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 

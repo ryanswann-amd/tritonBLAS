@@ -49,7 +49,17 @@ def _maybe_wrap(fn, probe_tensor):
 # because Python attribute-proxy overhead (~3us per dispatch via __getattr__ /
 # __slots__) consumes ~half of the +6-7% cohort lift K-451 measured. Inlining
 # avoids any proxy and preserves the full lift.
-_K451_COHORT_M = frozenset({1024, 2048, 4096})
+# K-577 narrowed gate: the K-451 cohort was M in {1024, 2048, 4096}, but on
+# the current ROCm 7.2 / Triton 3.1+ stack the M=4096 dispatch is now better
+# served by Origami's natural pick than by either the K-451 winner tile
+# (BM=128, BN=256, BK=32, NS=3) or the K-577 LDS-bank-conflict-fix tile
+# (BM=128, BN=128, BK=64, NS=2). Direct cuda-event timing on c42 MI300X:
+#   M=4096 K=256 fp16   Origami=73.6us   K-451 tile=78.0us  (K-451 -5.6%)
+#   M=4096 K=512 fp16   Origami=92.5us   K-451 tile=103.4us (K-451 -10.5%)
+# So we narrow the outer gate to M in {1024, 2048}, where the K-577 tile
+# wins decisively (per-shape +1.5% to +5.4% over Origami at all 8 shapes
+# in this sub-cohort). For M=4096 we fall through to selector.block_*.
+_K451_COHORT_M = frozenset({1024, 2048})
 _K451_COHORT_K = frozenset({256, 512})
 _K451_COHORT_DTYPES = frozenset({torch.float16, torch.bfloat16})
 
@@ -111,13 +121,39 @@ def persistent_matmul_lt(
     # universal-winner config from the 5312-config sweep. Branched BEFORE the
     # Origami @property reads to skip the wasted descriptor lookups that would
     # otherwise consume ~3-4us per dispatch (half of the +7.19% cohort lift).
+    #
+    # K-577 LDS bank-conflict fix tile, gated by _k451_match() (now narrowed
+    # to M in {1024, 2048}; M=4096 falls through to Origami):
+    #
+    # K-519 root-caused the residual ~0.55x cohort gap to LDS bank conflicts:
+    # the K-451 winner tile (BM=128, BN=256, BK=32, NS=3) has
+    # BK * sizeof(fp16/bf16) = 64 bytes per A-row stripe in LDS, which is
+    # exactly half the 128-byte LDS row-bank cycle on MI300X. With NW=8 this
+    # produced a strided-row half-bank conflict on every ds_read --
+    # rocprofv3 18-counter capture at M=N=2048, K=512, fp16 measured
+    # SQ_LDS_BANK_CONFLICT/disp = 7.86e5 (~3.43 conflicts per LDS instr) vs
+    # hipBLASLt = 0 on the equivalent tile.
+    #
+    # The K-577 fix is to widen BK from 32 to 64 (so BK * sizeof = 128 bytes,
+    # = one full bank cycle, eliminating the half-bank stride at the source).
+    # To keep the LDS budget within the 64 KiB MI300X per-CU limit, BN is
+    # shrunk from 256 to 128 and num_stages from 3 to 2:
+    #   new tile LDS = (128 + 128) * 64 * 2 stages * 2 bytes = 65,536 bytes
+    #                = exactly the per-CU limit.
+    # NW=8 / WPEU=2 / MFMA=16 / kpack=1 are retained from the K-451 winner.
+    #
+    # The tile swap is STRICTLY scoped to the narrowed _k451_match() gate
+    # (M in {1024, 2048}, K in {256, 512}, fp16/bf16). Out-of-gate dispatches
+    # keep the Origami pick unchanged. K-654 lesson: never widen the
+    # swizzle/tile-swap beyond a validated sub-cohort.
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 128, 64
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms
+        kpack = 1
     else:
         BLK_M    = selector.block_m
         BLK_N    = selector.block_n
@@ -127,6 +163,7 @@ def persistent_matmul_lt(
         num_stages = getattr(selector, "num_stages", 2)
         num_warps = getattr(selector, "num_warps", 8)        # K-451 / K-398: read from selector
         waves_per_eu = getattr(selector, "waves_per_eu", 0)  # K-451 / K-398: read from selector
+        kpack = 1  # K-577: preserve historical default outside the K-451 gate.
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -135,7 +172,6 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -253,14 +289,17 @@ def streamk_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    # K-451 medium-K square fp16/bf16 cohort gate (see persistent_matmul_lt).
+    # K-577 LDS bank-conflict fix tile, gated by _k451_match() (now narrowed
+    # to M in {1024, 2048}; M=4096 falls through to Origami). See
+    # persistent_matmul_lt for full rationale.
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 128, 64
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms
+        kpack = 1
     else:
         BLK_M    = selector.block_m
         BLK_N    = selector.block_n
@@ -270,6 +309,7 @@ def streamk_matmul_lt(
         num_stages = getattr(selector, "num_stages", 2)
         num_warps = getattr(selector, "num_warps", 8)        # K-451 / K-398: read from selector
         waves_per_eu = getattr(selector, "waves_per_eu", 0)  # K-451 / K-398: read from selector
+        kpack = 1  # K-577: preserve historical default outside the K-451 gate.
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -289,7 +329,6 @@ def streamk_matmul_lt(
     else:
         total_tiles_streamk = 0
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

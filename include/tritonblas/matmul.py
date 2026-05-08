@@ -23,7 +23,7 @@ from . import guarded_override as _go
 
 _tensor_cache = {}
 
-# ----- K-989 + K-1002 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) ---
+# ----- K-989 + K-1002 + K-1016 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) ---
 # Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
 # LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
 # >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
@@ -49,6 +49,20 @@ _tensor_cache = {}
 #   risk class). fp16 was excluded from K-989 originally because K-984/K-989
 #   both reused K-931's bf16-only PMC sweep; K-1002 closes that gap by
 #   leveraging K-979's P5 NO-LAND filter as the dtype-parity attestation.
+# - K-1016 entries: fp16 mirrors of the 8 K-984 K-931-top-40 always-uncovered
+#   bf16 keys (LDS-bound subset). 4 of K-984's bf16 keys (S04, S17, S27, S28)
+#   overlap with K-989 and already had fp16 mirrors landed in K-1002 — those
+#   are no-ops here. The remaining 4 K-984 bf16 keys (S10, S18, S25, S36) were
+#   filtered through K-973 override_eligibility.py (extended mode, knobs={},
+#   pmc imputed) and validated against R-K979 v3/P5 + R-K990 refined Gate-0:
+#   3 ELIGIBLE (S10, S18, S25 — all aspect<4 mid-rect; LDS-port-contention
+#   class per K-998 paired-PMC catalog, expected hbl/tb in 1.20x..1.30x band)
+#   are added below; 1 REJECTED (S36 30x786432x200, aspect=26214x; lds_bc=1.71
+#   imputed from skinny-cohort lookup) is excluded via R1_LDS_BC_NO_KPACK as
+#   a degenerate-skinny carve-out (S36 is the K-984 bf16 paired outlier with
+#   3.81x speedup, but its M=30 row count puts it well below the per-CU tile
+#   threshold and its bf16 verdict in K-944 was QUARANTINE_ENV_VAR_DEFAULT_ON
+#   — same risk class K-1002 carved out for S05/S21).
 _K971_ROUTE_TABLE = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
@@ -81,6 +95,15 @@ _K971_ROUTE_TABLE = frozenset({
     # K-1002 EXCLUDED (K-973 R1_LDS_BC_NO_KPACK; skinny aspect>=4 carve-out):
     #   ( 256, 1792, 2048, "torch.float16"),  # K-989 S05 fp16 — skinny REJECT
     #   ( 768, 3072, 4480, "torch.float16"),  # K-989 S21 fp16 — skinny REJECT
+    # K-1016 NEW (fp16 mirrors of K-984 K-931-top-40 LDS-bound entries; K-973
+    # ELIGIBLE; R-K979 P5 + R-K990 Gate-0 attested. PMC class per K-998 catalog:
+    # LDS-port-contention (mid-rect aspect 2.7x..3.3x; SQ_LDS_PORT_BUSY > hbl).
+    # Expected hbl/tb speedup tracks K-984's bf16 paired-falsification result.)
+    (  512,  192, 2048, "torch.float16"),   # K-1016 S10 fp16 (mirror of K-984; bf16 hbl/tb=1.20x)
+    ( 5972, 1792,  768, "torch.float16"),   # K-1016 S18 fp16 (mirror of K-984; bf16 hbl/tb=1.30x)
+    ( 6016, 2048, 1024, "torch.float16"),   # K-1016 S25 fp16 (mirror of K-984; bf16 hbl/tb=1.27x)
+    # K-1016 EXCLUDED (K-973 R1_LDS_BC_NO_KPACK; degenerate-skinny carve-out):
+    #   (   30, 786432, 200, "torch.float16"),  # K-984 S36 fp16 — aspect=26214x REJECT
 })
 
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):

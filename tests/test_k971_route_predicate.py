@@ -26,6 +26,7 @@ import torch
 
 from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
+    R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
 )
 from tritonblas.matmul import _k971_route_to_hbl
@@ -234,3 +235,148 @@ def test_public_matmul_dispatches_via_predicate():
     last = calls[-1]
     assert (last[0], last[2], last[1]) == (M, K_, N), (
         f"dispatch consulted with unexpected args: {last}")
+
+
+# ===========================================================================
+# K-1089 — R_K1037_P6_admit_wpeu1 structural surrogate of K-1037 P6.
+#
+# The predicate is a calibrated structural surrogate of the K-1037
+# 3-clause paired-PMC MFMA-issue-stall classifier (perfect 18/18 PMC truth
+# agreement). It is shipped as an offline classifier that downstream
+# tickets can wire to a candidate `waves_per_eu`/`enable_streamk`/
+# block-size override or any future structural lever; K-1089 v3 deliberately
+# does NOT wire the predicate into the dispatch path because both
+# candidate levers (`waves_per_eu=1` per K-1051 and `enable_streamk=True`
+# per K-1044) failed paired-n=20 + Wilcoxon validation on MI300X
+# (slurm 294979). These tests pin the predicate's calibration so a future
+# wiring ticket can re-use it without recalibration.
+# ===========================================================================
+
+# (cid, M, N, K, expected_admit) drawn from K-1037 paired-PMC truth set
+# plus the K-1089 v3 expanded P6+ synthetic cells and K-984/K-989 anchors.
+P6_ADMIT_CALIBRATION = [
+    # K-1037 paired-PMC P6+ positives (truth-set TPs)
+    ("S24",   4480, 3072,  768, True),
+    ("S29",  14208, 2048, 1024, True),
+    # K-1089 v3 synthetic cells inside Envelope B (extra calibration anchors)
+    ("P6_3",  3072, 3072,  768, True),
+    ("P6_4",  4096, 2560, 1024, True),
+    ("P6_5",  3584, 2304,  512, True),
+    # K-984/K-989 LAND anchors — must NOT admit (would break route-OUT)
+    ("S25",   6016, 2048, 1024, False),  # below Envelope A M-floor
+    ("S27",  10112, 2048, 1024, False),
+    ("S28",  12160, 2048, 1024, False),
+    ("S18",  5972, 1792,  768,  False),  # above Envelope B maxMN ceiling
+    # K-1017 NO-LAND adjacent — must NOT admit (P5 already routes-OUT)
+    ("S26",   8064, 2048, 1024, False),
+    ("S30",  16256, 2048, 1024, False),  # above Envelope A M-ceiling
+    # K-1017 cell S38 — K=200 < 512 floor (Surrogate-C2 MFMA<1% guard)
+    ("S38",    384,  128,  200, False),
+    # K-950 LAND set — must NOT admit
+    ("L01",   1024, 1024,  512, False),
+    ("L02",   4096, 4096, 4096, False),  # maxMN=4096 inside, but minMN=4096 too — K is at envelope B's K=1024 ceiling so actually outside
+]
+
+
+@pytest.mark.parametrize("cid,M,N,K,expected", P6_ADMIT_CALIBRATION)
+def test_R_K1037_P6_admit_calibration_bf16(cid, M, N, K, expected):
+    """Pin K-1037 P6 surrogate verdicts on the K-1089 calibration cohort.
+
+    Locks in the well-calibrated structural surrogate so future wiring
+    tickets can rely on the predicate without re-validating against PMC.
+    """
+    got = R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16)
+    assert got is expected, (
+        f"P6 surrogate: cell {cid} ({M},{N},{K},bf16) "
+        f"admit={got} expected={expected}")
+
+
+def test_R_K1037_P6_is_bf16_only():
+    """Surrogate is calibrated bf16-only (K-1037 / K-1017 / K-1044 truth
+    set scope). Other dtypes must NOT admit even on shape matches."""
+    M, N, K = 4480, 3072, 768  # would admit at bf16 (Envelope B)
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float16) is False
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float32) is False
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float8_e4m3fn) is False
+
+
+def test_R_K1037_P6_K_floor_silences_S38_class():
+    """Surrogate-C2 (MFMA_pct >= 1.0%) -> K >= 512 floor. K-1017 cell S38
+    (K=200, MFMA%=0.07) and similar launch-overhead-bound cells must NOT
+    admit, even if shape would otherwise match an envelope."""
+    # Synthetic S38 variants with K below the 512 floor:
+    for K in (1, 100, 200, 256, 384, 511):
+        assert R_K1037_P6_admit_wpeu1(4480, 3072, K, torch.bfloat16) is False, \
+            f"K-floor=512 leaked at K={K}"
+    # Boundary: K == 512 inside Envelope B (minMN>=2048, maxMN<=4500)
+    assert R_K1037_P6_admit_wpeu1(3584, 2304, 512, torch.bfloat16) is True
+    # K == 511 just below the floor on the same shape
+    assert R_K1037_P6_admit_wpeu1(3584, 2304, 511, torch.bfloat16) is False
+
+
+def test_R_K1037_P6_envelope_A_M_bounds():
+    """Envelope A: N=2048 AND K=1024 AND 13000 <= M <= 14999.
+    Below 13000 = K-984/K-989 anchors (must route-OUT, NOT admit).
+    Above 14999 = S30 OCC region (must NOT admit)."""
+    for M in (13000, 14000, 14208, 14999):
+        assert R_K1037_P6_admit_wpeu1(M, 2048, 1024, torch.bfloat16) is True, \
+            f"Envelope A interior leak at M={M}"
+    for M in (12999, 12160, 10112, 6016):
+        assert R_K1037_P6_admit_wpeu1(M, 2048, 1024, torch.bfloat16) is False, \
+            f"Envelope A leak below M-floor at M={M}"
+    for M in (15000, 16256, 32768):
+        assert R_K1037_P6_admit_wpeu1(M, 2048, 1024, torch.bfloat16) is False, \
+            f"Envelope A leak above M-ceiling at M={M}"
+
+
+def test_R_K1037_P6_envelope_B_anchor_safety():
+    """Envelope B: minMN >= 2048 AND maxMN <= 4500 AND 512 <= K <= 1024.
+    The maxMN<=4500 ceiling preserves K-984 anchor S18 (maxMN=5972)
+    and K-989 anchor S25 (maxMN=6016) which both sit clear above."""
+    # K-984/K-989 LAND anchors (maxMN well above 4500): must NOT admit
+    for cid, M, N, K in [
+        ("S18", 5972, 1792, 768),
+        ("S25", 6016, 2048, 1024),
+        ("S27", 10112, 2048, 1024),
+        ("S28", 12160, 2048, 1024),
+    ]:
+        assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, \
+            f"Envelope B LAND-anchor leak: {cid} ({M},{N},{K})"
+
+
+def test_R_K1037_P6_does_not_change_dispatch_under_K_1089_v3():
+    """K-1089 v3 design: predicate is offline-only — it must NOT participate
+    in the live `_k971_route_to_hbl` dispatch decision, because both
+    candidate admitted levers (wpeu=1, streamk=True) failed Wilcoxon
+    paired-n=20 validation. Verifies a P6+ cell that would also be silenced
+    by P5 (S29) still routes-OUT under the live dispatch (P5 wins),
+    confirming the P6 short-circuit is NOT wired."""
+    # S29 = (14208, 2048, 1024) — P6+ AND P5 routes-OUT.
+    # If P6 had a wired short-circuit overriding P5, the result would
+    # be False (in-kernel). With no wiring, P5 wins -> True (route-OUT).
+    M, N, K = 14208, 2048, 1024
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert R_K979_P5_route_to_hbl(M, N, K, torch.bfloat16) is True
+    routed = _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert routed is True, (
+        f"P6 surrogate must NOT wire into dispatch in K-1089 v3 "
+        f"(both candidate levers failed Wilcoxon validation); "
+        f"S29 should continue to route-OUT via P5 — got routed={routed}")
+
+
+def test_R_K1037_P6_does_not_admit_S24_into_dispatch():
+    """S24 is a P6+ admit but P5 does NOT route it. Under K-1089 v3
+    (no wiring), the live dispatch verdict must be False (in-kernel
+    persistent baseline) — same as it was pre-K-1089."""
+    M, N, K = 4480, 3072, 768
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert R_K979_P5_route_to_hbl(M, N, K, torch.bfloat16) is False
+    routed = _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert routed is False, (
+        f"S24 (P6+, P5-silent) should dispatch in-kernel persistent "
+        f"baseline under K-1089 v3 (no wiring) — got routed={routed}")

@@ -97,6 +97,81 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
     return False
 
 
+def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
+    """K-1089 — Structural surrogate of K-1037 P6 MFMA-issue-stall classifier.
+
+    Returns True iff the (M, N, K, dtype) shape's structural fingerprint
+    matches K-1037's paired-PMC P6 admit condition
+
+        waves_per_CU_ratio (tb/hbl) < 1.70x
+        AND MFMA_pct_tb >= 1.0%
+        AND LDS_BC_cyc_per_inst_tb < 1.5
+
+    K-1037 verified perfect 18/18 agreement of the 3-clause PMC predicate
+    against K-1017's `route_action_table.csv` (TP=2/2 on S24, S29; TN=16/16
+    on the remaining 15 occupancy + 1 HBM-L2-stall cells). K-1051 separately
+    confirmed via 4-iter PMC research that wpeu=1 wins are predictable from
+    2-3 counter clauses on K-1032 cells.
+
+    K-1037's P6 reads paired runtime PMC (`pmc_view.tb` AND `pmc_view.hbl`)
+    so it cannot run in a hot dispatch path (R-1037.A-PRIORI-PMC-CLASSIFIERS-
+    LAND-AS-OFFLINE-CLASSIFIED-SHAPE-TABLES-NOT-LIVE-PMC-PREDICATES). This
+    function regresses each PMC clause onto structural shape features so the
+    same admit decision can be taken at dispatch time on the four fields
+    (M, N, K, dtype) available without instrumentation.
+
+    Surrogate-C2 (MFMA_pct_tb >= 1.0%):
+        Translated to K >= 512. K-1037 P6 positives have MFMA% in
+        [3.79, 4.79]; K-1017 cell S38 (K=200, MFMA%=0.07) is the only
+        false-positive risk and is excluded by this floor.
+    Surrogate-C3 (LDS_BC_cpi_tb < 1.5):
+        Translated to "not in P5 LDS-bound regime". Composition: caller
+        consults R_K979_P5_route_to_hbl first; this admit only fires on
+        shapes NOT already silenced by P5 clauses 1+3 (LDS-port-contention
+        and asymmetric-aspect axes).
+    Surrogate-C1 (waves_per_CU_ratio < 1.70x — load-bearing):
+        Two regression envelopes drawn from K-1017 + K-1032 + K-1044
+        paired-PMC corpus:
+
+        Envelope A (S29 wide-rect family):
+            N == 2048 AND K == 1024 AND 13000 <= M <= 14999.
+            Catches S29 (M=14208, ratio=1.51) only. Bounded above by S30
+            (M=16256, ratio=1.75 — OCC) and below by K-984/K-989 LAND
+            anchors S25 (M=6016), S27 (M=10112), S28 (M=12160) which all
+            route-OUT cleanly.
+        Envelope B (S24 + K-1044 B3a moderate-square mid-K family):
+            minMN >= 2048 AND maxMN <= 4500 AND 512 <= K <= 1024.
+            Catches S24 (4480, 3072, 768) (ratio=1.53). Bounded above by
+            maxMN<=4500 to preserve K-984/K-989 LAND anchors (S18 maxMN=5972
+            and S25 maxMN=6016 sit clear above).
+
+    bf16-only by design (K-1037 / K-1017 / K-1044 ground truth scope).
+
+    Production status (K-1089 v3, after paired-n=20 + Wilcoxon validation):
+        The structural surrogate is well-calibrated against K-1037's
+        paired-PMC truth set, BUT the candidate admitted levers
+        (`waves_per_eu=1` per K-1051 and `enable_streamk=True` per K-1044)
+        both fail the K-1049 adversarial gate at paired n=20 with Wilcoxon
+        signed-rank significance testing on MI300X — neither produces a
+        statistically-significant LAND on the admitted P6+ cells. The
+        predicate is preserved as an offline reusable surrogate; it is NOT
+        wired into the dispatch path until a future ticket identifies a
+        structural lever that wins at p < 0.05 on the held-out cohort.
+    """
+    if not _dtype_is_bf16(dtype):
+        return False
+    if K < 512:
+        return False  # Surrogate-C2: insufficient MFMA work density
+    minMN, maxMN = min(M, N), max(M, N)
+    # Envelope A: K-931 wide-rect (N=2048, K=1024) family at moderate M.
+    if N == 2048 and K == 1024 and 13000 <= M <= 14999:
+        return True
+    # Envelope B: moderate-square mid-K family (S24 fingerprint).
+    if 2048 <= minMN and maxMN <= 4500 and 512 <= K <= 1024:
+        return True
+    return False
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``

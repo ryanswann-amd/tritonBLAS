@@ -19,34 +19,51 @@ from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 #
 # Origami's heuristic mistunes the M=N=1024 sub-cohort of the FP8 e4m3fnuz
 # medium-K square family: at K∈{256, 512} the default pick (BM=128, BN=32,
-# BK=128, num_warps=8, waves_per_eu=1, num_stages=2) is 8–14% slower than the
-# narrow-N MFMA-overlap winner (BM=32, BN=64, BK=128, num_warps=4,
+# BK=128, num_warps=8, waves_per_eu=1, num_stages=2) is 8–14 % slower than
+# the narrow-N MFMA-overlap winner (BM=32, BN=64, BK=128, num_warps=4,
 # waves_per_eu=2, num_stages=3) on the production matmul_a8w8 path
 # (TBLAS_USE_MONOLITHIC=1, MI300X gfx942).
 #
-# Predicate (load-bearing — the M=2048/4096 sub-cohorts are codegen-bound per
-# K-624 R3 / K-500 / K-523 family findings; the LDS-prefiltered 294-config
-# tile sweep oracle does NOT clear the K-683 noise band on those shapes,
-# so they MUST remain passthrough):
+# Cohort scope investigation (two retry sweeps, 294 + 1728 configs,
+# output/sweep_v2_raw.txt and output/sweep_kpack_mfma_*.csv):
+#  - M=1024 sub-cohort:    tile gate yields +9–25 % vs. Origami; ships here.
+#  - M=2048 sub-cohort:    sweep best tile (kpack=2 wider tiles) gives
+#                          ~3–4 % standalone-bench lift but FAILS in the
+#                          production persistent path with an MLIR codegen
+#                          assertion (BuiltinAttributes.cpp:973 floatAttr
+#                          type mismatch — same family as K-605 / K-624 R3).
+#  - M=4096 sub-cohort:    sweep best tile gives ~5–6 % standalone lift
+#                          but same production-path codegen crash on the
+#                          mfma=16 / kpack=2 combo, so cannot ship.
+#
+# Conclusion (concrete codegen artefact requested by reviewers):
+# the M ∈ {2048, 4096} residual is Triton-AMD codegen-bound, NOT
+# tile-tuning-bound. The PRD's full-cohort ≥0.97×/0.92× targets are
+# unachievable from a tile-override gate alone and are scope-amended
+# down to the M=1024 sub-cohort that is reachable from the production
+# path. See PR description for the formal scope amendment.
+#
+# Predicate (load-bearing — must NOT bleed onto neighbouring shapes):
 #
 #     dtype(a) == dtype(b) == float8_e4m3fnuz
 #     AND M == N == 1024
 #     AND K ∈ {256, 512}
 #     AND non-streamk persistent path
 #
-# Verify (K-624 playbook, c42 MI300X gfx942, paired cuda-graph capture
-# n_rounds=12 × n_iters=100 × n_replays=5):
+# Verify (paired cuda-graph capture, n_rounds=12 × n_iters=100 ×
+# n_replays=5, output/cohort_endtoend.csv):
 #
 #     shape          baseline µs   gated µs   tb-speedup   hbl/tb after gate
-#     1024×1024×256        4.53        3.70        1.225x   1.245
-#     1024×1024×512        5.36        4.71        1.138x   1.101
-#     2048×2048×K          (passthrough — sweep oracle within K-887 noise)
-#     4096×4096×K          (passthrough — sweep oracle within K-887 noise)
+#     1024×1024×256        4.30        3.70        1.162x   1.247
+#     1024×1024×512        5.22        4.74        1.101x   1.090
+#     M=2048×K             passthrough (codegen-bound — see above)
+#     M=4096×K             passthrough (codegen-bound — see above)
 #
-# Cohort geomean lift (6 shapes): hbl/tb 0.860 → 0.913 = +5.32 pp.
-# Worst per-shape regression on 50 guard shapes (M ∉ {1024} or K ∉ {256,512}
-# or non-square): +2.2% (within K-683 ≤ 3% tolerance);
-# gate fired on zero guard shapes (verified passthrough column).
+# Sub-cohort lift (M=1024 only): geomean hbl/tb 1.031 → 1.166 = +13 pp,
+# both shapes above hipBLASLt parity.
+# Worst per-shape regression on 64 guard shapes (M ≠ 1024 or K ∉ {256,512}
+# or non-square): +2.20 % at (1024, 4096, 512), within K-683 ≤ 3 %
+# tolerance; gate fired on zero guard shapes (predicate-narrowness asserted).
 # ----------------------------------------------------------------------
 
 _K654_FP8_MEDIUM_K_SQUARE_TILE = (

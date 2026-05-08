@@ -181,7 +181,11 @@ def test_kill_env_overrides_predicate(monkeypatch):
 # Catches the case where someone re-introduces a divergent inline copy.
 # ---------------------------------------------------------------------------
 def test_matmul_module_uses_helper_module_predicate():
-    from tritonblas import matmul as _m
+    # tritonblas/__init__.py does `from .matmul import matmul`, which makes
+    # `tritonblas.matmul` resolve to the *function*, not the submodule. Grab
+    # the actual submodule out of sys.modules so we can introspect it.
+    import sys
+    _m = sys.modules["tritonblas.matmul"]
     assert _m._R_K979_P5_route_to_hbl is R_K979_P5_route_to_hbl
     assert _m._K971_ROUTE_TABLE is K971_ROUTE_TABLE
 
@@ -199,7 +203,11 @@ def test_public_matmul_dispatches_via_predicate():
     with a spy that returns True for a known shape and False otherwise —
     this avoids touching real hipBLASLt timing while exercising the live
     dispatch ordering inside `_matmul`."""
-    from tritonblas import matmul as _m
+    # tritonblas/__init__.py does `from .matmul import matmul`, which makes
+    # `tritonblas.matmul` resolve to the *function*, not the submodule. Grab
+    # the actual submodule out of sys.modules so we can introspect it.
+    import sys
+    _m = sys.modules["tritonblas.matmul"]
     calls = []
     original = _m._k971_route_to_hbl
 

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -13,6 +14,72 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# K-777 narrow override — M=N=2048, large-K, fp16/bf16
+#
+# Counter-grounded diagnosis (K-729 § PMC, K-750 paired ON/OFF, K-760 counter
+# attribution): on the M=N=2048 × K∈{4096,8192,16384} × {fp16,bf16} sub-band
+# of the K-570 large-K square cohort, Origami picks BM=BN=BK=128, NS=2, NW=8,
+# kpack=1, WPEU=1.  rocprofv2 PMC shows MFMA work matches hipBLASLt (0.96×),
+# L2-misses match (0.97–0.98×), but on-chip data movement does not:
+#   • SQ_LDS_BANK_CONFLICT = 2.10M / 8.39M / 8.39M cycles  vs hbl 0  (LDSB1)
+#   • SQ_WAIT_INST_LDS     = 4.9× / 48× / 51× higher than hbl
+#
+# Structural pipeline knobs available to Triton (NOT lds_swizzle — see K-580
+# / K-654 / K-612 / K-646 / K-683 lessons):
+#
+#   knob          K-750 measured outcome (3-shape geomean ratio hbl/tb)
+#   ───────────   ────────────────────────────────────────────────────────
+#   baseline      0.7355
+#   kpack=2       0.7507  (+1.5 pp)   ← single-knob lift, no regression
+#   NW=4 + WPEU=2 0.6772  (−5.8 pp)   regresses every cell
+#   all three     0.6862  (−4.9 pp)   regresses every cell
+#   num_stages=3  INFEASIBLE (LDS already saturated at NS=2; K-691)
+#
+# Counter mechanism for kpack=2 (K-750): kpack does NOT zero out
+# SQ_LDS_BANK_CONFLICT — those values are byte-identical between kpack=1 and
+# kpack=2 in the v2_tb_default_* / v2_tb_kpack2_* PMC dumps.  The lift comes
+# from a different counter:
+#   • SQ_INSTS_VALU drops ~4.4% (denser ds_read → register packing)
+#   • GRBM_GUI_ACTIVE drops 0.5–3.9% (matches the wall-clock lift)
+# kpack is a register-tile packing knob, NOT an LDS-padding/swizzle knob —
+# it does not correspond to Tensile's LDSB1.  Closing the LDS-bank-conflict
+# gap fully would require a Triton-AMD backend change and is out of scope.
+#
+# Predicate is intentionally narrow:  M==2048, N==2048, K∈{4096,8192,16384},
+# dtype∈{fp16,bf16}.  K-750 evidence covers the boundary cells (K=4096 and
+# K=16384); K=8192 lies between them.  M=N∈{4096,8192} cells are excluded —
+# K-707's 44-tile sweep on the larger-square cohort showed kernel-axis
+# headroom there is zero (Origami already picks the per-shape best tile),
+# and K-612 saw kpack=2 regress 5 large-square shapes by −2.9% to −11.0%.
+# M=N=1024 cells are excluded — K-738 measured kp=1,gm=1,wpeu=2 regress
+# 1024² × 4096 bf16 by −10.59% / fp16 by −7.72% on the leakage check.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_K777_LARGEK_SQUARE_2048_KS = frozenset({4096, 8192, 16384})
+
+# Escape hatch for off-by-one validation / paired ON-OFF measurement.  When
+# unset (default) the gate is ON.  Setting TB_K777_DISABLE=1 disables it.
+_K777_DISABLED = os.environ.get("TB_K777_DISABLE", "") == "1"
+
+
+def _k777_largeK_square_2048_kpack(M, N, K, dtype):
+    """Return overridden ``kpack`` for the K-777 narrow cohort, else None.
+
+    Single-knob narrow gate for the M=N=2048 × K∈{4096,8192,16384} × {fp16,bf16}
+    sub-band of the K-570 large-K square cohort.  Hand-tuned from K-729 +
+    K-750 + K-760 PMC evidence; see K-777 ticket note.
+    """
+    if _K777_DISABLED:
+        return None
+    if dtype is not torch.float16 and dtype is not torch.bfloat16:
+        return None
+    if M != 2048 or N != 2048:
+        return None
+    if K not in _K777_LARGEK_SQUARE_2048_KS:
+        return None
+    return 2
 
 
 _tensor_cache = {}
@@ -99,6 +166,10 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    # K-777 narrow override — large-K square M=N=2048 fp16/bf16 only.
+    _ovr = _k777_largeK_square_2048_kpack(M, N, K, a.dtype)
+    if _ovr is not None:
+        kpack = _ovr
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -245,6 +316,10 @@ def streamk_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    # K-777 narrow override — large-K square M=N=2048 fp16/bf16 only.
+    _ovr = _k777_largeK_square_2048_kpack(M, N, K, a.dtype)
+    if _ovr is not None:
+        kpack = _ovr
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

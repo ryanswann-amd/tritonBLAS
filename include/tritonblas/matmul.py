@@ -29,22 +29,69 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 # K-742: FP8 e4m3fnuz tall-skinny tile-shrink override for MI300X.
 # Origami over-tiles M (selects BM=256, BN=256 for several tall-skinny shapes)
 # and uses BK=64 producing 32-64 mainloop iters that pin VALUUtil~100% with
-# MfmaUtil<5%.  A single tile (BM=64, BN=32, BK=256, num_warps=4, num_stages=2)
-# beats Origami on the K-717 36-shape cohort with geomean lift 1.64x and lifts
-# tritonblas/hipBLASLt geomean from 0.539 to 0.882.  Two cells where this tile
-# regresses are excluded.  Predicate is strict (M, N, K) equality + dtype +
-# !work_stealing so out-of-cohort selector tuples remain bit-identical.
+# MfmaUtil<5%.  Tile (BM=64, BN=32, BK=256, num_warps=4, num_stages=2) beats
+# Origami on the K-717 e4m3fnuz cohort: cohort geomean lift 1.64x and
+# tritonblas/hipBLASLt geomean 0.539 -> 0.882.  Predicate is strict equality
+# on (M, N, K) + a/b/c dtype + row-major strides + !work_stealing so out-of-
+# cohort selector tuples remain bit-identical to upstream Origami selection.
+# Near-cohort skips (work_stealing=True, non-bf16 out, non-row-major strides)
+# log a warning so callers see signal instead of silently regressing.
 _K742_FP8_TS_TILE = (64, 32, 256, 4, 2)  # BM, BN, BK, num_warps, num_stages
-_K742_FP8_TS_SHAPES = frozenset(
-    (M, N, K)
-    for M in (4096, 8192, 16384) for N in (16, 32, 64, 128) for K in (1024, 2048, 4096)
-    if (M, N, K) not in {(8192, 128, 1024), (8192, 128, 2048)}
-)
-def _k742_should_override(M, N, K, a_dtype, b_dtype, work_stealing):
-    return (not work_stealing
-            and a_dtype == torch.float8_e4m3fnuz
-            and b_dtype == torch.float8_e4m3fnuz
-            and (M, N, K) in _K742_FP8_TS_SHAPES)
+
+# Cohort: M in {4096, 8192, 16384} x N in {16, 32, 64, 128} x K in {1024, 2048, 4096}
+# minus (8192, 128, 1024) and (8192, 128, 2048) where this tile regresses
+# vs Origami's selection (kept Origami there; K-717 confirms <3% off-peak).
+_K742_FP8_TS_SHAPES = frozenset({
+    (4096,  16, 1024), (4096,  16, 2048), (4096,  16, 4096),
+    (4096,  32, 1024), (4096,  32, 2048), (4096,  32, 4096),
+    (4096,  64, 1024), (4096,  64, 2048), (4096,  64, 4096),
+    (4096, 128, 1024), (4096, 128, 2048), (4096, 128, 4096),
+    (8192,  16, 1024), (8192,  16, 2048), (8192,  16, 4096),
+    (8192,  32, 1024), (8192,  32, 2048), (8192,  32, 4096),
+    (8192,  64, 1024), (8192,  64, 2048), (8192,  64, 4096),
+    # (8192, 128, 1024) excluded: Origami wins.
+    # (8192, 128, 2048) excluded: Origami wins.
+    (8192, 128, 4096),
+    (16384,  16, 1024), (16384,  16, 2048), (16384,  16, 4096),
+    (16384,  32, 1024), (16384,  32, 2048), (16384,  32, 4096),
+    (16384,  64, 1024), (16384,  64, 2048), (16384,  64, 4096),
+    (16384, 128, 1024), (16384, 128, 2048), (16384, 128, 4096),
+})
+
+import logging as _k742_logging
+_K742_LOG = _k742_logging.getLogger("tritonblas.matmul.k742")
+
+
+def _k742_should_override(M, N, K, a, b, c, work_stealing):
+    """Return True iff the K-742 FP8 tall-skinny override should fire.
+
+    Strict guards: any near-cohort shape that fails a guard logs a warning
+    so callers don't silently regress to the over-tiled Origami selection.
+    """
+    if (M, N, K) not in _K742_FP8_TS_SHAPES:
+        return False
+    fp8 = torch.float8_e4m3fnuz
+    if a.dtype != fp8 or b.dtype != fp8:
+        return False  # not our dtype envelope, no warning
+    why = None
+    if work_stealing:
+        why = "work_stealing=True (override only validated on persistent path)"
+    elif c.dtype != torch.bfloat16:
+        why = f"c.dtype={c.dtype} (override tuned for bfloat16 output)"
+    elif not (a.is_cuda and b.is_cuda and c.is_cuda
+              and a.device == b.device == c.device):
+        why = f"device mismatch a={a.device} b={b.device} c={c.device}"
+    elif a.stride(1) != 1 or b.stride(0) != 1 or c.stride(1) != 1:
+        why = (f"non-row-major strides a={tuple(a.stride())} "
+               f"b={tuple(b.stride())} c={tuple(c.stride())}")
+    if why is not None:
+        _K742_LOG.warning(
+            "K-742: in-cohort shape (M=%d,N=%d,K=%d) skipped: %s. "
+            "Falling back to Origami (may over-tile and regress).",
+            M, N, K, why,
+        )
+        return False
+    return True
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -111,7 +158,7 @@ def persistent_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    if _k742_should_override(M, N, K, a.dtype, b.dtype, work_stealing):
+    if _k742_should_override(M, N, K, a, b, c, work_stealing):
         BLK_M, BLK_N, BLK_K, num_warps, num_stages = _K742_FP8_TS_TILE
 
     total_blocks_M = triton.cdiv(M, BLK_M)

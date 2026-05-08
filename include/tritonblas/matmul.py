@@ -286,8 +286,14 @@ _K725_GROUP_M = 8
 _K725_NUM_XCDS = 8
 
 
+_K725_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K725", "") == "1"
+
+
 def _is_k725_n64_tall_skinny(M, N, K, dtype):
     """K-725 cohort gate: tall-skinny FP16/BF16 GEMM with N=64 strict.
+
+    K-789: TRITONBLAS_DISABLE_K725=1 forces False so the paired audit harness
+    can isolate K-725 without monkey-patching.
 
     Tightened envelope from the K-725 32-cell verify sweep -- captures
     every (M,K) cell where the K-725 candidate beat Origami by >=1.20x
@@ -305,6 +311,8 @@ def _is_k725_n64_tall_skinny(M, N, K, dtype):
         i.e. 6 cells across fp16/bf16.  This prevents double-routing
         (K-725 short-circuits before persistent_matmul_lt is reached).
     """
+    if _K725_DISABLED:
+        return False
     if dtype not in (torch.float16, torch.bfloat16):
         return False
     if N != _K725_BLOCK_N:        # strict-equality: N must equal BLOCK_N to avoid padding

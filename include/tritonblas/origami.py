@@ -28,6 +28,20 @@ def estimate_triton_lds_bytes(
     Validated against metadata.shared from compiled Triton kernels on gfx942
     (Triton 3.6.0+rocm7.2.0): 35/35 configs matched exactly.
 
+    NOTE on the NS=1 false attractor (MI300X / gfx942, large-K square FP16/BF16
+    cohort M=N in {2048,4096,8192} x K in {4096,8192,16384}):
+    The ns==1 branch above admits BK in {128,256} at the 256x256 tile that
+    ns==2 statically rejects, which makes "drop NS to 1, double BK" look
+    attractive on paper. A 22-tile x 18-shape paired CUDA-graph sweep on
+    MI300X falsified this: every cell regresses -13.7%..-27.6% vs HEAD on
+    the best NS=1 tile per cell, the (256,256,128,NS=1) candidate is ~5x
+    slower than HEAD, and the staging-only ablation NS=2->NS=1 at fixed
+    (256,256,64) regresses -20%..-26% on every M=N>=4096 cell. Mechanism:
+    NS=1 removes Triton's software pipeline that overlaps next K-tile's
+    global_load with current K-tile's mfma/ds_read, so a 2x larger BK at
+    NS=1 LENGTHENS each iteration without restoring overlap. Do not gate
+    NS=1 + larger-BK overrides on this cohort without re-measuring.
+
     Args:
         block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
         bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).

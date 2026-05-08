@@ -30,10 +30,11 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 # Origami over-tiles BM and under-stages BK on this 27-shape cohort,
 # costing 1.46-2.10x vs hipBLASLt. A narrow predicate routing to
 # (BM=32, NS=2, KP=1) (or (32,1,2) for the M=64,N=4096 sub-band) lifts the
-# cohort geomean from 0.34x -> 0.41x of hipBLASLt (+21.5% over Origami)
-# with one within-noise regression (-4.3% on M=16,N=4096,K=16384) and zero
-# leakage outside the predicate. M=64,N=8192 is intentionally skipped --
-# Origami already wins there. See K-695.
+# cohort geomean from 0.34x -> 0.42x of hipBLASLt (+22.7% over Origami) with
+# zero >3% in-cohort regressions and zero leakage outside the predicate.
+# Sub-bands skipped: M=64,N=8192 (Origami already optimal) and
+# (M=16,N=4096,K=16384) (sweep winner is the Origami default at this K).
+# See K-695.
 _FP8_E4M3FNUZ = getattr(torch, "float8_e4m3fnuz", None)
 _K695_M = (16, 32, 64)
 _K695_N = (4096, 8192, 16384)
@@ -48,6 +49,8 @@ def _k695_tile_override(M, N, K, a_dtype):
         return None
     if M == 64 and N == 8192:  # Origami already optimal on this sub-band
         return None
+    if M == 16 and N == 4096 and K == 16384:  # sweep winner matches Origami
+        return None                            # default; override regresses
     if M == 64 and N == 4096:  # NS=1 needed because Origami picks BK=512
         return (32, 1, 2)
     return (32, 2, 1)

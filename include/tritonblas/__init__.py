@@ -15,8 +15,11 @@ from .guarded_override import (
     set_arch_lds_budget,
     lds_budget_for,
 )
-# NOTE: no GuardedOverride is registered in the production package by default.
-# The harness is the deliverable; concrete overrides must register themselves
-# explicitly only after passing the K-883 §5 LAND verdict via run_falsification.
-# (K-882's prototype lives in tests/ as a regression fixture for the harness;
-# it carries a NO-LAND verdict and therefore intentionally does not ship here.)
+# NOTE: GuardedOverrides are registered through the ``overrides`` subpackage
+# below.  Each override is OFF by default (env-var killswitch must be flipped
+# to fire) so this is fail-closed at import time — the registry singleton
+# carries the gates but ``OverrideRegistry.apply(...)`` returns None until the
+# operator explicitly arms the corresponding env var.  Concrete overrides
+# must have a LAND verdict from ``run_falsification`` before being added.
+# K-882's NO-LAND prototype intentionally lives in tests/ and never ships here.
+from . import overrides as _overrides  # noqa: F401  (registers K-935 gate)

@@ -26,6 +26,34 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+def _num_warps_for_tall_skinny_fp16_bf16(M: int, N: int, K: int, dtype: torch.dtype) -> int:
+    """Tall-skinny FP16/BF16 cohort override (default 8 -> 4).
+
+    On the M in {2048, 4096}, N <= 64, K >= 2048, fp16/bf16 sub-cohort the
+    Origami selector picks a small persistent tile (BLOCK_N=16) that leaves
+    50% of the MFMA N-lanes masked, and the resulting kernel is VALU-bound
+    (rocprofv2 VALUUtil ~100%, MfmaUtil ~4%) per K-668. Cutting num_warps
+    from 8 to 4 lets the issue scheduler pack two unrolled K-loop iterations
+    per VALU slot, restoring kernel time to within range of hipBLASLt.
+
+    Validated on MI300X / gfx942 via paired HIP-graph kernel-only
+    timing (n_warm=3, n_capture=15, n_rounds=5). Worst-4 cohort speedup
+    geomean 1.41x (min 1.31x); 12-shape neighbor cohort speedup geomean
+    1.51x (min 1.10x). Out-of-cohort guard shapes (squares, large-N,
+    M=8192/16384, K<2048) regress 8-34% with this override -- gate is
+    therefore strictly conjunctive on (M, N, K, dtype).
+    """
+    if dtype not in (torch.float16, torch.bfloat16):
+        return 8
+    if M not in (2048, 4096):
+        return 8
+    if N > 64:
+        return 8
+    if K < 2048:
+        return 8
+    return 4
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -95,7 +123,7 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = _num_warps_for_tall_skinny_fp16_bf16(M, N, K, a.dtype)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +269,7 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    num_warps = _num_warps_for_tall_skinny_fp16_bf16(M, N, K, a.dtype)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1

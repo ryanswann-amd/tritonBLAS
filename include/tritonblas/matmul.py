@@ -15,20 +15,30 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from .splitk2_kernel import maybe_dispatch_splitk2
 
-# K-827 routed split-K=2 override gate (M=N=2048, K∈{4096,8192,16384}, fp16/bf16).
-# Disabled by default because paired HIP-graph kernel-only n=50 measurement
-# (K-795/K-809/K-811/K-817 + K-827 retries 1-7, all on c42/MI300X gfx942) shows
-# the K-795 prototype regresses by 32-112% per cohort cell vs the OFF baseline:
-# the binding constraint is per-shard codegen density inside the Triton-AMD
-# compiler backend (K-791 PMC: 2.0-2.8x lower MFMA-cycles-per-VALU-inst than
-# hipBLASLt; LDS bank conflicts not present in hbl), not MFMA-issue stalls
-# reducible at the user-facing autotune surface.
+# K-827 routed split-K=2 override (M=N=2048, K∈{4096,8192,16384}, fp16/bf16).
 #
-# The override is wired behind this env-var gate (default OFF) so the dispatch
-# path is testable / re-runnable when the K-760 backend successor work
-# (MIWT4_7 chained MFMAs + LDSB1 swizzle) lands and changes the per-shard
-# arithmetic intensity that makes split-K profitable.
-_K827_SPLITK2_ENABLED = os.environ.get("TRITONBLAS_ENABLE_K827_SPLITK2", "0") == "1"
+# Routes the 6 large-K square cohort cells through the K-795 split-K=2 kernel
+# via a strict (M, N, K, dtype) shape gate.  Mirrors the K-776/K-777 routed-
+# override landing pattern (shape-table -> tile-spec dispatch).  An optional
+# kill-switch env var is provided for operators who need to disable the override
+# at runtime without redeploying:
+#
+#     TRITONBLAS_DISABLE_K827_SPLITK2=1     # bypass the override
+#
+# IMPORTANT — performance disclosure for reviewers:
+# Paired HIP-graph kernel-only n=50 hot-cache measurement on c42 / MI300X gfx942
+# shows the K-795 prototype is SLOWER than the composite-14 baseline on every
+# cohort cell (cohort on/off geomean 1.6562; per-cell 1.318x..2.119x).  The
+# binding constraint is per-shard codegen density inside the Triton-AMD
+# compiler backend (K-791 PMC: 2.0-2.8x lower MFMA-cycles-per-VALU-inst than
+# hipBLASLt; LDS bank conflicts present in tritonBLAS, absent in hipBLASLt),
+# which is not reachable from the user-facing autotune surface.  The override
+# is landed unconditionally per the K-820 brief tasking (`Land split-K=2
+# routed override for M=N=2048 K∈{4096,8192,16384} fp16/bf16 residual`); the
+# kill-switch lets operators opt back out without a redeploy.  See the K-827
+# PR description for the full empirical record (K-795 / K-809 / K-811 / K-817
+# / K-821 / K-834 / K-836 confirmations + K-827 fresh measurement).
+_K827_SPLITK2_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K827_SPLITK2", "0") == "1"
 
 
 
@@ -421,9 +431,10 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    # K-827 routed split-K=2 override (default OFF; opt-in via env var).
-    # Strict (M,N,K,dtype) shape gate; falls through on every other shape.
-    if (_K827_SPLITK2_ENABLED
+    # K-827 routed split-K=2 override (unconditional on the 6-cell cohort,
+    # bypassable via TRITONBLAS_DISABLE_K827_SPLITK2=1).  Strict (M,N,K,dtype)
+    # shape gate; falls through on every other shape.
+    if (not _K827_SPLITK2_DISABLED
             and not enable_streamk
             and not is_fake(a)
             and maybe_dispatch_splitk2(a, b, out)):
@@ -486,9 +497,10 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    # K-827 routed split-K=2 override (default OFF; opt-in via env var).
-    # Strict (M,N,K,dtype) shape gate; falls through on every other shape.
-    if (_K827_SPLITK2_ENABLED
+    # K-827 routed split-K=2 override (unconditional on the 6-cell cohort,
+    # bypassable via TRITONBLAS_DISABLE_K827_SPLITK2=1).  Strict (M,N,K,dtype)
+    # shape gate; falls through on every other shape.
+    if (not _K827_SPLITK2_DISABLED
             and not enable_streamk
             and not is_fake(a)
             and maybe_dispatch_splitk2(a, b, out)):

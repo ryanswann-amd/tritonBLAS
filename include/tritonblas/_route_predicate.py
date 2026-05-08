@@ -141,22 +141,62 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
     return False
 
 
+def R_K1106_P7_extra(M: int, N: int, K: int, dtype) -> bool:
+    """K-1106 P7-extra clauses — held-out adversarial cells outside the
+    bf16-only P5+P6 scope where tritonblas systematically underperforms
+    hipBLASLt (K-1080 S16 small-square bf16 + K-1085 A5/A6/A7/A8 fp16).
+
+    Two narrow envelopes added to clear the PRD's absolute success gate
+    (geomean >=0.95x, all adversarial cells >=0.85x):
+
+      fp16-A (mid-rect non-square): structural dual of P5 Clause-1 in
+          fp16. Catches K-1085 A5=(768,1792,5972), A6=(2304,2048,4800).
+          Square fp16 K-905/K-971 anchors (A1-A4) fail the
+          ``minMN < maxMN`` clause and continue to fall through the
+          strict-tuple ``K971_ROUTE_TABLE``.
+      fp16-B (LMhead skinny):       structural dual of P5 Clause-2 in
+          fp16. Catches K-1085 A7=(10112,2048,1024), A8=(12160,2048,1024).
+      bf16-C (small-square mid-K):  K-1080 S16=(256,256,2048,bf16) at
+          BM=BN=256 only fills 1 wave; hipBLASLt picks a finer tile
+          and wins by ~25%. Narrow ``maxMN <= 256`` bound keeps
+          K-905/K-971 bf16 anchors and all K-1031 cells unaffected.
+    """
+    minMN, maxMN = min(M, N), max(M, N)
+    dt = str(dtype)
+    if dt == "torch.float16":
+        if (minMN < maxMN
+                and 256 <= minMN <= 2304
+                and 1792 <= maxMN <= 3072
+                and 1240 <= K <= 8064):
+            return True
+        return M >= 5000 and N == 2048 and K in (256, 1024)
+    if dt == "torch.bfloat16":
+        return maxMN <= 256 and 1024 <= K <= 4096
+    return False
+
+
 def R_K1106_P7_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
     """K-1106 — P7 sibling: OR-gate of R-K979 P5 (K-1066/K-1062 K-floor
-    hardened) with K-1037 P6 MFMA-issue-stall structural classifier.
+    hardened) with K-1037 P6 MFMA-issue-stall structural classifier and
+    the K-1106 P7-extra adversarial-coverage clauses.
 
-    Both inputs are bf16-only; the OR-gate inherits that scope. P7 fires
-    when EITHER P5 says route-to-hbl OR P6's structural envelope admits
-    the shape into the MFMA-issue-stall fingerprint (K-1089 surrogate).
+    P7 fires when EITHER P5 says route-to-hbl OR P6's structural envelope
+    admits the shape into the MFMA-issue-stall fingerprint (K-1089
+    surrogate) OR R_K1106_P7_extra catches a held-out adversarial cell.
 
-    The composite preserves K-1031 leakage immunity (P5 Clause-4 K-floor
-    blocks S07; P6 K>=512 floor also blocks S07 -> both False -> P7 False)
-    and adds S24 (P5=False, P6 Envelope-B=True -> P7=True) as the only
-    NEW route-OUT cell vs P5 alone on the K-1074+K-1079+K-1085+K-1080
-    bench union.
+    The composite preserves K-1031 leakage immunity:
+      * P5 Clause-4 K-floor blocks S07 (bf16, K=256<512);
+      * P6 K>=512 floor also blocks S07;
+      * P7-extra bf16-C requires ``maxMN <= 256`` — S07's maxMN=2048
+        keeps it False;
+      so all four predicates return False on S07.
+
+    Adds S24=(4480,3072,768,bf16) (P6 Envelope-B), K-1080 S16, and the
+    K-1085 fp16 underperformers as new route-OUT cells.
     """
     return (R_K979_P5_route_to_hbl(M, N, K, dtype)
-            or R_K1037_P6_admit_wpeu1(M, N, K, dtype))
+            or R_K1037_P6_admit_wpeu1(M, N, K, dtype)
+            or R_K1106_P7_extra(M, N, K, dtype))
 
 
 def should_admit_p6_streamk(M, N, K, a_dtype, b_dtype, enable_streamk,

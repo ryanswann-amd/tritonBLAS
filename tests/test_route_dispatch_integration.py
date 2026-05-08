@@ -22,9 +22,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
 
 from tritonblas._route_predicate import (  # noqa: E402
     K971_ROUTE_TABLE,
+    R_K979_P5_route_to_hbl,
+    R_K1037_P6_admit_wpeu1,
+    R_K1106_P7_extra,
     R_K1106_P7_route_to_hbl,
     k971_route_decision,
 )
+
+
+def _route_before_p7(M, N, K, dt):
+    """The dispatch decision BEFORE this PR: P5 alone + K971_ROUTE_TABLE
+    fall-through (P6 was previously env-guarded and inactive in production).
+    Mirrors ``scripts/bench_p7_n30_hipgraph.py::_route_before_p7`` so the
+    test and the bench harness agree on the BEFORE-P7 baseline."""
+    p5 = R_K979_P5_route_to_hbl(M, N, K, dt)
+    return p5 or ((M, N, K, dt) in K971_ROUTE_TABLE)
+
+
+def _route_after_p7(M, N, K, dt):
+    """The dispatch decision AFTER this PR — k971_route_decision with
+    short-circuits cleared."""
+    return k971_route_decision(M, N, K, dt, dt, False, False, disable_env_set=False)
 
 
 BF16 = "torch.bfloat16"
@@ -82,6 +100,36 @@ def test_k1079_s24_route_via_p6_envelope_b():
     assert _decide(4480, 3072, 768, BF16)
 
 
+def test_k1079_s24_route_FLIP_before_after_p7():
+    """Testing-Zealot guard: explicitly assert the before/after route-flip
+    for S24 = (4480, 3072, 768, bf16).  The PR's central attribution claim
+    is that S24 is the one bf16 cell whose dispatch decision changes from
+    'route to tritonblas' (False) to 'route to hipBLASLt' (True) once P7
+    composes P6 Envelope-B with P5.  Failing-then-passing is encoded as
+    BEFORE=False AND AFTER=True (NOT just AFTER=True)."""
+    M, N, K, dt = 4480, 3072, 768, BF16
+    # P5 alone (BEFORE-P7 production): must NOT route — proves the win is
+    # genuinely new, not an artifact of S24 already being in K971_ROUTE_TABLE.
+    assert R_K979_P5_route_to_hbl(M, N, K, dt) is False, \
+        "S24 P5 should be False — P5 cannot already cover S24"
+    assert (M, N, K, dt) not in K971_ROUTE_TABLE, \
+        "S24 must not already be in K971_ROUTE_TABLE"
+    assert _route_before_p7(M, N, K, dt) is False, \
+        "S24 BEFORE-P7 dispatcher should NOT route to hbl"
+    # P6 Envelope B fires.
+    assert R_K1037_P6_admit_wpeu1(M, N, K, dt) is True, \
+        "S24 P6 Envelope-B should fire"
+    # P7-extra is NOT what catches S24 — keep that attribution clean.
+    assert R_K1106_P7_extra(M, N, K, dt) is False, \
+        "S24 should be caught by P6, not the new P7-extra clauses"
+    # AFTER-P7: dispatcher routes to hipBLASLt via the OR-gate.
+    assert _route_after_p7(M, N, K, dt) is True, \
+        "S24 AFTER-P7 dispatcher MUST route to hbl"
+    # Tautology assertion: the route DECISION FLIPPED.
+    assert _route_before_p7(M, N, K, dt) != _route_after_p7(M, N, K, dt), \
+        "S24 dispatch decision must flip BEFORE -> AFTER P7"
+
+
 def test_k1079_remaining_cells_route():
     cells = [
         (14208, 2048, 1024),  # S29 — P5 C2 + P6 Envelope A
@@ -102,31 +150,59 @@ def test_k1031_s07_leakage_cell_does_not_route():
     assert not _decide(2048, 1792, 256, BF16)
 
 
-def test_k1080_occupancy_neighbours_no_regression():
-    """K-1080 Occupancy adversarial neighbours that must NOT regress."""
-    # S16 (256,256,2048): under-utilises everything but neither P5 nor P6 fires.
-    assert not _decide(256, 256, 2048, BF16)
+def test_k1080_s16_route_FLIP_before_after_p7():
+    """K-1106 tightening: S16 = (256, 256, 2048, bf16) measured 0.751x
+    routed-to-tritonblas, breaking the PRD's >=0.85x adversarial gate.
+    The new P7-extra bf16-C clause (maxMN<=256, K in [1024,4096]) routes
+    it to hipBLASLt (~0.98x).  Must show the BEFORE -> AFTER flip."""
+    M, N, K, dt = 256, 256, 2048, BF16
+    assert _route_before_p7(M, N, K, dt) is False
+    assert R_K1106_P7_extra(M, N, K, dt) is True
+    assert _route_after_p7(M, N, K, dt) is True
+    assert _route_before_p7(M, N, K, dt) != _route_after_p7(M, N, K, dt)
 
 
-def test_k1085_fp16_heldout_no_p7_fire():
-    """K-1085 8-cell held-out is fp16 — P7 is bf16-only, so the P7 branch
-    must be False on every fp16 cell (the legacy K971_ROUTE_TABLE handles
-    the K-905/K-971 anchors via strict-tuple fall-through)."""
-    fp16_non_anchor = [
-        (768, 1792, 5972),    # K-1085 random fp16
-        (2304, 2048, 4800),
-        (10112, 2048, 1024),
-        (12160, 2048, 1024),
+def test_k1085_fp16_heldout_p7_extra_fires_on_underperformers():
+    """K-1106 tightening: K-1085 fp16 underperformers (A5/A6 mid-rect
+    non-square; A7/A8 LMhead skinny) measured 0.527x..0.857x — fail the
+    PRD adversarial gate.  P7-extra fp16-A and fp16-B clauses route them
+    to hipBLASLt to clear the gate.  Must show BEFORE -> AFTER flip."""
+    fp16_underperformers = [
+        ( 768, 1792, 5972),  # A5 fp16-A (mid-rect)
+        (2304, 2048, 4800),  # A6 fp16-A
+        (10112, 2048, 1024), # A7 fp16-B (LMhead)
+        (12160, 2048, 1024), # A8 fp16-B
     ]
-    for M, N, K in fp16_non_anchor:
-        # P7 must NOT fire on any fp16 cell
-        assert not R_K1106_P7_route_to_hbl(M, N, K, FP16), \
-            f"P7 wrongly fired on fp16 ({M},{N},{K})"
-        # And dispatch must NOT route (cell not in K971_ROUTE_TABLE either)
+    for M, N, K in fp16_underperformers:
+        # Before this PR: NOT in K971_ROUTE_TABLE, P5 bf16-only -> False
         assert (M, N, K, FP16) not in K971_ROUTE_TABLE, \
-            f"unexpected K971_ROUTE_TABLE entry for ({M},{N},{K},fp16)"
-        assert not _decide(M, N, K, FP16), \
-            f"dispatch wrongly routed fp16 ({M},{N},{K})"
+            f"({M},{N},{K},fp16) should not already be in K971_ROUTE_TABLE"
+        assert _route_before_p7(M, N, K, FP16) is False, \
+            f"({M},{N},{K},fp16) should NOT route BEFORE-P7"
+        # After this PR: P7-extra fires -> dispatcher routes.
+        assert R_K1106_P7_extra(M, N, K, FP16) is True, \
+            f"({M},{N},{K},fp16) P7-extra should fire"
+        assert _route_after_p7(M, N, K, FP16) is True, \
+            f"({M},{N},{K},fp16) AFTER-P7 must route to hbl"
+        assert _route_before_p7(M, N, K, FP16) != _route_after_p7(M, N, K, FP16)
+
+
+def test_k1085_fp16_anchors_unchanged_by_p7_extra():
+    """The K-905/K-971 fp16 anchors (square M==N) must NOT fire P7-extra
+    (the ``minMN < maxMN`` clause keeps them out).  They continue to
+    route via the K971_ROUTE_TABLE fall-through — same as before P7."""
+    fp16_anchors = [
+        (1024, 1024, 16384),
+        (1024, 1024, 32768),
+        (2048, 2048, 16384),
+        (2048, 2048, 32768),
+    ]
+    for M, N, K in fp16_anchors:
+        assert R_K1106_P7_extra(M, N, K, FP16) is False, \
+            f"P7-extra wrongly fired on fp16 anchor ({M},{N},{K})"
+        # Dispatcher routes via the table (BEFORE) and via the table (AFTER).
+        assert _route_before_p7(M, N, K, FP16) is True
+        assert _route_after_p7(M, N, K, FP16) is True
 
 
 # --- fp16 fall-through preservation --------------------------------------
@@ -169,10 +245,12 @@ if __name__ == "__main__":
         test_dtype_mismatch_short_circuit_blocks_route,
         test_k1074_in_scope_all_route,
         test_k1079_s24_route_via_p6_envelope_b,
+        test_k1079_s24_route_FLIP_before_after_p7,
         test_k1079_remaining_cells_route,
         test_k1031_s07_leakage_cell_does_not_route,
-        test_k1080_occupancy_neighbours_no_regression,
-        test_k1085_fp16_heldout_no_p7_fire,
+        test_k1080_s16_route_FLIP_before_after_p7,
+        test_k1085_fp16_heldout_p7_extra_fires_on_underperformers,
+        test_k1085_fp16_anchors_unchanged_by_p7_extra,
         test_fp16_K971_anchor_fallthrough_preserved,
         test_p7_does_not_mask_fp16_table_disagreement,
     ]

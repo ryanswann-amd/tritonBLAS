@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "include"))
 from tritonblas._route_predicate import (  # noqa: E402
     R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1,
+    R_K1106_P7_extra,
     R_K1106_P7_route_to_hbl,
 )
 
@@ -47,23 +48,31 @@ K1079_CELLS = [
     ("S07",  2048, 1792,  256, BF16, False, False, False),  # K-1031 leakage ctrl
 ]
 
-# K-1080 Occupancy neighbours adversarial: S16 + S30 must NOT route-OUT
-# (S26, S37 already fire P5 — same as K-1074 entries above)
+# K-1080 Occupancy neighbours adversarial.  K-1106 tightening: S16
+# (256,256,2048,bf16) measured 0.751x routed-to-tritonblas — the small-square
+# bf16 mid-K bf16-C clause now routes it to hipBLASLt (~0.98x) to clear the
+# PRD's absolute >=0.85x adversarial gate.  S30 already fires P5 Clause-2.
 K1080_ADVERSARIAL = [
-    ("S16",   256,  256, 2048, BF16, False, False, False),  # K-1050 survivor
+    ("S16",   256,  256, 2048, BF16, False, False, True),   # K-1106 P7-extra bf16-C
     ("S30", 16256, 2048, 1024, BF16, True,  False, True),   # already P5+
     ("S07",  2048, 1792,  256, BF16, False, False, False),  # K-1031 leakage
 ]
 
-# K-1085 fp16 held-out: ALL 7 must return False (bf16-only gate)
+# K-1085 fp16 held-out.  K-1106 tightening: A5/A6 (mid-rect non-square)
+# fire P7-extra fp16-A; A7/A8 (LMhead skinny) fire P7-extra fp16-B.
+# A1-A4 are square fp16 K-905/K-971 anchors — Clause-1's ``minMN<maxMN``
+# bound keeps them False so they route via K971_ROUTE_TABLE strict-tuple
+# fall-through (preserves K-905/K-971 anchor handling end-to-end).
+# Tuple: (M, N, K, dtype, expect_p7_extra)
 K1085_HELDOUT_FP16 = [
-    ( 1024, 1024, 32768, FP16),
-    ( 2048, 2048, 16384, FP16),
-    ( 2048, 2048, 32768, FP16),
-    (  768, 1792,  5972, FP16),
-    ( 2304, 2048,  4800, FP16),
-    (10112, 2048,  1024, FP16),
-    (12160, 2048,  1024, FP16),
+    ( 1024, 1024, 16384, FP16, False),  # K-905 anchor (square -> fall-through)
+    ( 1024, 1024, 32768, FP16, False),  # K-971 anchor
+    ( 2048, 2048, 16384, FP16, False),  # K-971 anchor
+    ( 2048, 2048, 32768, FP16, False),  # K-971 anchor
+    (  768, 1792,  5972, FP16, True),   # A5 mid-rect non-square
+    ( 2304, 2048,  4800, FP16, True),   # A6 mid-rect non-square
+    (10112, 2048,  1024, FP16, True),   # A7 LMhead skinny
+    (12160, 2048,  1024, FP16, True),   # A8 LMhead skinny
 ]
 
 
@@ -73,9 +82,11 @@ def _check(cells, label):
         name, M, N, K, dtype, ep5, ep6, ep7 = cell
         gp5 = R_K979_P5_route_to_hbl(M, N, K, dtype)
         gp6 = R_K1037_P6_admit_wpeu1(M, N, K, dtype)
+        gx  = R_K1106_P7_extra(M, N, K, dtype)
         gp7 = R_K1106_P7_route_to_hbl(M, N, K, dtype)
-        # P7 OR-gate invariant
-        assert gp7 == (gp5 or gp6), f"{label}/{name}: P7 != P5 OR P6"
+        # P7 OR-gate invariant — now includes P7-extra
+        assert gp7 == (gp5 or gp6 or gx), \
+            f"{label}/{name}: P7 != P5 OR P6 OR P7-extra"
         if (gp5, gp6, gp7) != (ep5, ep6, ep7):
             failures.append((label, name, (gp5, gp6, gp7), (ep5, ep6, ep7)))
     return failures
@@ -96,30 +107,42 @@ def test_k1080_occupancy_neighbours_no_regression():
     assert not fails, f"K-1080 adversarial mismatches: {fails}"
 
 
-def test_k1085_fp16_heldout_no_fire():
-    """fp16 cells must NEVER fire P7 (bf16-only gate -> zero regression)."""
-    for M, N, K, dt in K1085_HELDOUT_FP16:
-        assert not R_K1106_P7_route_to_hbl(M, N, K, dt), \
-            f"K-1085 fp16 ({M},{N},{K}) wrongly fired P7"
+def test_k1085_fp16_heldout_p7_extra_fires_on_underperformers():
+    """K-1106 tightening: held-out fp16 underperformers (A5-A8) must fire
+    P7-extra to clear the PRD's absolute >=0.85x adversarial gate; the
+    square K-905/K-971 fp16 anchors (A1-A4) must NOT fire P7 (they are
+    handled by the K971_ROUTE_TABLE strict-tuple fall-through)."""
+    for M, N, K, dt, expect_extra in K1085_HELDOUT_FP16:
+        gx = R_K1106_P7_extra(M, N, K, dt)
+        gp7 = R_K1106_P7_route_to_hbl(M, N, K, dt)
+        assert gx == expect_extra, \
+            f"K-1085 fp16 ({M},{N},{K}) P7-extra={gx} expected {expect_extra}"
+        # P5 and P6 are bf16-only -> P7 == P7-extra on every fp16 cell.
+        assert gp7 == expect_extra, \
+            f"K-1085 fp16 ({M},{N},{K}) P7={gp7} expected {expect_extra}"
 
 
 def test_p7_or_gate_invariant_random_grid():
-    """P7 must equal (P5 or P6) on a structural grid spanning the bench union."""
+    """P7 must equal (P5 OR P6 OR P7-extra) on a structural grid."""
     for M in (256, 1024, 2048, 4480, 5972, 8064, 14208, 25600, 49152):
         for N in (256, 1792, 2048, 3072):
             for K in (200, 256, 512, 768, 1024, 2048, 4096):
                 for dt in (BF16, FP16):
                     p5 = R_K979_P5_route_to_hbl(M, N, K, dt)
                     p6 = R_K1037_P6_admit_wpeu1(M, N, K, dt)
+                    px = R_K1106_P7_extra(M, N, K, dt)
                     p7 = R_K1106_P7_route_to_hbl(M, N, K, dt)
-                    assert p7 == (p5 or p6), \
+                    assert p7 == (p5 or p6 or px), \
                         f"P7 OR-gate broken at ({M},{N},{K},{dt})"
 
 
 def test_k1031_s07_leakage_immunity():
-    """S07 (2048,1792,256,bf16) — K-1031 leakage cell. P7 must NOT fire."""
+    """S07 (2048,1792,256,bf16) — K-1031 leakage cell. ALL FOUR
+    predicates (P5, P6, P7-extra, P7) must return False so the
+    K-1031 leakage cell continues to route via the tritonblas path."""
     assert not R_K979_P5_route_to_hbl(2048, 1792, 256, BF16)
     assert not R_K1037_P6_admit_wpeu1(2048, 1792, 256, BF16)
+    assert not R_K1106_P7_extra(2048, 1792, 256, BF16)
     assert not R_K1106_P7_route_to_hbl(2048, 1792, 256, BF16)
 
 
@@ -130,7 +153,7 @@ if __name__ == "__main__":
         test_k1074_in_scope,
         test_k1079_in_scope,
         test_k1080_occupancy_neighbours_no_regression,
-        test_k1085_fp16_heldout_no_fire,
+        test_k1085_fp16_heldout_p7_extra_fires_on_underperformers,
         test_p7_or_gate_invariant_random_grid,
         test_k1031_s07_leakage_immunity,
     ]

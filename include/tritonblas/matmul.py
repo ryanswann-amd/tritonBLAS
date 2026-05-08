@@ -36,6 +36,119 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# ---------------------------------------------------------------------------
+# FP8 e4m3fnuz medium-K skinny-N tile-override gate.
+#
+# Cohort:  M ∈ [2048, 8192], N ∈ [32, 128], K ∈ [1024, 8192],
+#          dtype = float8_e4m3fnuz, persistent (non-streamk) path.
+#
+# Mechanism: Origami's heuristic picks small block_m (32 or 64) with extreme
+# block_k (64 for short K, 512 for long K). The 64×16×64 picks under-tile
+# the M and K dimensions (4–8× more wave dispatches than necessary); the
+# 32×16×512 picks over-tile K, breaking the K-loop pipeline and inflating
+# kernel time as K grows. A 64×32×{128,256} tile (BK chosen by K-bucket)
+# with num_stages=2, num_warps=8 closes ~58% of the residual gap to
+# hipBLASLt across the cohort (geomean 0.544 → 0.601, 36/36 verified by
+# LDS-fit grid sweep on MI300X gfx942 — see output/per_shape_best.csv).
+#
+# Excluded corner: M==2048 AND N>32 AND K>=8192 — at this small-M / long-K
+# corner, Origami's BN=16/BK=512 pick fits a single L1 line per N-stripe and
+# beats the K-624 BN=32/BK=256 tile by 3–5 µs (BN=32 wastes 50% of the
+# N-axis on padding for N=32 and overshoots the LDS-fit budget for double
+# buffering at K≥8192). Predicate: `_k624_should_skip_corner(M, N, K)`.
+#
+# Compatible with the K-605 fix (gemm_context.acc_dtype). Streamk path,
+# fp16/bf16, int8 a8w8, fp4 mx, and matmul_lt-bias paths are unchanged.
+# ---------------------------------------------------------------------------
+import os as _os_k624
+_K624_GATE_ENABLED = _os_k624.environ.get("K624_DISABLE", "0") != "1"
+
+
+def set_k624_gate(enabled: bool):
+    """In-process flip of the K-624 gate (used by A/B harnesses)."""
+    global _K624_GATE_ENABLED
+    _K624_GATE_ENABLED = bool(enabled)
+
+
+def _is_k624_cohort(M, N, K, a_dtype, b_dtype, streamk):
+    """K-624 cohort predicate: FP8 e4m3fnuz skinny-N, medium-K, persistent."""
+    if not _K624_GATE_ENABLED or streamk:
+        return False
+    if a_dtype is not torch.float8_e4m3fnuz or b_dtype is not torch.float8_e4m3fnuz:
+        return False
+    if not (2048 <= M <= 8192):
+        return False
+    if not (32 <= N <= 128):
+        return False
+    if not (1024 <= K <= 8192):
+        return False
+    # Skip the small-M / long-K corner where Origami's BN=16/BK=512 wins.
+    if M == 2048 and N > 32 and K >= 8192:
+        return False
+    return True
+
+
+def _k624_should_override(sel):
+    """K-654 narrow-when-needed: skip when Origami already has reasonable tiling.
+
+    Empirical filter (K-624 R1 grid sweep): when Origami's pick has BM≥128 AND
+    BN≥32 AND BK≥256 the kernel is already wave-amortized and our BM=64 tile
+    forces 2× more wave dispatches without recovering it on the K-iter pipeline,
+    yielding a 5–9% regression. Observed at M=8192/N=128/K∈{2048,8192}.
+    Origami's under-tiled picks (BN=16 or BK<256 or BM<128) are kept eligible
+    for override; those are where the wins live.
+    """
+    return not (sel.block_m >= 128 and sel.block_n >= 32 and sel.block_k >= 256)
+
+
+class _K624SelectorOverride:
+    """Pin BM=64, BN=32, ns=2, nw=8; BK by K bucket (128 for K≤2048, 256 else).
+
+    These are the cross-shape modal winners from the K-624 LDS-fit grid sweep
+    (BM∈{64,128,256}, BN∈{32,64,128}, BK∈{64,128,256}, ns∈{2,3,4}, nw∈{4,8}).
+    BM=128/BN=64 wins by 1–2 µs on a few short-K shapes but adds dispatch
+    branching; the single-tile-per-K-bucket choice is within 1.5 µs of the
+    per-shape optimum on every fired shape and within the run-to-run noise
+    floor (±1.5 µs over 25 iterations).
+    """
+    __slots__ = ("_inner", "_bk")
+    _BLOCK_M = 64
+    _BLOCK_N = 32
+    _NUM_STAGES = 2
+    _NUM_WARPS = 8
+
+    def __init__(self, inner, bk):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_bk", bk)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def block_m(self):
+        return self._BLOCK_M
+
+    @property
+    def block_n(self):
+        return self._BLOCK_N
+
+    @property
+    def block_k(self):
+        return self._bk
+
+    @property
+    def num_stages(self):
+        return self._NUM_STAGES
+
+    @property
+    def num_warps(self):
+        return self._NUM_WARPS
+
+    @property
+    def even_k(self):
+        return (self._inner._k % self._bk) == 0
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +165,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +177,10 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _is_k624_cohort(M, N, K, a_dtype, b_dtype, streamk) and _k624_should_override(sel):
+        bk = 128 if K <= 2048 else 256
+        return _K624SelectorOverride(sel, bk)
+    return sel
 
 
 def persistent_matmul_lt(

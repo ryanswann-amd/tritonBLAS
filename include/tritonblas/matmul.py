@@ -14,6 +14,89 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# ---------------------------------------------------------------------------
+# K-653: FP8 e5m2fnuz x e4m3fnuz medium-K square tile-override gate (MI300X)
+#
+# Origami's analytical model under-tiles 5 of the 9 medium-K square shapes in
+# this cohort vs hipBLASLt because its FP8 cost model still picks the FP16-era
+# small-N tiles for K=512 and the 256x256x128 vs 256x256x64 trade-off for the
+# K>=1024 4096^2 cases. The picks below are the per-shape sweep winners from
+# the 72-cell BMxBNxBK in {64,128,256} x num_stages in {2,3} x num_warps in
+# {4,8} grid (LDS-fit + warps-per-tile filtered), validated by paired ON/OFF
+# graph-captured runs (n_rounds=15-30, n_iters=100). Full data:
+# tritonblas-K653 workspace output/sweep_all.csv + verify.csv.
+#
+# Why these tiles win (FP8 e5m2fnuz on MI300X gfx942):
+#   - 1024x1024 K=512: 64x64x256 keeps 16 waves on-chip per workgroup so the
+#     dispatch tax (K-273) is amortized; Origami's 128x32x128 launches only
+#     4 N-side tiles which leaves CUs idle. Lift +27.5%.
+#   - 2048x2048 K in {512,1024}: BK=256 (vs Origami BK=128) halves the K-loop
+#     trip count and lets the LDS pipeline reuse the buffered B-tile across
+#     two MFMA passes. Lift +4.2-4.7%.
+#   - 4096x4096 K in {1024,2048}: BK=64 (vs Origami BK=128) is counter-
+#     intuitive but it is the only configuration that fits two waves per CU
+#     for the 256x256 output tile under the FP8 byte-pack VALU pressure
+#     measured in K-622 (5.6x VALU vs hipBLASLt). Lift +19.4-21.7%.
+#
+# Predicate is intentionally narrow: the K-622 broader-cohort sweep showed
+# no single tile family helps outside this 5-shape subset, and K-654/K-683
+# anti-patterns demand cohort-narrow gates. Adjacency shapes (K in {256,4096};
+# M!=N variants) are NOT covered - their best tile is Origami's pick within
+# noise; see verify.csv adj_only rows for empirical confirmation.
+# ---------------------------------------------------------------------------
+_K653_FP8_E5M2_MEDIUM_K_SQUARE_TILES: Dict[Tuple[int, int, int],
+                                            Tuple[int, int, int, int, int]] = {
+    # (M, N, K) -> (BM, BN, BK, num_stages, num_warps)
+    (1024, 1024,  512): ( 64,  64, 256, 2, 8),
+    (2048, 2048,  512): (128, 128, 256, 2, 8),
+    (2048, 2048, 1024): (128, 128, 256, 2, 8),
+    (4096, 4096, 1024): (256, 256,  64, 2, 8),
+    (4096, 4096, 2048): (256, 256,  64, 2, 8),
+}
+
+
+class _K653OverrideSelector:
+    """Wraps an OrigamiMatmulSelector and overrides only the tile knobs.
+
+    Delegates everything else (group_m, num_sms, _hardware, sk_grid, ...) to
+    the wrapped selector so downstream code is unaware of the override.
+    """
+    __slots__ = ("_inner", "block_m", "block_n", "block_k",
+                 "num_stages", "num_warps")
+
+    def __init__(self, inner, bm: int, bn: int, bk: int, ns: int, nw: int):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "block_m", bm)
+        object.__setattr__(self, "block_n", bn)
+        object.__setattr__(self, "block_k", bk)
+        object.__setattr__(self, "num_stages", ns)
+        object.__setattr__(self, "num_warps", nw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+# Escape hatch for verification / regression testing.
+import os as _os
+_K653_GATE_DISABLED = _os.environ.get("TBLAS_DISABLE_K653_GATE", "").lower() in (
+    "1", "true", "yes")
+
+
+def _maybe_apply_k653_gate(selector, M: int, N: int, K: int,
+                           a_dtype, b_dtype):
+    """Return an override-wrapped selector if (dtypes, shape) is in cohort."""
+    if _K653_GATE_DISABLED:
+        return selector
+    if not (a_dtype is torch.float8_e5m2fnuz and
+            b_dtype is torch.float8_e4m3fnuz):
+        return selector
+    cfg = _K653_FP8_E5M2_MEDIUM_K_SQUARE_TILES.get((M, N, K))
+    if cfg is None:
+        return selector
+    bm, bn, bk, ns, nw = cfg
+    return _K653OverrideSelector(selector, bm, bn, bk, ns, nw)
+
+
 
 _tensor_cache = {}
 
@@ -95,7 +178,8 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # K-653: allow selector to override num_warps (default kept at 8 for back-compat).
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -241,7 +325,8 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
+    # K-653: allow selector to override num_warps (default kept at 8 for back-compat).
+    num_warps = getattr(selector, "num_warps", 8)
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
@@ -510,6 +595,9 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    # K-653: narrow shape-guarded tile override for FP8 e5m2fnuz x e4m3fnuz
+    # medium-K square cohort on MI300X. No-op for everything else.
+    selector = _maybe_apply_k653_gate(selector, M, N, K, a.dtype, b.dtype)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)

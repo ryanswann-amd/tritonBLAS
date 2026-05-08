@@ -94,17 +94,33 @@ def persistent_matmul_lt(
     total_programs = total_tiles
     even_k = K % BLK_K == 0
 
-    # NS-pipeline note (K-677, MI300X gfx942): a num_stages+1 cohort gate was
-    # investigated for the K-570 large-K square FP16/BF16 cohort
-    # (M=N in {1024,2048,4096} x K in {4096,8192,16384}) and rejected.
-    # An exhaustive paired graph-captured sweep (15 NS=3/NS=4 candidates per
-    # shape with co-modified BLOCK_K, BLOCK_M/N, num_warps, waves_per_eu,
-    # kpack; 5 trials each) regressed every cohort cell (mean +7.28%,
-    # M=4096 sub-cohort 14-20% slower) because Origami's selected tile
-    # already saturates the 64KB LDS at NS=2 (per_stage_lds = 65536 bytes
-    # on 18/18 cells), so making NS=3 fit forces a tile shrink whose
-    # dispatch + density penalty exceeds any pipelining gain. Defer to the
-    # selector's num_stages and DO NOT add a hardcoded NS=3 override here.
+    # NS-pipeline note (K-677, MI300X gfx942). DO NOT add a hardcoded NS=3
+    # (or higher) override here for the K-570 large-K square FP16/BF16
+    # cohort (M=N in {1024,2048,4096} x K in {4096,8192,16384}). Empirically
+    # refuted; CI guard lives in tests/test_num_stages_cohort_guard.py.
+    #
+    # Root cause (measured, not modeled):
+    #   Triton's gfx942 software-pipeliner double-buffers the K loop, so the
+    #   shared-memory allocation is (NS-1) * per_stage_lds, NOT NS *
+    #   per_stage_lds (the naive NS multiplier is wrong because NS=2 means
+    #   "1 prefetch buffer + 1 compute buffer" and Triton aliases compute
+    #   onto the same physical slot the next iter overwrites).
+    #   per_stage_lds = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(dtype) = 65536
+    #   bytes for every cell in this cohort (Origami's selector picks
+    #   {64,64,256}, {128,128,128}, {256,256,64} for M=N=1024/2048/4096).
+    #   At NS=2 that is 1 * 65536 = 65536 bytes — exactly fills gfx942's
+    #   64 KiB LDS budget. At NS=3 it is 2 * 65536 = 131072 bytes and Triton
+    #   raises OutOfResources("Required: 131072, Hardware limit: 65536") on
+    #   18/18 cells (confirmed via direct compile probe in K-677 sweep).
+    #
+    # Why co-modifying the tile to make NS=3 fit doesn't help either:
+    #   A wide paired graph-captured sweep (15 NS in {3,4} candidates per
+    #   shape, axes BLOCK_K halved/quartered, BLOCK_M/N halved, num_warps
+    #   in {4,8}, waves_per_eu in {0,1,2}, kpack in {1,2}; 5 trials per
+    #   cell) regressed every cohort cell (mean +7.28%, median +4.36%,
+    #   M=4096 sub-cohort +14% to +17%, only "win" -0.09% noise). Tile
+    #   shrink raises wave dispatch count and lowers MFMA density; the cost
+    #   exceeds any pipelining gain on this cohort.
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0

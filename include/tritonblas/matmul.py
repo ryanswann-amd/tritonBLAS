@@ -14,6 +14,18 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# K-772: strict-equality (kpack, num_warps, waves_per_eu) override hook for the
+# large-K square M=N=2048 fp16/bf16 cohort.  K-756 rocprofv2 PMC suggested
+# kpack=2 + NW=4 + WPEU=2 (LDS-bank-conflict reduction).  The K-772 paired
+# HIP-graph 4x4 ablation (kpack in {1,2,4,8} x (NW,WPEU) in {(8,0),(4,2)}) on
+# c42/MI300X falsified it: every override regresses (4-10x slower); the
+# upstream default (kp=1, NW=8, WPEU=0) wins every cohort cell with ratios
+# 1.05-1.25x (fp16) and 1.40-1.45x (bf16) vs hipBLASLt.  Table ships EMPTY:
+# the lookup is a no-op scaffold for future regressions only.  Any future
+# entry MUST stay strictly gated on (M==N==2048, K>=4096, fp16|bf16) per
+# K-654.  See K-772 ablation.csv / sanity_4x4.csv for the per-shape data.
+_LARGEK_SQ2048_TILE_TABLE: dict = {}
+
 
 _tensor_cache = {}
 
@@ -99,6 +111,9 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    _ovr = _LARGEK_SQ2048_TILE_TABLE.get((M, N, K, a.dtype))
+    if _ovr is not None:
+        kpack, num_warps, waves_per_eu = _ovr
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -245,6 +260,9 @@ def streamk_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    _ovr = _LARGEK_SQ2048_TILE_TABLE.get((M, N, K, a.dtype))
+    if _ovr is not None:
+        kpack, num_warps, waves_per_eu = _ovr
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

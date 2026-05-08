@@ -26,6 +26,115 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ---------------------------------------------------------------------------
+# K-751 / K-736: FP8 tall-skinny tile override (extends K-717 profiling)
+# ---------------------------------------------------------------------------
+# Cohort:  dtype=torch.float8_e4m3fnuz,
+#          M ∈ {4096, 8192, 16384}, N ∈ {16, 32, 64, 128}, K ∈ {1024, 2048, 4096}
+#
+# Origami's default selections produce two failure modes on this geometry
+# (verified end-to-end by K-717 rocprofv2 evidence + cuda-graph sweep):
+#   Mode A (tiny-N, BLOCK_N=16 padded MFMA): under-staged BK=64 → 8x excess
+#       K-loop iterations vs hipBLASLt's MT_K=256.
+#   Mode B (M=16384 small-N cliff): Origami picks BM=BN=256 macrotile → only
+#       8 tiles for N=64 (vs 304 CUs, ~96.7% under-utilization).
+# Both are VALU-bound (rocprofv2 VALUUtilization 99.9–100%, MemUnitBusy
+# 0.8–2.3%, LDSBankConflict 0%) on the worst-4 K-717 shapes — pure
+# cycle-per-output-FLOP gap.
+#
+# Mirrors the K-668 finding for FP16/BF16 same geometry. Constructed by
+# sweeping ≤20 (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages, kpack)
+# candidates per N-band on the 4 worst K-717 shapes and picking the per-N
+# winner; the strict-equality (M,N,K)+dtype gate routes BEFORE any future
+# K-695-style FP8 large-N override to avoid the K-654/K-683 cohort-leakage
+# class of bug.
+#
+# Per-N-band winners, picked from the K-751 ≤20-candidate sweep over
+# (BM,BN,BK,NS,KP,num_warps) on the 4 worst K-717 shapes (one per N-band):
+#   N=16  : (16, 16, 256, 2, 1, 4)   (beats K-717's NW=8 pick by ~30%)
+#   N=32  : (64, 32, 128, 2, 1, 4)
+#   N=64  : (64, 64, 256, 2, 1, 4)   (NW tightened from K-717's 8 -> 4)
+#   N=128 : (64,128, 128, 2, 1, 8)   (same as K-717)
+# Tuple = (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack, num_warps)
+_FP8_TSKINNY_TILE_TABLE: Dict[Tuple[int, int, int], Tuple[int, int, int, int, int, int]] = {
+    # Mode A: tiny-N (N<=32) padded BLOCK_N=16 MFMA, deepen BK to amortize K loop.
+    (4096,  16, 2048): (16, 16, 256, 2, 1, 4),
+    (4096,  16, 4096): (16, 16, 256, 2, 1, 4),
+    (4096,  32, 2048): (64, 32, 128, 2, 1, 4),
+    (4096,  32, 4096): (64, 32, 128, 2, 1, 4),
+    (8192,  16, 2048): (16, 16, 256, 2, 1, 4),
+    (8192,  16, 4096): (16, 16, 256, 2, 1, 4),
+    (16384, 16, 2048): (16, 16, 256, 2, 1, 4),
+    (16384, 16, 4096): (16, 16, 256, 2, 1, 4),
+    # Mode B: M=16384 N>=64 BM=BN=256 cliff — split macrotile into
+    # right-sized BMxBN that fills 304 CUs and lets BK=128/256 stage long.
+    (16384, 64,  2048): (64,  64, 256, 2, 1, 4),
+    (16384, 64,  4096): (64,  64, 256, 2, 1, 4),
+    (16384, 128, 2048): (64, 128, 128, 2, 1, 8),
+    (16384, 128, 4096): (64, 128, 128, 2, 1, 8),
+}
+
+# Runtime gate-fire telemetry. Bounded by definition: writers are restricted
+# to the 12 keys of _FP8_TSKINNY_TILE_TABLE — closed keyspace, no LRU needed.
+# Used by the K-751 ON/OFF leakage audit to verify the gate fires on exactly
+# the in-table shapes and on no others.
+_FP8_TSKINNY_FIRE_COUNT: int = 0
+_FP8_TSKINNY_FIRE_BY_SHAPE: Dict[Tuple[int, int, int], int] = {}
+
+
+def _fp8_tskinny_lds_fits(BM: int, BN: int, BK: int, NS: int,
+                          lds_cap: int = 65536) -> bool:
+    """LDS double-buffer budget guard (FP8 = 1 byte/element).
+
+    Falls back to Origami if the chosen (BM,BN,BK,NS) tuple would over-commit
+    LDS for any reason (e.g. future arch with smaller LDS, or accidental
+    edits that break the assumption).
+    """
+    return NS * (BM * BK + BK * BN) <= lds_cap
+
+
+def _fp8_tskinny_tile_override(M: int, N: int, K: int,
+                               a_dtype: torch.dtype,
+                               work_stealing: bool):
+    """Strict-equality FP8 tall-skinny tile override.
+
+    Returns ``(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack, num_warps)``
+    if the (M, N, K) triple is in the K-751 cohort table AND dtype is
+    ``torch.float8_e4m3fnuz`` AND the work-stealing path is NOT in use AND
+    the tile fits LDS — otherwise ``None``.
+
+    The function is a single ``dict.get`` on a 12-entry module-level
+    constant (O(1) lookup, no iteration, no state). It does NOT touch the
+    selector-level cache. Its role in the dispatcher is to short-circuit
+    Origami selection for shapes Origami systematically misjudges on this
+    geometry; it MUST be queried strictly before any other FP8 override
+    (e.g. a K-695-style large-N override) so that an in-cohort shape can
+    never be re-routed to a sibling override and trigger the K-654/K-683
+    cohort-leakage bug class.
+    """
+    if a_dtype is not torch.float8_e4m3fnuz:
+        return None
+    if work_stealing:
+        # Work-stealing path uses a different tile-shape contract; leave it
+        # to Origami so we never silently break that codegen path.
+        return None
+    ov = _FP8_TSKINNY_TILE_TABLE.get((M, N, K))
+    if ov is None:
+        return None
+    if not _fp8_tskinny_lds_fits(ov[0], ov[1], ov[2], ov[3]):
+        return None
+    return ov
+
+
+def _fp8_tskinny_record_fire(M: int, N: int, K: int) -> None:
+    """Record an override firing event; used by the K-751 leakage audit."""
+    global _FP8_TSKINNY_FIRE_COUNT
+    _FP8_TSKINNY_FIRE_COUNT += 1
+    _FP8_TSKINNY_FIRE_BY_SHAPE[(M, N, K)] = (
+        _FP8_TSKINNY_FIRE_BY_SHAPE.get((M, N, K), 0) + 1
+    )
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -101,6 +210,20 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-751 / K-736: FP8 tall-skinny override. MUST be queried strictly
+    # before any other FP8 dispatch hook (e.g. a future K-695-style large-N
+    # override) so that an in-cohort (M,N,K) cannot be re-routed elsewhere
+    # and trigger the K-654/K-683 cohort-leakage bug class.
+    _fp8_ts_ov = _fp8_tskinny_tile_override(M, N, K, a.dtype, work_stealing)
+    if _fp8_ts_ov is not None:
+        BLK_M, BLK_N, BLK_K, num_stages, kpack, num_warps = _fp8_ts_ov
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = K % BLK_K == 0
+        _fp8_tskinny_record_fire(M, N, K)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

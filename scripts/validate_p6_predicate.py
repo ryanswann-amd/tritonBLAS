@@ -258,7 +258,12 @@ def _bench_one_inproc(M, N, K, dtype_name, enable_p6, n_inner) -> list[float]:
 
     Called as a fresh subprocess by phase_paired so each arm starts with a
     clean Triton autotune cache + fresh tritonblas module state.
+
+    Uses K-1037 round-robin protocol: preallocate output `c`, capture
+    n_capture=20 calls per CUDAGraph, replay graph and divide elapsed
+    time by n_capture to amortise launch overhead.
     """
+    import time
     import torch
     DTYPE_MAP = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
     dtype = DTYPE_MAP[dtype_name]
@@ -269,26 +274,34 @@ def _bench_one_inproc(M, N, K, dtype_name, enable_p6, n_inner) -> list[float]:
 
     a = torch.randn(M, K, dtype=dtype, device="cuda")
     b = torch.randn(K, N, dtype=dtype, device="cuda")
-    # Warm BOTH paths so JIT compile + autotune complete before timing.
+    c = torch.empty(M, N, dtype=dtype, device="cuda")
+
+    def fn():
+        tb_matmul(a, b, out=c)
+
+    # Warm both paths so JIT compile + autotune complete before timing.
     for _ in range(5):
-        torch.matmul(a, b)
-    for _ in range(5):
-        tb_matmul(a, b)
+        torch.matmul(a, b, out=c)
+    for _ in range(10):
+        fn()
     torch.cuda.synchronize()
 
+    n_capture = 20
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        _ = tb_matmul(a, b)
+        for _ in range(n_capture):
+            fn()
     torch.cuda.synchronize()
 
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(n_inner)]
-    ends   = [torch.cuda.Event(enable_timing=True) for _ in range(n_inner)]
-    for i in range(n_inner):
-        starts[i].record()
+    times_us = []
+    for _ in range(n_inner):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
         graph.replay()
-        ends[i].record()
-    torch.cuda.synchronize()
-    return [s.elapsed_time(e) * 1e3 for s, e in zip(starts, ends)]
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        times_us.append((t1 - t0) * 1e6 / n_capture)
+    return times_us
 
 
 def phase_paired(out_csv: Path, n_pairs: int) -> int:

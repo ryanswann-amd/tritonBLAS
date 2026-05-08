@@ -61,6 +61,50 @@ def _k451_match(M, N, K, a_dtype):
             and a_dtype in _K451_COHORT_DTYPES)
 
 
+# K-569 cohort-config knob block.  Production constants (BLK_K=64, NS=2 — the
+# K-569 LDS-bank-conflict-mitigation pick).  Both `persistent_matmul_lt` and
+# `streamk_matmul_lt` read these symbols when the K-451 gate fires.  Tests and
+# benchmark harnesses override them via the `k569_cohort_config_override`
+# context manager below (NEVER by re-exec'ing source — that pattern was flagged
+# as an unsafe-dynamic-code-execution risk in K-569 review).
+_K569_COHORT_BLK_M = 128
+_K569_COHORT_BLK_N = 256
+_K569_COHORT_BLK_K = 64                # K-569: 32 -> 64 (LDS bank align)
+_K569_COHORT_GSIZE_M = 8
+_K569_COHORT_NUM_STAGES = 2            # K-569: 3 -> 2 (keep LDS = 48 KiB)
+_K569_COHORT_NUM_WARPS = 8
+_K569_COHORT_WAVES_PER_EU = 2
+
+import contextlib as _contextlib
+
+@_contextlib.contextmanager
+def k569_cohort_config_override(*, BLK_K=None, num_stages=None,
+                                BLK_M=None, BLK_N=None, gsize_m=None,
+                                num_warps=None, waves_per_eu=None):
+    """Override the K-451/K-569 cohort kernel constants for the duration of the
+    context.  Only meant for benchmark harnesses (e.g. K-569 NEW-vs-OLD A/B
+    capture under rocprofv3).  Nesting is supported (LIFO restore)."""
+    global _K569_COHORT_BLK_M, _K569_COHORT_BLK_N, _K569_COHORT_BLK_K
+    global _K569_COHORT_GSIZE_M, _K569_COHORT_NUM_STAGES
+    global _K569_COHORT_NUM_WARPS, _K569_COHORT_WAVES_PER_EU
+    saved = (_K569_COHORT_BLK_M, _K569_COHORT_BLK_N, _K569_COHORT_BLK_K,
+             _K569_COHORT_GSIZE_M, _K569_COHORT_NUM_STAGES,
+             _K569_COHORT_NUM_WARPS, _K569_COHORT_WAVES_PER_EU)
+    if BLK_M is not None: _K569_COHORT_BLK_M = BLK_M
+    if BLK_N is not None: _K569_COHORT_BLK_N = BLK_N
+    if BLK_K is not None: _K569_COHORT_BLK_K = BLK_K
+    if gsize_m is not None: _K569_COHORT_GSIZE_M = gsize_m
+    if num_stages is not None: _K569_COHORT_NUM_STAGES = num_stages
+    if num_warps is not None: _K569_COHORT_NUM_WARPS = num_warps
+    if waves_per_eu is not None: _K569_COHORT_WAVES_PER_EU = waves_per_eu
+    try:
+        yield
+    finally:
+        (_K569_COHORT_BLK_M, _K569_COHORT_BLK_N, _K569_COHORT_BLK_K,
+         _K569_COHORT_GSIZE_M, _K569_COHORT_NUM_STAGES,
+         _K569_COHORT_NUM_WARPS, _K569_COHORT_WAVES_PER_EU) = saved
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -122,12 +166,18 @@ def persistent_matmul_lt(
     # total LDS at 48 KiB ((2-1) * (128*64 + 64*256) * 2 B = 49152 B), within
     # the MI300X 64 KiB per-WG budget (the BK=64 NS=3 alternative would consume
     # 96 KiB and not fit).
+    #
+    # The cohort constants below are pulled from module-level _K569_COHORT_*
+    # symbols rather than baked in as literals so the K-569 bench harness
+    # (NEW-vs-OLD A/B for the rocprofv3 SQ_LDS_BANK_CONFLICT capture) can swap
+    # them via the `k569_cohort_config_override` context manager without ever
+    # exec'ing source code.
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 64    # K-569: BK 32 -> 64 (LDS bank align)
-        gsize_m = 8
-        num_stages = 2                         # K-569: NS 3 -> 2 (keep LDS = 48 KiB)
-        num_warps = 8
-        waves_per_eu = 2
+        BLK_M, BLK_N, BLK_K = _K569_COHORT_BLK_M, _K569_COHORT_BLK_N, _K569_COHORT_BLK_K
+        gsize_m = _K569_COHORT_GSIZE_M
+        num_stages = _K569_COHORT_NUM_STAGES
+        num_warps = _K569_COHORT_NUM_WARPS
+        waves_per_eu = _K569_COHORT_WAVES_PER_EU
         num_xcds = selector.num_sms
     else:
         BLK_M    = selector.block_m
@@ -269,11 +319,11 @@ def streamk_matmul_lt(
     # persistent_matmul_lt header comment for the K-519 measurement and
     # bank-alignment derivation).
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 64    # K-569: BK 32 -> 64 (LDS bank align)
-        gsize_m = 8
-        num_stages = 2                         # K-569: NS 3 -> 2 (keep LDS = 48 KiB)
-        num_warps = 8
-        waves_per_eu = 2
+        BLK_M, BLK_N, BLK_K = _K569_COHORT_BLK_M, _K569_COHORT_BLK_N, _K569_COHORT_BLK_K
+        gsize_m = _K569_COHORT_GSIZE_M
+        num_stages = _K569_COHORT_NUM_STAGES
+        num_warps = _K569_COHORT_NUM_WARPS
+        waves_per_eu = _K569_COHORT_WAVES_PER_EU
         num_xcds = selector.num_sms
     else:
         BLK_M    = selector.block_m

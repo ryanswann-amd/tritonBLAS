@@ -19,6 +19,13 @@ Invocation (GPU, MI300X):
         --phase paired --n-pairs 20 --output output/p6_paired_n20.csv
 
 Reproduces K-1031/K-1043 adversarial held-out gate (0 LAND-leaks tolerated).
+
+NOTE: an earlier revision shipped a third "paired-dryrun" phase that walked
+the dispatch ladder host-side and projected per-cell speedups from K-1017's
+PMC ``gap_x``.  The Minimalist review flagged that CSV as dead weight (23 of
+24 rows reduced to ``speedup=1.0`` / ``flipped=False``; the only signal was
+the single S24 row already surfaced by ``--phase predicate``).  The phase
+was removed; live MI300X paired n=20 numbers replace it.
 """
 from __future__ import annotations
 
@@ -252,7 +259,7 @@ def phase_paired(out_csv: Path, n_pairs: int) -> int:
     BENCH_COHORT = (
         [(c, M, N, K, dt) for c, M, N, K, dt, _, _ in K1017_18CELL]
         + K1055_12CELL[-3:]                          # 3 fp16 negatives
-        + [(c, M, N, K, dt) for c, M, N, K, _ in K1050_NEGATIVES] * 1  # +2 neg
+        + [(c, M, N, K, dt) for c, M, N, K, dt in K1050_NEGATIVES] * 1  # +2 neg
         + K1055_12CELL[5:9]                          # 4 K-984 LAND anchors
     )
     # 18 + 3 + 2 + 4 = 27 cells (>= 6 negatives requested)
@@ -316,122 +323,10 @@ def phase_paired(out_csv: Path, n_pairs: int) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 — paired-dryrun: dispatch-ladder routing verdict per cell + per-cell
-# expected speedup-OFF-over-ON projected from K-1017 published PMC `gap_x`.
-# Same cell list and same OFF/ON env-flip protocol as phase=paired but
-# without GPU execution — produces the audit CSV the n=20 HIP-graph bench
-# would emit on c42 / MI300X, plus a column flagging which cells are
-# route-flipped vs invariant.  Use this to verify the ladder wiring + the
-# expected per-cell impact when c42 / MI300X compute is unavailable.
-# ---------------------------------------------------------------------------
-# K-1017 verified PMC `gap_x` (published in K-1017 routing-action table).
-K1017_GAP_X = {
-    "S03": 1.500, "S07": 1.044, "S09": 1.621, "S14": 1.581, "S15": 1.526,
-    "S16": 1.271, "S24": 1.250, "S26": 1.085, "S29": 1.237, "S30": 1.154,
-    "S31": 1.114, "S32": 1.350, "S33": 1.198, "S34": 1.154, "S35": 1.107,
-    "S37": 1.221, "S38": 1.089, "S39": 1.241,
-}
-
-
-def phase_paired_dryrun(out_csv: Path, n_pairs: int) -> int:
-    """Walk the same cohort the live n=20 HIP-graph bench walks; resolve the
-    P6=OFF and P6=ON dispatch-ladder verdicts via the wired
-    ``_k971_route_to_hbl`` helper; project the expected per-cell speedup
-    from K-1017's published ``gap_x`` for any cell whose verdict flips.
-    """
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
-    # Use the torch-free predicate module + the torch-free routing helper to
-    # walk the dispatch ladder identically to matmul.py without paying the
-    # torch + triton import cost (CPU-only paired-dryrun).
-    from tritonblas._route_predicate import (
-        R_K1037_P6_mfma_issue_stall_route_to_hbl as P6,
-        R_K979_P5_route_to_hbl as P5,
-        k971_route_decision,
-    )
-
-    BENCH_COHORT = (
-        # 18-cell K-1017 calibration cohort.
-        [(cid, M, N, K, dtp) for cid, M, N, K, dtp, _, _ in K1017_18CELL]
-        # 6 negative-control cells: 3 K-1028 fp16 + 1 K-1050 + 2 K-1055
-        # K-984 LAND anchors.
-        + list(K1055_12CELL[-3:])
-        + [(cid, M, N, K, dtp) for cid, M, N, K, dtp in K1050_NEGATIVES][:1]
-        + list(K1055_12CELL[5:7])
-    )
-    # 18 + 3 + 1 + 2 = 24 cells (== 18 cohort + 6 negative controls).
-
-    rows = []
-    flips = 0
-    for cid, M, N, K, dt in BENCH_COHORT:
-        p5_fires = P5(M, N, K, dt)
-        p6_fires = P6(M, N, K, dt)
-        # OFF = K-1062 baseline: full dispatch ladder with P6 disabled.
-        off_route = k971_route_decision(
-            M, N, K, dt, dt, enable_streamk=False, work_stealing=False,
-            disable_env_set=False, enable_k1037_p6=False,
-        )
-        # ON = K-1062 baseline + P6 (additive): full dispatch ladder with P6 enabled.
-        on_route = k971_route_decision(
-            M, N, K, dt, dt, enable_streamk=False, work_stealing=False,
-            disable_env_set=False, enable_k1037_p6=True,
-        )
-        flipped = off_route != on_route
-        flips += int(flipped)
-        gap_x = K1017_GAP_X.get(cid, 1.000)
-        # Per-cell speedup-OFF-over-ON:
-        #   * If routing flips OFF→ON, speedup = K-1017 gap_x (route-out wins)
-        #   * Otherwise, ratio collapses to 1.000 (predicate is invariant)
-        if flipped:
-            expected_speedup = gap_x
-        else:
-            expected_speedup = 1.000
-        rows.append({
-            "cid": cid, "M": M, "N": N, "K": K, "dtype": dt,
-            "p5_fires": p5_fires, "p6_fires": p6_fires,
-            "off_route": off_route, "on_route": on_route,
-            "route_flipped": flipped,
-            "k1017_gap_x": gap_x,
-            "expected_speedup_off_over_on": expected_speedup,
-            "n_pairs_planned": n_pairs,
-            "execution_status": "PLANNED-c42-MI300X",
-        })
-        flag = "FLIP" if flipped else "INV "
-        print(f"{cid:14} ({M:5},{N:6},{K:5}) {dt:18}  "
-              f"P5={int(p5_fires)} P6={int(p6_fires)}  "
-              f"OFF={int(off_route)} ON={int(on_route)}  "
-              f"[{flag}]  gap_x={gap_x:.3f}  expected_speedup={expected_speedup:.4f}x")
-
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    with out_csv.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader()
-        w.writerows(rows)
-
-    speedups = [r["expected_speedup_off_over_on"] for r in rows]
-    gm = math.exp(sum(math.log(s) for s in speedups) / len(speedups))
-    cohort_only = [r["expected_speedup_off_over_on"] for r in rows[:18]]
-    gm_18 = math.exp(sum(math.log(s) for s in cohort_only) / len(cohort_only))
-    print(f"\nRoute-flip count: {flips} / {len(rows)} cells "
-          f"(expected: 1 — S24 only; S29 already routed via P5 Clause-2)")
-    print(f"Geomean expected-speedup over 18-cell K-1017 cohort: {gm_18:.4f}x")
-    print(f"Geomean expected-speedup over all {len(rows)} cells   : {gm:.4f}x")
-    print(f"CSV written to {out_csv}")
-    # Pass iff exactly one cell flips (S24) and that cell's gap_x is the K-1017 value.
-    s24_row = next((r for r in rows if r["cid"] == "S24"), None)
-    ok = (
-        flips == 1
-        and s24_row is not None
-        and s24_row["route_flipped"]
-        and abs(s24_row["expected_speedup_off_over_on"] - 1.250) < 1e-6
-    )
-    return 0 if ok else 2
-
-
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--phase",
-                   choices=["predicate", "paired", "paired-dryrun"],
+                   choices=["predicate", "paired"],
                    required=True)
     p.add_argument("--output", type=Path,
                    default=Path("output/p6_predicate_verdicts.csv"))
@@ -439,8 +334,6 @@ def main() -> int:
     args = p.parse_args()
     if args.phase == "predicate":
         return phase_predicate(args.output)
-    if args.phase == "paired-dryrun":
-        return phase_paired_dryrun(args.output, args.n_pairs)
     return phase_paired(args.output, args.n_pairs)
 
 

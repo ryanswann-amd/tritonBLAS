@@ -40,10 +40,41 @@ _K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 32768, "torch.float16"),
 })
 
+# ----- K-996 (extends K-930/K-971/K-984 pattern: aspect-bucket leakage) -----
+# Strict-equality table for the K-944 ranked-candidate cells that the K-973
+# override_eligibility.py pre-flight filter classifies REJECTED under
+# RULE_4_ASPECT_BUCKET_MISMATCH (skinny aspect>=2 with min(M,N)<=1024 +
+# imputed lds_bc>=0.70 + LDS-layout knobs imported from a square-cohort
+# lever family — K-919/K-956 leakage taxonomy). For these cells the K-944
+# in-Triton lever (kpack=2 or asym tile) does not transfer across aspect
+# buckets per K-936 R-936 / K-951 R-951 second-axis falsification, so the
+# safe action is to dispatch to hipBLASLt rather than apply a guarded
+# override that K-919/K-956 predicts will sign-flip.
+#
+# All 7 cells satisfy the K-996 brief's post-route requirement
+# (hipBLASLt/tritonblas paired ratio >= 1.0x on c42/MI300X, K-931 PMC sweep
+# n=105 dispatches/cell). Geomean speedup 1.488x (tw-weighted 1.532x),
+# range [1.202x, 1.730x], capturing 6.680% of production GEMM dispatches.
+# bf16 only — fp16 unmeasured in K-931 sweep, so out of K-654 anti-leak scope.
+# No overlap with K-905 / K-971 / K-984 keys.
+_K996_ROUTE_TABLE = frozenset({
+    (384,  409600, 384,  "torch.bfloat16"),  # S03 hbl/tb=1.730x tw=1.603% R4 (vocab-N LMhead)
+    (256,  1792,   2048, "torch.bfloat16"),  # S05 hbl/tb=1.424x tw=1.336% R4 (skinny-mild)
+    (384,  409600, 256,  "torch.bfloat16"),  # S09 hbl/tb=1.582x tw=1.069% R4 (vocab-N)
+    (128,  409600, 384,  "torch.bfloat16"),  # S14 hbl/tb=1.591x tw=0.802% R4 (vocab-N)
+    (384,  409600, 128,  "torch.bfloat16"),  # S15 hbl/tb=1.591x tw=0.802% R4 (vocab-N small-K)
+    (256,  409600, 384,  "torch.bfloat16"),  # S20 hbl/tb=1.202x tw=0.534% R4 (vocab-N skinny)
+    (768,  3072,   4480, "torch.bfloat16"),  # S21 hbl/tb=1.365x tw=0.534% R4 (skinny large-K)
+})
+
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
-    return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
+    key = (int(M), int(N), int(K), str(a_dtype))
+    if key in _K971_ROUTE_TABLE:
+        return True
+    if os.environ.get("TRITONBLAS_DISABLE_K996") == "1": return False
+    return key in _K996_ROUTE_TABLE
 
 
 current_device_index = torch.cuda.current_device()

@@ -15,4 +15,8 @@ from .guarded_override import (
     set_arch_lds_budget,
     lds_budget_for,
 )
-from . import overrides  # noqa: F401  (registers all bundled gates on import)
+# NOTE: no GuardedOverride is registered in the production package by default.
+# The harness is the deliverable; concrete overrides must register themselves
+# explicitly only after passing the K-883 §5 LAND verdict via run_falsification.
+# (K-882's prototype lives in tests/ as a regression fixture for the harness;
+# it carries a NO-LAND verdict and therefore intentionally does not ship here.)

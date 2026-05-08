@@ -44,33 +44,24 @@ Usage:
         GuardedOverride, OverrideRegistry, run_falsification,
     )
 
-    # Define a candidate override.
-    K882 = GuardedOverride(
-        ticket="K-882",
-        env_var="TB_K882_ENABLE",
-        cohort_keys=[
-            (2048, 2048, 4096,  torch.float16),
-            (2048, 2048, 4096,  torch.bfloat16),
-            (2048, 2048, 8192,  torch.float16),
-            (2048, 2048, 8192,  torch.bfloat16),
-            (2048, 2048, 16384, torch.float16),
-            (2048, 2048, 16384, torch.bfloat16),
-        ],
+    # Define a candidate override (this lives in CI / on the author's
+    # branch — NEVER in the production tree until run_falsification(...)
+    # returns LAND).
+    GUARD = GuardedOverride(
+        ticket="K-XYZ",
+        env_var="TB_KXYZ_ENABLE",
+        cohort_keys=[(2048, 2048, 4096, torch.float16), ...],
         dtype_allowlist=(torch.float16, torch.bfloat16),
-        # The override payload.  Returned tile-spec dict is merged into
-        # the dispatch site (see _apply_override in matmul.py).
-        override_fn=lambda M, N, K, dtype: {
-            "grid_cap_to_n_cu": True,
-            "num_stages": 2,
-        },
+        override_fn=lambda M, N, K, dtype: {"num_stages": 2, ...},
     )
-    OverrideRegistry.register(K882)
+    OverrideRegistry.register(GUARD)
 
     # Pre-merge gate (CI / dev box).
     verdict = run_falsification(
-        override=K882,
-        gpu="mi300x",
+        override=GUARD,
+        shapes=load_shapes(...),
         out_dir="output/",
+        n_rounds=30,                # paired n>=30 (PRD requirement)
     )
     assert verdict.land, verdict.report
 
@@ -81,8 +72,9 @@ tile spec; outside that one call site the rest of the package is
 override-naive.
 
 Author trail: K-883 (design pattern), K-867 (paired-audit harness), K-835 v3
-(reference clean implementation), K-882 (first override wired through this
-harness; NO-LAND verdict).
+(reference clean implementation), K-882 (first override exercised against
+this harness, NO-LAND verdict, kept as a fixture in tests/ to guarantee the
+harness keeps catching this class of structural-no-op overrides).
 """
 
 from __future__ import annotations
@@ -350,8 +342,13 @@ class CellResult:
     ms_off_raw: List[float]
     ms_on_raw: List[float]
     ms_ref_raw: List[float]
-    delta_pct_on_vs_off: float        # +ve = ON faster
+    n_paired: int                     # number of paired (ON,OFF) samples
+    delta_pct_on_vs_off: float        # +ve = ON faster (mean of paired deltas)
+    delta_pct_on_vs_off_ci_lo: float  # 95% CI lower bound (paired t)
+    delta_pct_on_vs_off_ci_hi: float  # 95% CI upper bound (paired t)
     delta_pct_on_vs_ref: float        # +ve = ON faster than ref
+    delta_pct_on_vs_ref_ci_lo: float
+    delta_pct_on_vs_ref_ci_hi: float
     paired_spread_pct: float          # max-min(off)/median(off) * 100
     classification: str               # SPEEDUP / IN_BAND / REGRESS
     fired: bool                       # routing-trace: did the gate fire?
@@ -364,8 +361,13 @@ class CellResult:
             "ms_off_med": self.ms_off_med,
             "ms_on_med": self.ms_on_med,
             "ms_ref_med": self.ms_ref_med,
+            "n_paired": self.n_paired,
             "delta_pct_on_vs_off": self.delta_pct_on_vs_off,
+            "delta_pct_on_vs_off_ci_lo": self.delta_pct_on_vs_off_ci_lo,
+            "delta_pct_on_vs_off_ci_hi": self.delta_pct_on_vs_off_ci_hi,
             "delta_pct_on_vs_ref": self.delta_pct_on_vs_ref,
+            "delta_pct_on_vs_ref_ci_lo": self.delta_pct_on_vs_ref_ci_lo,
+            "delta_pct_on_vs_ref_ci_hi": self.delta_pct_on_vs_ref_ci_hi,
             "paired_spread_pct": self.paired_spread_pct,
             "classification": self.classification,
             "fired": int(self.fired),
@@ -463,6 +465,63 @@ def _classify_delta(delta_pct: float, paired_spread_pct: float, noise_floor_pct:
     return "IN_BAND"
 
 
+# Two-sided 95% Student-t critical values for n-1 degrees of freedom.
+# Computing the t-CDF inverse without scipy is awkward; this lookup covers
+# the n we use in practice (n>=30 -> df>=29 -> t very close to 1.96).
+_T_CRIT_95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+    6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+    15: 2.131, 20: 2.086, 25: 2.060, 29: 2.045, 30: 2.042,
+    40: 2.021, 60: 2.000, 120: 1.980,
+}
+
+
+def _t_crit_95(df: int) -> float:
+    """Return t_{df, 0.975} (two-sided 95%) by nearest-not-greater lookup.
+
+    For df>=30 this is within ~0.5% of the true value; for df>=120 it
+    converges to 1.96 (Normal).  We always return >=1.96 for safety.
+    """
+    if df <= 0:
+        return float("nan")
+    keys = sorted(_T_CRIT_95.keys())
+    chosen = keys[0]
+    for k in keys:
+        if k <= df:
+            chosen = k
+        else:
+            break
+    return max(_T_CRIT_95[chosen], 1.960)
+
+
+def _paired_delta_with_ci(
+    on: List[float], off: List[float],
+) -> Tuple[float, float, float, int]:
+    """Paired-sample mean delta_pct(=ON faster than OFF) + 95% CI.
+
+    Pairs ON[i] with OFF[i] (same round_index, single-process / shared
+    allocator state, K-867 protocol).  Returns (mean_delta_pct, ci_lo,
+    ci_hi, n).  If lengths differ we truncate to the shorter list.
+    """
+    n = min(len(on), len(off))
+    if n == 0:
+        return float("nan"), float("nan"), float("nan"), 0
+    deltas = []
+    for i in range(n):
+        if off[i] > 0:
+            deltas.append((off[i] - on[i]) / off[i] * 100.0)
+    if not deltas:
+        return float("nan"), float("nan"), float("nan"), 0
+    if len(deltas) == 1:
+        return deltas[0], float("nan"), float("nan"), 1
+    mean = statistics.fmean(deltas)
+    sd = statistics.stdev(deltas)
+    df = len(deltas) - 1
+    se = sd / math.sqrt(len(deltas))
+    half = _t_crit_95(df) * se
+    return mean, mean - half, mean + half, len(deltas)
+
+
 def _make_call(M: int, N: int, K: int, dtype: "torch.dtype",
                impl: str = "tritonblas") -> Tuple[Callable, Tuple]:
     """Build a callable that runs one matmul of shape M*N*K under impl.
@@ -488,38 +547,50 @@ def _make_call(M: int, N: int, K: int, dtype: "torch.dtype",
 def measure_cell(
     M: int, N: int, K: int, dtype: "torch.dtype", batch: int,
     gate: GuardedOverride,
-    n_warm: int = 5, n_capture: int = 50, n_rounds: int = 3,
+    n_warm: int = 5, n_capture: int = 30, n_rounds: int = 30,
     measure_ref: bool = True,
 ) -> CellResult:
     """Paired ON/OFF/ref measurement for a single (M,N,K,dtype) cell.
 
-    The order is OFF -> ON -> REF, repeated n_rounds times each at the
-    inner CUDA-graph level.  All three callables share the same a/b/out
-    tensor pair (re-allocated per impl to keep allocator state local but
-    shape-identical) so cache effects are matched.
+    Captures n_rounds paired (OFF, ON [, REF]) replays.  Each replay is a
+    HIP-graph capture of n_capture matmul calls; the timed value is the
+    per-call mean over the capture.  We keep n_rounds >= 30 by default so
+    that the paired-CI estimator (Student-t, df=n-1) has the >=30 paired
+    samples per cell required by K-883 §5 V1/V2 / the K-901 PRD.
+
+    Within each round the order is OFF -> ON -> REF (round-robin) so the
+    paired delta cancels slow drift (warm-up, page faults, allocator
+    fragmentation) at first order.  All three callables re-allocate
+    a/b/out per impl to keep allocator state local but shape-identical
+    (cache-effect matched).
 
     The gate's env var is set to "1" for ON and unset for OFF, and the
     gate's counters are read before/after to record per-cell fires.
     """
     fire_before = gate._fire_total
-    nonfire_before = gate._nonfire_total
 
-    # OFF
-    os.environ.pop(gate.env_var, None)
-    call_off, _ = _make_call(M, N, K, dtype, impl="tritonblas")
-    ts_off = _hipgraph_bench(call_off, n_warm=n_warm, n_capture=n_capture, n_rounds=n_rounds)
+    ts_off: List[float] = []
+    ts_on:  List[float] = []
+    ts_ref: List[float] = []
 
-    # ON
-    os.environ[gate.env_var] = "1"
-    call_on, _ = _make_call(M, N, K, dtype, impl="tritonblas")
-    ts_on = _hipgraph_bench(call_on, n_warm=n_warm, n_capture=n_capture, n_rounds=n_rounds)
-
-    # REF
-    if measure_ref:
-        call_ref, _ = _make_call(M, N, K, dtype, impl="hipblaslt")
-        ts_ref = _hipgraph_bench(call_ref, n_warm=n_warm, n_capture=n_capture, n_rounds=n_rounds)
-    else:
-        ts_ref = [float("nan")] * n_rounds
+    for _ in range(n_rounds):
+        # ---- OFF ----
+        os.environ.pop(gate.env_var, None)
+        call_off, _ = _make_call(M, N, K, dtype, impl="tritonblas")
+        ts_off.extend(_hipgraph_bench(call_off, n_warm=n_warm,
+                                      n_capture=n_capture, n_rounds=1))
+        # ---- ON ----
+        os.environ[gate.env_var] = "1"
+        call_on, _ = _make_call(M, N, K, dtype, impl="tritonblas")
+        ts_on.extend(_hipgraph_bench(call_on, n_warm=n_warm,
+                                     n_capture=n_capture, n_rounds=1))
+        # ---- REF ----
+        if measure_ref:
+            call_ref, _ = _make_call(M, N, K, dtype, impl="hipblaslt")
+            ts_ref.extend(_hipgraph_bench(call_ref, n_warm=n_warm,
+                                          n_capture=n_capture, n_rounds=1))
+        else:
+            ts_ref.append(float("nan"))
 
     os.environ.pop(gate.env_var, None)
 
@@ -530,15 +601,11 @@ def measure_cell(
     med_on  = _trim_mean(ts_on)
     med_ref = _trim_mean(ts_ref) if measure_ref else float("nan")
 
-    # delta_pct (positive = ON faster)
-    if med_off > 0:
-        d_on_off = (med_off - med_on) / med_off * 100.0
+    d_on_off, d_on_off_lo, d_on_off_hi, n_paired = _paired_delta_with_ci(ts_on, ts_off)
+    if measure_ref:
+        d_on_ref, d_on_ref_lo, d_on_ref_hi, _ = _paired_delta_with_ci(ts_on, ts_ref)
     else:
-        d_on_off = float("nan")
-    if measure_ref and med_ref > 0:
-        d_on_ref = (med_ref - med_on) / med_ref * 100.0
-    else:
-        d_on_ref = float("nan")
+        d_on_ref, d_on_ref_lo, d_on_ref_hi = (float("nan"),) * 3
 
     spread = _spread_pct(ts_off)
     cls = _classify_delta(d_on_off, spread)
@@ -556,8 +623,13 @@ def measure_cell(
         in_cohort=in_cohort,
         ms_off_med=med_off, ms_on_med=med_on, ms_ref_med=med_ref,
         ms_off_raw=ts_off, ms_on_raw=ts_on, ms_ref_raw=ts_ref,
+        n_paired=n_paired,
         delta_pct_on_vs_off=d_on_off,
+        delta_pct_on_vs_off_ci_lo=d_on_off_lo,
+        delta_pct_on_vs_off_ci_hi=d_on_off_hi,
         delta_pct_on_vs_ref=d_on_ref,
+        delta_pct_on_vs_ref_ci_lo=d_on_ref_lo,
+        delta_pct_on_vs_ref_ci_hi=d_on_ref_hi,
         paired_spread_pct=spread,
         classification=cls,
         fired=fired,
@@ -568,7 +640,7 @@ def run_falsification(
     override: GuardedOverride,
     shapes: Iterable[Dict[str, Any]],
     out_dir: str,
-    n_warm: int = 5, n_capture: int = 30, n_rounds: int = 3,
+    n_warm: int = 5, n_capture: int = 30, n_rounds: int = 30,
     measure_ref: bool = True,
     progress: Callable[[str], None] = print,
 ) -> FalsificationVerdict:
@@ -620,8 +692,10 @@ def run_falsification(
         cells.append(cell)
         rows.append(cell.to_row())
         progress(
-            f"    OFF={cell.ms_off_med:.4f}ms ON={cell.ms_on_med:.4f}ms "
-            f"REF={cell.ms_ref_med:.4f}ms d_ON/OFF={cell.delta_pct_on_vs_off:+.2f}% "
+            f"    n={cell.n_paired} OFF={cell.ms_off_med:.4f}ms ON={cell.ms_on_med:.4f}ms "
+            f"REF={cell.ms_ref_med:.4f}ms "
+            f"d_ON/OFF={cell.delta_pct_on_vs_off:+.2f}% "
+            f"[CI95={cell.delta_pct_on_vs_off_ci_lo:+.2f},{cell.delta_pct_on_vs_off_ci_hi:+.2f}] "
             f"cls={cell.classification} cohort={cell.in_cohort} fired={cell.fired}"
         )
 
@@ -684,8 +758,17 @@ def _compute_verdict(
         geomean = float("nan")
         n_pos = 0
 
-    # OOC regressors (K-883 §5 V2).
-    ooc_regress = [c for c in ooc if c.classification == "REGRESS"]
+    # OOC regressors (K-883 §5 V2).  A cell counts as a regressor only if
+    # (a) its noise-band classifier flags REGRESS AND
+    # (b) its 95% paired CI upper bound is still negative (ON statistically
+    #     slower than OFF, not a single-trial outlier).  This is the "no
+    #     single-trial noise" guard requested by the K-901 reviewer.
+    ooc_regress = [
+        c for c in ooc
+        if c.classification == "REGRESS"
+        and (math.isnan(c.delta_pct_on_vs_off_ci_hi)
+             or c.delta_pct_on_vs_off_ci_hi < 0.0)
+    ]
     worst_ooc = min((c.delta_pct_on_vs_off for c in ooc), default=float("nan"))
 
     # Routing trace correctness (K-883 §5 V3).
@@ -745,15 +828,17 @@ def _render_report(
     lines.append("")
     lines.append(verdict.report)
     lines.append("")
-    lines.append("## Per-cell deltas (ON vs OFF, ON vs ref)")
+    lines.append("## Per-cell paired deltas with 95% CI (n>=30 paired samples)")
     lines.append("")
-    lines.append("| in_cohort | M | N | K | dtype | OFF (ms) | ON (ms) | REF (ms) | dON/OFF | dON/REF | spread% | class | fired |")
-    lines.append("|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---|")
+    lines.append("| in_cohort | M | N | K | dtype | n | OFF (ms) | ON (ms) | REF (ms) | dON/OFF (CI95) | dON/REF (CI95) | spread% | class | fired |")
+    lines.append("|---|---:|---:|---:|---|---:|---:|---:|---:|---|---|---:|---|---|")
     for c in cells:
         lines.append(
             f"| {'Y' if c.in_cohort else 'N'} | {c.M} | {c.N} | {c.K} | {c.dtype} | "
+            f"{c.n_paired} | "
             f"{c.ms_off_med:.4f} | {c.ms_on_med:.4f} | {c.ms_ref_med:.4f} | "
-            f"{c.delta_pct_on_vs_off:+.2f}% | {c.delta_pct_on_vs_ref:+.2f}% | "
+            f"{c.delta_pct_on_vs_off:+.2f}% [{c.delta_pct_on_vs_off_ci_lo:+.2f},{c.delta_pct_on_vs_off_ci_hi:+.2f}] | "
+            f"{c.delta_pct_on_vs_ref:+.2f}% [{c.delta_pct_on_vs_ref_ci_lo:+.2f},{c.delta_pct_on_vs_ref_ci_hi:+.2f}] | "
             f"{c.paired_spread_pct:.2f}% | {c.classification} | {'Y' if c.fired else 'N'} |"
         )
     lines.append("")

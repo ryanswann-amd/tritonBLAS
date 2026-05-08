@@ -13,7 +13,10 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 from . import guarded_override as _go
-from . import overrides as _overrides_init  # noqa: F401  (registers K-882 etc.)
+# NOTE: no override package is imported here.  GuardedOverride instances
+# register themselves explicitly only after passing the K-883 §5 LAND
+# verdict via run_falsification (K-901 design).  Keeping the dispatch site
+# override-naive means an empty registry is the safe default.
 
 
 

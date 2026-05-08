@@ -65,11 +65,17 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 #   L5: composability guard — defer when caller asks for streamk/work-stealing
 #   L6: routing-trace counters
 #
-# The env var TRITONBLAS_K930_LDS_RESHAPE additionally gates the
+# The env var TRITONBLAS_K930_ROUTE_TO_HBL additionally gates the
 # override ON; when unset/0 the override is inactive (preserves baseline
 # behaviour, used by the K-930 paired benchmark harness to measure
 # ON/OFF speedup).
-_K930_ENABLE_ENV = "TRITONBLAS_K930_LDS_RESHAPE"
+#
+# NOTE: the env var name reflects the actual mechanism — route-to-hipBLASLt
+# (via torch.matmul) — NOT the abandoned BLOCK_K/kpack tile-reshape, which
+# regressed 0.82x in-cohort and is not landed. An earlier draft of this
+# patch named the env var TRITONBLAS_K930_LDS_RESHAPE; that name leaked
+# the dead approach and has been retired.
+_K930_ENABLE_ENV = "TRITONBLAS_K930_ROUTE_TO_HBL"
 _K930_DISABLE_ENV = "TRITONBLAS_DISABLE_K930"
 
 _K930_ROUTE_TABLE = frozenset({

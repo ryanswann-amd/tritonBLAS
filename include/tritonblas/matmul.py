@@ -404,6 +404,35 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # ---------------------------------------------------------------
+    # K-633 dispatch precedence ladder (evidence: K-619 sweep, MI300X)
+    # Ordered if/elif chain from highest-confidence rule downward.
+    # See knowledge/tritonblas/k_633_research.md (P1-P5).
+    # ---------------------------------------------------------------
+    # P1 - VETO: M <= 8 AND K >= 4096 region.
+    # K-619 measured 68/70 streamk regressions vs only 1 win in this
+    # window; G2/G3 static-tweaks dominate (29/70 wins, zero regressions).
+    # Force-disable streamk even if the caller asked for it (K-654 hard
+    # rule: no caller can bypass this veto, mirroring the 53/61-shape
+    # regression that motivated the precedence ladder).
+    if M <= 8 and K >= 4096:
+        enable_streamk = False
+    # P2 - Tightened large-balanced streamk auto-flip.
+    # K-619 R-G4 (min(M,N)>=4096 AND K>=4096) admitted 7 regressors out
+    # of 22. Tighten to M == N AND min(M,N) >= 5120 AND K >= 6144 which
+    # keeps 8/9 wins and eliminates every measured regression.
+    elif (
+        not enable_streamk
+        and M == N
+        and min(M, N) >= 5120
+        and K >= 6144
+    ):
+        enable_streamk = True
+    # P3 - DO NOT auto-flip streamk on R-G4 small_m_decode envelope
+    # (M <= 64 AND N >= 1024 AND K >= 1024). K-619 measured 214/221
+    # regressions in that envelope; intentionally left as guardrail
+    # comment so any future re-introduction is caught by review.
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:

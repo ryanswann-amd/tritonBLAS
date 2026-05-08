@@ -443,6 +443,22 @@ def _kpack_for_large_k_square(M: int, N: int, K: int, dtype) -> int:
     return 2
 
 
+# K-757: BLOCK_K=32 + num_stages=4 mainloop-shrink override for the M=N=2048
+# FP16/BF16 large-K cohort. K-750/K-756 rocprofv2 evidence shows mainloop
+# iteration inflation and low MfmaUtil at this cohort; shrinking BLOCK_K to 32
+# with num_stages=4 (kpack=2 already set by K-667 on this exact cohort) raises
+# pipeline depth and MfmaUtil at the cost of LDS pressure. Strict cohort gate;
+# LDS guard falls back to default if 4*(BM*32 + 32*BN)*2B exceeds 64KiB.
+def _is_k757_cohort(M: int, N: int, K: int, dtype) -> bool:
+    if _os_k656.environ.get("TRITONBLAS_DISABLE_K757", "0") == "1":
+        return False
+    if dtype not in _LARGE_K_SQUARE_KPACK2_DTYPES:
+        return False
+    if M != _LARGE_K_SQUARE_KPACK2_M or N != _LARGE_K_SQUARE_KPACK2_M:
+        return False
+    return K in _LARGE_K_SQUARE_KPACK2_K_VALUES
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -566,6 +582,15 @@ def persistent_matmul_lt(
         total_blocks_N = triton.cdiv(N, BLK_N)
         total_tiles = total_blocks_M * total_blocks_N
         total_programs = total_tiles
+
+    # K-757: BLOCK_K=32 + num_stages=4 mainloop-shrink for M=N=2048 fp16/bf16
+    # large-K cohort (kpack=2 already set by K-667 helper above). LDS guard:
+    # 2 bytes/elem * num_stages * (BM*BK + BK*BN) <= 64KiB MI300X workgroup.
+    if _is_k757_cohort(M, N, K, a.dtype) and not work_stealing:
+        if 4 * (BLK_M * 32 + 32 * BLK_N) * 2 <= 65536:
+            BLK_K = 32
+            num_stages = 4
+            even_k = (K % BLK_K) == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

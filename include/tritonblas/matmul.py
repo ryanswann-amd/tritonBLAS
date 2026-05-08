@@ -94,6 +94,17 @@ def persistent_matmul_lt(
     total_programs = total_tiles
     even_k = K % BLK_K == 0
 
+    # NS-pipeline note (K-677, MI300X gfx942): a num_stages+1 cohort gate was
+    # investigated for the K-570 large-K square FP16/BF16 cohort
+    # (M=N in {1024,2048,4096} x K in {4096,8192,16384}) and rejected.
+    # An exhaustive paired graph-captured sweep (15 NS=3/NS=4 candidates per
+    # shape with co-modified BLOCK_K, BLOCK_M/N, num_warps, waves_per_eu,
+    # kpack; 5 trials each) regressed every cohort cell (mean +7.28%,
+    # M=4096 sub-cohort 14-20% slower) because Origami's selected tile
+    # already saturates the 64KB LDS at NS=2 (per_stage_lds = 65536 bytes
+    # on 18/18 cells), so making NS=3 fit forces a tile shrink whose
+    # dispatch + density penalty exceeds any pipelining gain. Defer to the
+    # selector's num_stages and DO NOT add a hardcoded NS=3 override here.
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0

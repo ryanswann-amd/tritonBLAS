@@ -14,6 +14,119 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# ----------------------------------------------------------------------
+# K-654 — FP8 e4m3fnuz medium-K square cohort tile-override gate.
+#
+# Origami's heuristic mistunes the M=N=1024 sub-cohort of the FP8 e4m3fnuz
+# medium-K square family: at K∈{256, 512} the default pick (BM=128, BN=32,
+# BK=128, num_warps=8, waves_per_eu=1, num_stages=2) is 8–14% slower than the
+# narrow-N MFMA-overlap winner (BM=32, BN=64, BK=128, num_warps=4,
+# waves_per_eu=2, num_stages=3) on the production matmul_a8w8 path
+# (TBLAS_USE_MONOLITHIC=1, MI300X gfx942).
+#
+# Predicate (load-bearing — the M=2048/4096 sub-cohorts are codegen-bound per
+# K-624 R3 / K-500 / K-523 family findings; the LDS-prefiltered 294-config
+# tile sweep oracle does NOT clear the K-683 noise band on those shapes,
+# so they MUST remain passthrough):
+#
+#     dtype(a) == dtype(b) == float8_e4m3fnuz
+#     AND M == N == 1024
+#     AND K ∈ {256, 512}
+#     AND non-streamk persistent path
+#
+# Verify (K-624 playbook, c42 MI300X gfx942, paired cuda-graph capture
+# n_rounds=12 × n_iters=100 × n_replays=5):
+#
+#     shape          baseline µs   gated µs   tb-speedup   hbl/tb after gate
+#     1024×1024×256        4.53        3.70        1.225x   1.245
+#     1024×1024×512        5.36        4.71        1.138x   1.101
+#     2048×2048×K          (passthrough — sweep oracle within K-887 noise)
+#     4096×4096×K          (passthrough — sweep oracle within K-887 noise)
+#
+# Cohort geomean lift (6 shapes): hbl/tb 0.860 → 0.913 = +5.32 pp.
+# Worst per-shape regression on 50 guard shapes (M ∉ {1024} or K ∉ {256,512}
+# or non-square): +2.2% (within K-683 ≤ 3% tolerance);
+# gate fired on zero guard shapes (verified passthrough column).
+# ----------------------------------------------------------------------
+
+_K654_FP8_MEDIUM_K_SQUARE_TILE = (
+    32,   # block_m
+    64,   # block_n
+    128,  # block_k
+    3,    # num_stages
+    4,    # num_warps
+    2,    # waves_per_eu
+    16,   # matrix_instr_nonkdim
+)
+
+
+def _is_k654_fp8_e4m3_square_cohort(M, N, K, a_dtype, b_dtype, streamk):
+    """O(1) integer/dtype predicate. Narrow on purpose — see banner above."""
+    if streamk:
+        return False
+    if M != N or M != 1024:
+        return False
+    if K not in (256, 512):
+        return False
+    fnuz = getattr(torch, "float8_e4m3fnuz", None)
+    if fnuz is None:
+        return False
+    return a_dtype == fnuz and b_dtype == fnuz
+
+
+class _K654SelectorOverride:
+    """Property-based wrapper that overrides Origami's tile/pipeline pick for
+    the K-654 cohort while delegating everything else to the wrapped selector.
+
+    Exposes K-654-specific num_warps / waves_per_eu / matrix_instr_nonkdim so
+    persistent_matmul_lt can pick them up (read with getattr fallback so
+    selectors NOT wrapped by this class still get the historical hardcoded
+    defaults).
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def block_m(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[0]
+
+    @property
+    def block_n(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[1]
+
+    @property
+    def block_k(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[2]
+
+    @property
+    def num_stages(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[3]
+
+    @property
+    def num_warps(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[4]
+
+    @property
+    def waves_per_eu(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[5]
+
+    @property
+    def matrix_instr_nonkdim(self):
+        return _K654_FP8_MEDIUM_K_SQUARE_TILE[6]
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _maybe_apply_k654_gate(selector, M, N, K, a_dtype, b_dtype, streamk=False):
+    """Wrap selector with the K-654 override iff the cohort predicate matches."""
+    if _is_k654_fp8_e4m3_square_cohort(M, N, K, a_dtype, b_dtype, streamk):
+        return _K654SelectorOverride(selector)
+    return selector
+
 
 _tensor_cache = {}
 
@@ -95,9 +208,17 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
+    # K-654: a _K654SelectorOverride wrapper exposes cohort-specific
+    # num_warps / waves_per_eu / matrix_instr_nonkdim. Historical defaults
+    # (8 / 0 / 16) are preserved when the wrapper is not in play.
+    if isinstance(selector, _K654SelectorOverride):
+        num_warps = selector.num_warps
+        waves_per_eu = selector.waves_per_eu
+        mfmaInstrSize = selector.matrix_instr_nonkdim
+    else:
+        num_warps = 8
+        waves_per_eu = 0
+        mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -384,6 +505,10 @@ def matmul_a8w8_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    M, K = a.shape
+    _, N = b.shape
+    selector = _maybe_apply_k654_gate(selector, M, N, K, a.dtype, b.dtype, streamk=enable_streamk)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
@@ -510,6 +635,7 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    selector = _maybe_apply_k654_gate(selector, M, N, K, a.dtype, b.dtype, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)

@@ -320,7 +320,8 @@ def _k695_tile_override(M, N, K, a_dtype):
 #
 # Set TRITONBLAS_DISABLE_K693=1 to bypass.
 # ---------------------------------------------------------------------------
-_K693_GATE_ENABLED = _os.environ.get("TRITONBLAS_DISABLE_K693", "0") != "1"
+import os as _os_k693
+_K693_GATE_ENABLED = _os_k693.environ.get("TRITONBLAS_DISABLE_K693", "0") != "1"
 
 
 def _k693_tile_override(M, N, K, a_dtype, b_dtype):

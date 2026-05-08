@@ -52,9 +52,16 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
       Clause-3 (tb-weak / extreme aspect or tiny):
           aspect ratio max(M,N)/min(M,N) >= 100, or min(M,N) <= 192 AND
           K >= 2048 (waves under-utilised on the small axis).
-      Clause-4 (over-tile dual / N=1792 short-K):
-          N == 1792 and K <= 768, with M either large-skinny (>= 5000)
-          or in the K-984/K-989 mid-rect band [256, 2048].
+      Clause-4 (over-tile dual / N=1792 shallow-K):
+          N == 1792 and 512 <= K <= 768 (K-1062 raised the K floor from
+          0 to 512 = 8*BK64 to silence the K=256 false-positive surfaced
+          by the K-1017 PMC sweep and confirmed by the K-1043 per-clause
+          confusion matrix; S07=(2048,1792,256,bf16) gap_x=1.044 is
+          inside the per-engine ~5% CV noise floor — routing buys a
+          measured-zero-gain dispatch detour), with M either large-
+          skinny (>= 5000) or in the K-984/K-989 mid-rect band
+          [256, 2048].  K-984/K-989 anchors S06 (K=736) and S18 (K=768)
+          both have K >= 736 so neither is regressed.
 
     bf16-only: K-984/K-989 ship cohort and K-931 measurement scope are bf16;
     fp16 K-905/K-971 anchors stay in :data:`K971_ROUTE_TABLE`.
@@ -82,8 +89,10 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
         return True
     if minMN <= 192 and K >= 2048:
         return True
-    # Clause-4: N=1792 short-K dual of clause-1.
-    if N == 1792 and K <= 768 and (M >= 5000 or 256 <= M <= 2048):
+    # Clause-4: N=1792 shallow-K dual of clause-1.  K-1062 K-floor=512
+    # (8*BK64) — see docstring; closes the K=256 S07 false positive
+    # without affecting the K=736 / K=768 K-984+K-989 anchors.
+    if N == 1792 and 512 <= K <= 768 and (M >= 5000 or 256 <= M <= 2048):
         return True
     return False
 

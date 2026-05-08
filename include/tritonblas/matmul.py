@@ -26,6 +26,85 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# ----------------------------------------------------------------------------
+# K-930: LDS-pressure-reducing tile reshape for long-K small-square cohort
+# ----------------------------------------------------------------------------
+# K-913 PMC triage of 1024x1024x16384 fp16/bf16 (and neighbours
+# 512x512x16384, 1024x1024x8192) showed the baseline tritonblas
+# persistent_matmul kernel itself has SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS
+# = 1.45-1.78 cyc/inst with LDS_WAIT 41x higher than hipBLASLt and
+# MFMA% halved at equal MFMA-instruction count — a pure LDS-bound regime
+# unique to long-K small-square shapes.
+#
+# This guarded override targets that exact cohort by:
+#   1. Halving BLOCK_K (64 -> 32): halves bytes-per-LDS-write, allowing
+#      ds_read to issue at narrower granularity and reducing the per-issue
+#      latency that starves the MFMA pipeline.
+#   2. Doubling kpack (1 -> 2): packs two K-elements per ds_read, halving
+#      the ds_read count per MFMA. Combined with #1 the total LDS-issue
+#      count is unchanged but each issue is wider, which K-901 / K-905
+#      static analysis predicted halves bank-conflict cyc/inst.
+#
+# IMPORTANT: prior K-864 falsified `kpack=2 alone` 10/10 on this cohort and
+# K-913 marked it "backend-only fix path". This override therefore ships
+# *off by default* (env-gated) and a contrapositive-style guard ensures
+# OOT shapes are untouched — the change is intended as a NO-LAND prototype
+# fixture for K-901's harness, not a default-on landing.
+#
+# Cohort definition (contrapositive of K-913 mechanism):
+#   * M == N (square)
+#   * min(M, N) <= 1024   (small)
+#   * K / min(M, N) >= 8  (long-K)
+#   * BLK_M == BLK_N      (no rectangular tile, keeps mfma layout invariant)
+#   * K % 32 == 0         (BLK_K=32 must evenly divide K; 16384/8192 both do)
+#
+# The override ALWAYS forces BLK_K=32 + kpack=2 for in-cohort shapes,
+# regardless of origami's BLK_K pick — origami currently picks BK ∈
+# {256, 512} for these shapes (BM=BN=32-64), which is exactly the
+# LDS-bound config K-913 root-caused at 1.78 cyc/inst.
+import os as _os
+_K930_LDS_OVERRIDE_ENV = "TRITONBLAS_K930_LDS_RESHAPE"
+
+
+def _k930_lds_reshape_enabled() -> bool:
+    """Return True when the env-gated LDS-reshape prototype is active."""
+    val = _os.environ.get(_K930_LDS_OVERRIDE_ENV, "0").strip().lower()
+    return val in ("1", "true", "on", "yes")
+
+
+def _is_long_k_small_square_cohort(
+    M: int, N: int, K: int, BLK_M: int, BLK_N: int, BLK_K: int
+) -> bool:
+    """K-913 long-K small-square cohort detector (contrapositive of design envelope)."""
+    if M != N or BLK_M != BLK_N:
+        return False
+    smaller = min(M, N)
+    if smaller <= 0 or smaller > 1024:
+        return False
+    if K < 8 * smaller:
+        return False
+    # BLK_K=32 must evenly divide K (avoid masked-K perf cliff).
+    if K % 32 != 0:
+        return False
+    return True
+
+
+def _k930_lds_reshape(
+    M: int, N: int, K: int, BLK_M: int, BLK_N: int, BLK_K: int, kpack: int
+) -> Tuple[int, int]:
+    """Return (BLK_K, kpack) after applying the K-930 guarded override.
+
+    No-op (returns inputs unchanged) when:
+      * env gate is off, OR
+      * shape is outside the long-K small-square cohort.
+    """
+    if not _k930_lds_reshape_enabled():
+        return BLK_K, kpack
+    if not _is_long_k_small_square_cohort(M, N, K, BLK_M, BLK_N, BLK_K):
+        return BLK_K, kpack
+    return 32, 2
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -88,12 +167,6 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    total_blocks_M = triton.cdiv(M, BLK_M)
-    total_blocks_N = triton.cdiv(N, BLK_N)
-    total_tiles = total_blocks_M * total_blocks_N
-    total_programs = total_tiles
-    even_k = K % BLK_K == 0
-
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
@@ -101,6 +174,17 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-930 guarded LDS-pressure-reducing tile reshape (env-gated, NO-LAND).
+    # Applies only to the K-913 long-K small-square cohort when the env gate
+    # is set; otherwise BLK_K and kpack are returned unchanged.
+    BLK_K, kpack = _k930_lds_reshape(M, N, K, BLK_M, BLK_N, BLK_K, kpack)
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = total_tiles
+    even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

@@ -196,6 +196,25 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
         References: K-1098 backtest (output/p6_clause_by_clause_k1074.csv),
         K-1074 paired n=30 (rr_summary.csv), K-1049/K-1055/K-1062 adversarial
         gate (FAIL: zero NEW NO-LAND-leak gain).
+
+    K-1109 reproduction (productionizes the K-1066 lock-the-envelope pattern):
+        Independently re-derived K-1037 P6 from the primary-source paired-
+        PMC CSV for all 8 K-1074 cohort-extension cells + the 4 K-1044
+        anchor cells called out in the K-1109 brief + 8 K-1017 held-out
+        OCC/HBM negatives.  Result: 0/8 K-1074 FIRE (brief premise of 8/8
+        FALSIFIED), 2/2 K-1037 P6 positives still FIRE (S24, S29), 0/8
+        K-1017 NEG false positives, S30/S34 C1 collinearity wall confirmed
+        at waves_ratio=1.7530.  K-1044 B3a (S18, 5972,1792,768) and B3b
+        (S25, 6016,2048,1024) fire exact PMC P6 but the surrogate's
+        Envelope-A M>=13000 floor and Envelope-B minMN>=2048 floor
+        correctly preserve them as K-989 LAND anchors (5.31x-5.63x
+        routing speedup).  Envelopes A and B are LOCKED -- pin tests in
+        tests/test_k971_route_predicate.py (P6_NEGATIVES_K1074,
+        P6_NEGATIVES_K1044_ANCHORS, test_p6_c1_collinearity_wall_*)
+        gate any future relaxation through CI.
+
+        Reproduction artifact: /home/ryaswann/mc2-workspaces/K-1109/output/
+        k1109_p6_audit.csv (re-derivable via scripts/k1109_p6_verification.py).
     """
     if not _dtype_is_bf16(dtype):
         return False

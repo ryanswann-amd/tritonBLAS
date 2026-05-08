@@ -263,6 +263,41 @@ P6_NEGATIVES_K1017 = [
 ]
 
 
+# K-1074 cohort-extension cells (S32, S33, S34, S35, S37, S39).  K-1109
+# independently re-derived K-1037 P6 on these 6 cells from the K-1037
+# primary-source PMC CSV (output/k1109_p6_audit.csv): all 6 fail load-
+# bearing C1 (waves_per_CU_ratio in [1.753, 2.740], above the 1.70x
+# MFMA-stall ceiling) and structurally cluster at the canonical occupancy
+# 2.0x signature.  K-1074 paired n=30 round-robin timing on c42/MI300X
+# confirmed 0/6 cells clear the K-901 +2% LAND margin and 2/6 (S32, S37)
+# are CI95 hi<0 confirmed regressions.  Pin tests below lock the K-1109
+# NULL-RESULT into the regression suite so any future relaxation of
+# Envelope A's M-band [13000, 14999] or its K=1024-only guard fails CI.
+# (S26, S30, S31 are already covered by P6_NEGATIVES_K1017 above.)
+P6_NEGATIVES_K1074 = [
+    ("S32", 20352, 2048, 1024),  # OCC ratio 2.254
+    ("S33", 22400, 2048, 1024),  # OCC ratio 2.378
+    ("S34", 24448, 2048, 1024),  # OCC ratio 1.753 — collides on C1 wall with S30
+    ("S35", 26496, 2048, 1024),  # OCC ratio 1.887
+    ("S37", 25600, 2048,  256),  # OCC ratio 2.740, K=256 fails C2 floor
+    ("S39", 49152, 2048,  256),  # OCC ratio 2.122, K=256 fails C2 floor
+]
+
+
+# K-1044 LAND anchors that K-1109 brief lists as 4-cell "no-regression"
+# witnesses.  S24/S29 are the K-1037 P6 positives (already in P6_POSITIVES);
+# S18 (= K-1044 B3a, 5972,1792,768) and S25 (= K-1044 B3b, 6016,2048,1024)
+# fire P6 by exact PMC but the structural surrogate correctly preserves
+# them as route-OUT LAND anchors via Envelope-A M>=13000 floor (B3b) and
+# Envelope-B minMN>=2048 floor (B3a).  K-989 measured 5.31x-5.63x routing
+# speedup on the structurally-equivalent S25/S27/S28 family — admitting
+# them to in-kernel would erase that gain.
+P6_NEGATIVES_K1044_ANCHORS = [
+    ("B3a_S18", 5972, 1792,  768),  # Env-B minMN floor (1792<2048) preserves anchor
+    ("B3b_S25", 6016, 2048, 1024),  # Env-A M-floor (6016<13000) preserves anchor
+]
+
+
 # K-984/K-989 LAND anchors that must NOT admit (route-OUT must be preserved).
 P6_LAND_ANCHORS = [
     ("S25",  6016, 2048, 1024),  # K-984 anchor, M just below admit floor
@@ -361,3 +396,53 @@ def test_p6_admit_does_not_break_k984_k989_route_out_anchors(cid, M, N, K):
         M, N, K, torch.bfloat16, torch.bfloat16,
         enable_streamk=False, work_stealing=False) is True, (
         f"P6 wiring regressed K-984/K-989 LAND anchor {cid} ({M},{N},{K})")
+
+
+# ---------------------------------------------------------------------------
+# K-1109 NULL-RESULT pin tests — locks K-1098 backtest verdict on the
+# K-1074 cohort-extension cells and the K-1044 LAND-anchor witnesses.
+# Re-derived independently from the K-1037 primary-source paired-PMC CSV
+# (see /home/ryaswann/mc2-workspaces/K-1109/output/k1109_p6_audit.csv).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cid,M,N,K", P6_NEGATIVES_K1074,
+                         ids=[c[0] for c in P6_NEGATIVES_K1074])
+def test_p6_does_not_admit_k1074_cohort_extension(cid, M, N, K):
+    """K-1109 lock: 6 K-1074 cohort-extension cells must NOT admit.  Their
+    K-1037 paired-PMC waves_per_CU ratios cluster at the canonical OCC
+    2.0x signature (range 1.753-2.740) above C1's 1.70x ceiling; K-1074
+    paired n=30 timing showed 0/6 cells clear the K-901 +2% LAND margin
+    and 2/6 (S32, S37) are CI95-confirmed regressions.  Any future
+    relaxation of Envelope A's M-band [13000, 14999] or its K==1024 guard
+    must fail this test before re-enabling these cells."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"P6 surrogate false-positive on K-1074 cohort-extension {cid} "
+        f"({M},{N},{K}); K-1098 paired-PMC verdict was NO_FIRE")
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_NEGATIVES_K1044_ANCHORS,
+                         ids=[c[0] for c in P6_NEGATIVES_K1044_ANCHORS])
+def test_p6_does_not_admit_k1044_land_anchors(cid, M, N, K):
+    """K-1109 lock: K-1044 B3a (S18) and B3b (S25) LAND anchors must NOT
+    admit despite firing the exact PMC P6 predicate.  The structural
+    surrogate is intentionally more conservative than the exact PMC
+    classifier here -- B3b sits below Envelope A's M>=13000 floor and B3a
+    sits below Envelope B's minMN>=2048 floor.  K-989 measured 5.31x-5.63x
+    routing speedup on the structurally-equivalent S25/S27/S28 family;
+    admitting these anchors to in-kernel would erase that gain."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"P6 surrogate LAND-leak into K-1044 anchor {cid} ({M},{N},{K})")
+
+
+def test_p6_c1_collinearity_wall_is_load_bearing():
+    """K-1109 lock: Envelope A's M=14999 ceiling exists because S30
+    (M=16256, ratio=1.7530, OCC) and S34 (M=24448, ratio=1.7530, OCC)
+    collide exactly on C1.  No structural-surrogate cutoff in the
+    waves_ratio interval (1.5320, 1.7530] can admit S34 without producing
+    a false positive on S30 -- so the M-band must be enforced via shape
+    coordinates rather than a 'tighten C1' relaxation.  This test pins
+    that S30 and S34 receive the same NO_FIRE verdict (both must remain
+    OUTSIDE Envelope A) and that the ceiling stops at M=14999."""
+    # S30 and S34 both NEG; S29 (between them, M=14208) is the only POS.
+    assert R_K1037_P6_admit_wpeu1(16256, 2048, 1024, torch.bfloat16) is False  # S30
+    assert R_K1037_P6_admit_wpeu1(24448, 2048, 1024, torch.bfloat16) is False  # S34
+    assert R_K1037_P6_admit_wpeu1(14208, 2048, 1024, torch.bfloat16) is True   # S29

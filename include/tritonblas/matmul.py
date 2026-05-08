@@ -12,6 +12,8 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from . import guarded_override as _go
+from . import overrides as _overrides_init  # noqa: F401  (registers K-882 etc.)
 
 
 
@@ -159,6 +161,32 @@ def persistent_matmul_lt(
         )
     else:
         grids = total_tiles
+
+        # K-883/K-901 guarded-override registry hook.  Single dispatch site,
+        # routed first (before any future range-keyed hook, R1 — dispatch-
+        # order-first routing).  The registry enforces L1/L2/L3/L5/L6; the
+        # call-site honors L4 (LDS budget) below via _overrides_apply.
+        _ovr_updates = _go.apply_override_in_dispatcher(
+            M=M, N=N, K=K, dtype=a.dtype,
+            block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+            num_stages=num_stages, num_warps=num_warps,
+            waves_per_eu=waves_per_eu, kpack=kpack,
+            mfma_instr_size=mfmaInstrSize,
+            total_tiles=total_tiles, n_cu=selector._hardware.N_CU,
+            work_stealing=work_stealing,
+            bytes_per_elem=a.element_size(),
+        )
+        if _ovr_updates and not _ovr_updates.get("lds_blocked"):
+            BLK_M = _ovr_updates.get("BLOCK_SIZE_M", BLK_M)
+            BLK_N = _ovr_updates.get("BLOCK_SIZE_N", BLK_N)
+            BLK_K = _ovr_updates.get("BLOCK_SIZE_K", BLK_K)
+            num_stages = _ovr_updates.get("num_stages", num_stages)
+            num_warps = _ovr_updates.get("num_warps", num_warps)
+            waves_per_eu = _ovr_updates.get("waves_per_eu", waves_per_eu)
+            kpack = _ovr_updates.get("kpack", kpack)
+            mfmaInstrSize = _ovr_updates.get("matrix_instr_nonkdim", mfmaInstrSize)
+            grids = _ovr_updates.get("grids", grids)
+            total_programs = _ovr_updates.get("total_programs", total_programs)
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,135 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ---------------------------------------------------------------------------
+# K-857: cohort-N1 narrow-gate LDS-swizzle (kpack=2) + asymmetric tile override.
+#
+# **STATUS: SHIPPED DEFAULT-OFF (NO-GO experiment). Opt-in via
+#   TRITONBLAS_ENABLE_K857_N1=1**.
+#
+# Mechanism (K-850 PMC + ISA triage of K-837 PMC dataset on K-790 ranked-gap
+# profile): N1 cells were classified wave-overdispatch-bound (M4 in K-828
+# framework) on the composite-14 baseline (default tile 128x128). K-850
+# Override #2/#3 recommended asymmetric (BM,BN)=(256,128) for M>N and
+# (128,256) for M<N -- 2x tile area; matches HBL Tensile pick MT=512x112x64
+# capped at Triton's pow2 BLOCK<=256 ceiling. kpack bumped 1->2 as the
+# closest Triton-AMD reachable analog to Tensile LDSB1 row-padding (per
+# K-580 / K-834 / K-667 / K-777 narrow-gate pattern).
+#
+# **Live re-verification on `main` (95e2c47, K-857 paired bench, c42/MI300X
+# b07u13, n=50 hot HIP-graph): geomean ON/OFF = 0.822x across 6 cells in
+# the N1 envelope (i.e. ON is ~18% slower than OFF). Mechanism: Origami's
+# default selector on `main` already picks BM=256, BN=256 for these cells
+# (verified via _make_matmul_selector probe), which is *larger* than the
+# K-850-recommended 256x128 -- the K-850 analysis was relative to the
+# composite-14 baseline (default 128x128), not to current `main`. Reducing
+# the tile shrinks per-wave work and increases dispatches.**
+#
+# Guard sweep (29 non-fired cells across K-756/K-804/skinny/edge): on/off
+# in [0.989, 1.026], zero spillover -- predicate is correctly disjoint and
+# the kpack-from-selector wiring is benign for default callers.
+#
+# Predicate is disjoint by construction from K-756 (M==N==2048), K-804
+# (max<=6144), K-668 (min<=1024 OR N in {32,64}), K-746/K-776 (FP8): gate
+# is M!=N, max(M,N)>=8192, min(M,N) in [2048,4096], K in [2048,4096],
+# dtype in {bf16, fp16}.
+#
+# Decision: gate stays default-OFF; opt-in env var preserves the audit
+# harness for future re-tests when (a) the Triton-AMD pow2(BLOCK)<=256
+# ceiling is lifted, or (b) origami's selector regresses for N1 and we
+# need the K-850 override as a fallback. Killswitch is the env var itself.
+# ---------------------------------------------------------------------------
+
+_K857_N1_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def is_K857_N1_cohort(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
+    """K-850 N1 cohort predicate (M-major OR N-major leg). Default-OFF.
+
+    Disjoint by construction from K-756 (M==N==2048), K-804 (max<=6144),
+    K-668 (min<=1024 OR N in {32,64}), K-746/K-776 (FP8). The K-857 paired
+    bench produced a NO-GO verdict on `main` (geomean 0.822x ON/OFF on N1
+    cells) because Origami's default already picks a larger tile than the
+    K-850 recommendation. The override is therefore opt-in only via
+    TRITONBLAS_ENABLE_K857_N1=1, retained for future re-test under
+    composite-14 or relaxed Triton-AMD BLOCK ceilings.
+    """
+    if os.environ.get("TRITONBLAS_ENABLE_K857_N1", "0") != "1":
+        return False
+    if dtype not in _K857_N1_DTYPES:
+        return False
+    if M == N:
+        return False
+    lo, hi = min(M, N), max(M, N)
+    if hi < 8192:
+        return False
+    if not (2048 <= lo <= 4096):
+        return False
+    if not (2048 <= K <= 4096):
+        return False
+    return True
+
+
+def _k857_n1_tile(M: int, N: int):
+    """Asymmetric tile override per K-850 Override #2 (M>N) / #3 (M<N).
+
+    Returns (block_m, block_n, block_k, group_m, kpack).
+    """
+    if M > N:
+        # M-major leg (e.g. 8192x4096x4096 bf16): BM=256, BN=128
+        return (256, 128, 64, 8, 2)
+    # N-major leg (e.g. 4096x8192x4096 bf16): BM=128, BN=256
+    return (128, 256, 64, 8, 2)
+
+
+class _K857_N1_OverrideSelector:
+    """Proxy that wraps the Origami selector and overrides the N1 tile knobs.
+
+    Delegates every attribute / method to the underlying selector except for
+    block_m / block_n / block_k / group_m, which return the K-857 N1 picks.
+    Adds a ``_k857_kpack`` attribute read by ``persistent_matmul_lt`` and
+    ``streamk_matmul_lt`` so kpack defaults to 1 when no override is active.
+    """
+
+    __slots__ = ("_inner", "_bm", "_bn", "_bk", "_gm", "_k857_kpack")
+
+    def __init__(self, inner, bm: int, bn: int, bk: int, gm: int, kpack: int):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_bm", bm)
+        object.__setattr__(self, "_bn", bn)
+        object.__setattr__(self, "_bk", bk)
+        object.__setattr__(self, "_gm", gm)
+        object.__setattr__(self, "_k857_kpack", kpack)
+
+    @property
+    def block_m(self):
+        return self._bm
+
+    @property
+    def block_n(self):
+        return self._bn
+
+    @property
+    def block_k(self):
+        return self._bk
+
+    @property
+    def group_m(self):
+        return self._gm
+
+    def __getattr__(self, name):
+        # Only invoked if the attribute isn't on the proxy itself.
+        return getattr(self._inner, name)
+
+
+def _maybe_apply_k857_n1(selector, M: int, N: int, K: int, dtype: torch.dtype):
+    """Wrap ``selector`` with K-857 N1 override iff the cell hits the gate."""
+    if not is_K857_N1_cohort(M, N, K, dtype):
+        return selector
+    bm, bn, bk, gm, kpack = _k857_n1_tile(M, N)
+    return _K857_N1_OverrideSelector(selector, bm, bn, bk, gm, kpack)
 
 
 
@@ -98,7 +228,9 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-857: honour an optional kpack override stamped by _maybe_apply_k857_n1
+    # (or any future narrow-gate selector wrapper). Default unchanged.
+    kpack = getattr(selector, "_k857_kpack", 1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +376,9 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-857: honour an optional kpack override stamped by _maybe_apply_k857_n1
+    # (or any future narrow-gate selector wrapper). Default unchanged.
+    kpack = getattr(selector, "_k857_kpack", 1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -405,6 +539,9 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-857 N1 narrow gate: BEFORE composite-14 default routing, route N1's
+    # exact (M,N,K,dtype) cells to the asymmetric LDS-swizzle/kpack=2 tile.
+    selector = _maybe_apply_k857_n1(selector, M, N, K, a.dtype)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -462,6 +599,8 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-857 N1 narrow gate: BEFORE composite-14 default routing.
+    selector = _maybe_apply_k857_n1(selector, M, N, K, a.dtype)
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

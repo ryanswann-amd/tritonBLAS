@@ -62,19 +62,6 @@ def _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
     return M == 4096 and N == 4096 and K in (1024, 2048)
 
 
-class _K656Selector(OrigamiMatmulSelector):
-    """OrigamiMatmulSelector subclass that pins BM=BN=256, BK=64, NS=2.
-
-    Class-level overrides shadow the @property descriptors on the parent.
-    All other attributes (group_m, num_sms, sk_grid, _hardware, ...) are
-    inherited unchanged.
-    """
-    block_m = 256
-    block_n = 256
-    block_k = 64
-    num_stages = 2
-
-
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -103,8 +90,14 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    # K-656: shape-guarded tile override for FP8 e5m2fnuz medium-K square cohort.
+    # Mutate the underlying origami result the @property descriptors read from
+    # (same pattern as the existing 256x256/non-square fixup in origami.py).
     if _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
-        sel.__class__ = _K656Selector
+        sel._result.config.mt.m = 256
+        sel._result.config.mt.n = 256
+        sel._result.config.mt.k = 64
+        sel._num_stages = 2
     return sel
 
 

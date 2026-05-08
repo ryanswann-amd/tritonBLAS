@@ -27,33 +27,51 @@ _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.floa
 
 # ---------------------------------------------------------------------------
 # K-695: FP8 e4m3fnuz tall-skinny (small-M, large-N) tile override.
-# Origami over-tiles BM and under-stages BK on this 27-shape cohort,
-# costing 1.46-2.10x vs hipBLASLt. A narrow predicate routing to
-# (BM=32, NS=2, KP=1) (or (32,1,2) for the M=64,N=4096 sub-band) lifts the
-# cohort geomean from 0.34x -> 0.42x of hipBLASLt (+22.7% over Origami) with
-# zero >3% in-cohort regressions and zero leakage outside the predicate.
-# Sub-bands skipped: M=64,N=8192 (Origami already optimal) and
-# (M=16,N=4096,K=16384) (sweep winner is the Origami default at this K).
-# See K-695.
+# Origami over-tiles BM and under-stages BK on this cohort, costing up to
+# 2.10x vs hipBLASLt. The override is a single (M,N,K)->(BM,NS,KP) table
+# populated from the per-shape sweep winner (see workspace
+# output/tile_table.json and output/gate_tile_table.json). Shapes whose
+# sweep winner == Origami default (vs_origami < 1.03) are intentionally
+# omitted so the predicate doesn't fire where it doesn't help; this skips
+# (16,4096,16384) and the entire (M=64,N=8192) sub-band. See K-695.
 _FP8_E4M3FNUZ = getattr(torch, "float8_e4m3fnuz", None)
-_K695_M = (16, 32, 64)
-_K695_N = (4096, 8192, 16384)
-_K695_K = (4096, 8192, 16384)
+_K695_GATE_TABLE = {
+    # M=16 (8 shapes; (16,4096,16384) omitted: sweep winner == Origami default)
+    (16, 4096, 4096):   (32, 2, 1),
+    (16, 4096, 8192):   (32, 2, 1),
+    (16, 8192, 4096):   (32, 2, 1),
+    (16, 8192, 8192):   (32, 2, 1),
+    (16, 8192, 16384):  (32, 2, 1),
+    (16, 16384, 4096):  (32, 2, 1),
+    (16, 16384, 8192):  (32, 2, 1),
+    (16, 16384, 16384): (32, 2, 1),
+    # M=32 (9 shapes)
+    (32, 4096, 4096):   (32, 2, 1),
+    (32, 4096, 8192):   (32, 2, 1),
+    (32, 4096, 16384):  (32, 2, 1),
+    (32, 8192, 4096):   (32, 2, 1),
+    (32, 8192, 8192):   (32, 2, 1),
+    (32, 8192, 16384):  (32, 2, 1),
+    (32, 16384, 4096):  (32, 2, 1),
+    (32, 16384, 8192):  (32, 2, 1),
+    (32, 16384, 16384): (32, 2, 1),
+    # M=64,N=4096 (3 shapes; NS=1 because Origami picks BK=512 here)
+    (64, 4096, 4096):   (32, 1, 2),
+    (64, 4096, 8192):   (32, 1, 2),
+    (64, 4096, 16384):  (32, 1, 1),  # sweep winner is KP=1 at this K
+    # (64,8192,*) omitted: Origami already optimal on this sub-band
+    # M=64,N=16384 (3 shapes)
+    (64, 16384, 4096):  (32, 2, 1),
+    (64, 16384, 8192):  (32, 2, 1),
+    (64, 16384, 16384): (32, 2, 1),
+}
 
 
 def _k695_tile_override(M, N, K, a_dtype):
     """Return (BM, NS, KP) override for the K-695 cohort, else None."""
     if _FP8_E4M3FNUZ is None or a_dtype is not _FP8_E4M3FNUZ:
         return None
-    if M not in _K695_M or N not in _K695_N or K not in _K695_K:
-        return None
-    if M == 64 and N == 8192:  # Origami already optimal on this sub-band
-        return None
-    if M == 16 and N == 4096 and K == 16384:  # sweep winner matches Origami
-        return None                            # default; override regresses
-    if M == 64 and N == 4096:  # NS=1 needed because Origami picks BK=512
-        return (32, 1, 2)
-    return (32, 2, 1)
+    return _K695_GATE_TABLE.get((M, N, K))
 # ---------------------------------------------------------------------------
 
 

@@ -324,16 +324,21 @@ _GATED_DTYPES = {torch.float16, torch.bfloat16}
 # Master toggle. Tests / benches flip this to compare gated vs ungated runs
 # without monkey-patching internals. Set via set_gate_enabled().
 #
-# Default: DISABLED. The K-513 192-shape cohort comparison on MI300X
-# (rocm7.2 / pytorch 2.10) showed end-to-end median latency of every gated
-# bucket regressing 1-5% versus the K-144 persistent kernel. Per-bucket data
-# is in ``output/cohort_192_compare.csv`` in the K-513 workspace. The kernel
-# itself is correct (see ``test_splitk_smallm_dispatch.py``, 115 cases) and
-# the gate machinery is here so that future tuning (e.g., reduced launch
-# overhead, different SPLIT_K choices, or a different driver) can re-enable
-# dispatch by flipping this flag and/or updating ``_BUCKET_WINNERS`` without
-# any further refactor. As of K-513 the gate is opt-in only.
-_GATE_ENABLED = False
+# Default: ENABLED. The K-513 amortized cohort comparison on MI300X
+# (rocm7.2 / pytorch 2.10, c42 cluster) shows split-K beating the K-144
+# persistent kernel on every measured (M, N, K, dtype) bucket in the gated
+# cohort, geomean 4.40x speedup over all 64 measurements (M ∈ {1,2,4,8} x
+# K ∈ {4096,8192} x N ∈ {1024,2048,4096,8192} x {fp16, bf16}; min 1.02x
+# at the largest shapes, max 13.16x at M=4 N=1024 K=8192 fp16). Bench uses
+# CUDA-graph capture-replay (INNER=200 launches per timed event pair) to
+# amortize host launch overhead; the previous v1 measurement that suggested
+# a 1-5% regression was dominated by CUDA-event launch overhead and was
+# corrected by this methodology. Per-shape numbers:
+# ``output/cohort_amortized.csv`` in the K-513 workspace; method and timing
+# harness rationale in ``output/bench_summary.md``.
+#
+# To disable dispatch in production: call ``set_gate_enabled(False)``.
+_GATE_ENABLED = True
 
 
 def set_gate_enabled(enabled: bool) -> bool:

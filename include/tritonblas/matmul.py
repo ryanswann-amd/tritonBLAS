@@ -56,10 +56,29 @@ def _maybe_wrap(fn, probe_tensor):
 # (BM=128, BN=128, BK=64, NS=2). Direct cuda-event timing on c42 MI300X:
 #   M=4096 K=256 fp16   Origami=73.6us   K-451 tile=78.0us  (K-451 -5.6%)
 #   M=4096 K=512 fp16   Origami=92.5us   K-451 tile=103.4us (K-451 -10.5%)
-# So we narrow the outer gate to M in {1024, 2048}, where the K-577 tile
-# wins decisively (per-shape +1.5% to +5.4% over Origami at all 8 shapes
-# in this sub-cohort). For M=4096 we fall through to selector.block_*.
-_K451_COHORT_M = frozenset({1024, 2048})
+#
+# K-646 further-narrowed gate: K-577's wrapper-bound k577_validate.py timing
+# (~50us per call) showed M=1024 lifting +1.5%-5.4% over Origami, but K-621's
+# graph-captured timing (which removes the ~230us Python wrapper overhead)
+# revealed the K-577 tile at 1024^2 K in {256,512} actually runs at 8.7-12.9us
+# while Origami's natural pick runs at 4.9-7.8us -- the K-577 tile is 68-77%
+# SLOWER at M=1024 once kernel-only timing is applied. K-646 paired graph-
+# captured A/B (gate_on vs gate_off, 30 iters x 50-op replay x 3 graphs,
+# c42/MI300X g09u19, 2026-05-08) measured:
+#   M=N=1024 K=256 fp16   K-577=8.9us   Origami=5.0us   on/off=1.7601 (+76.0%)
+#   M=N=1024 K=256 bf16   K-577=8.7us   Origami=4.9us   on/off=1.7702 (+77.0%)
+#   M=N=1024 K=512 fp16   K-577=12.9us  Origami=7.8us   on/off=1.6797 (+68.0%)
+#   M=N=1024 K=512 bf16   K-577=12.6us  Origami=7.3us   on/off=1.7140 (+71.4%)
+#   M=N=2048 K=256 fp16   K-577=12.9us  Origami=12.9us  on/off=1.0003 (+0.03%)
+#   M=N=2048 K=256 bf16   K-577=12.4us  Origami=12.6us  on/off=0.9825 (-1.75%)
+#   M=N=2048 K=512 fp16   K-577=18.3us  Origami=18.4us  on/off=0.9975 (-0.25%)
+#   M=N=2048 K=512 bf16   K-577=17.4us  Origami=17.7us  on/off=0.9847 (-1.53%)
+# At M=1024 the K-577 swizzle-tile is a strict regression versus Origami's
+# pick (which itself runs near hipBLASLt parity per K-621). At M=2048 the
+# K-577 tile is at parity-or-slight-lift. So the gate is narrowed to M={2048}
+# only. K-654 lesson re-applied: shrink the gate when paired-A/B data shows
+# the swap is a strict loss inside a sub-population of the declared cohort.
+_K451_COHORT_M = frozenset({2048})
 _K451_COHORT_K = frozenset({256, 512})
 _K451_COHORT_DTYPES = frozenset({torch.float16, torch.bfloat16})
 

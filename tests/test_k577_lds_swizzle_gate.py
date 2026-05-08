@@ -59,12 +59,18 @@ def test_gate_matches_full_cohort(M, K, dtype):
         # the selector default.
         (4096, 4096, 256, torch.float16),
         (4096, 4096, 512, torch.bfloat16),
+        # K-646 further narrowing: M=1024 was in the K-577 gate but is now
+        # excluded -- paired graph-captured A/B (gate_on vs gate_off, c42/
+        # MI300X 2026-05-08) measured K-577 at 8.9us vs Origami at 5.0us
+        # (1024^2 K=256 fp16, +76% regression). M=1024 must fall through.
+        (1024, 1024, 256, torch.float16),
+        (1024, 1024, 512, torch.bfloat16),
         # Out-of-cohort K (exactly the K-654 / K-539 small-K and large-K bands).
         (1024, 1024, 128, torch.float16),
         (2048, 2048, 1024, torch.bfloat16),
         (4096, 4096, 8192, torch.float16),
         # Out-of-cohort dtype -> must NOT match.
-        (1024, 1024, 256, torch.float32),
+        (2048, 2048, 256, torch.float32),
         (2048, 2048, 512, torch.float8_e4m3fnuz),
     ],
 )
@@ -165,11 +171,15 @@ def _run_streamk(monkeypatch, M, N, K, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("M", [1024, 2048])
 @pytest.mark.parametrize("K", [256, 512])
-def test_persistent_k577_tile_for_M_1024_2048(monkeypatch, dtype, M, K):
-    """For M in {1024, 2048} the persistent launcher must dispatch with the
-    K-577 LDS-bank-conflict-fix tile (BM=128, BN=128, BK=64, NS=2)."""
+def test_persistent_k577_tile_for_M_2048(monkeypatch, dtype, K):
+    """K-646 narrowing: For M = 2048 the persistent launcher must still
+    dispatch with the K-577 LDS-bank-conflict-fix tile (BM=128, BN=128,
+    BK=64, NS=2). M=1024 was excluded from the gate by K-646 because
+    paired graph-captured A/B (gate_on vs gate_off) showed the K-577 tile
+    runs 68-77% slower than Origami's natural pick at 1024^2 K in {256,512}
+    once Python wrapper overhead is amortized away."""
+    M = 2048
     kwargs = _run_persistent(monkeypatch, M, M, K, dtype)
     assert kwargs["BLOCK_SIZE_M"] == 128, kwargs
     assert kwargs["BLOCK_SIZE_N"] == 128, kwargs  # K-577: BN narrowed for LDS budget.
@@ -181,13 +191,17 @@ def test_persistent_k577_tile_for_M_1024_2048(monkeypatch, dtype, M, K):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("M", [1024, 4096])
 @pytest.mark.parametrize("K", [256, 512])
-def test_persistent_M_4096_falls_through_to_selector(monkeypatch, dtype, K):
-    """K-577 narrowing: M=4096 was in the K-451 cohort but is now excluded
-    from the gate (both K-451 winner and K-577 fix tiles lose to Origami's
-    natural pick at M=4096 on the current ROCm/Triton stack). The launch
-    site must therefore use the FakeSelector defaults (64x64x32) here."""
-    kwargs = _run_persistent(monkeypatch, 4096, 4096, K, dtype)
+def test_persistent_M_1024_and_4096_fall_through_to_selector(monkeypatch, dtype, M, K):
+    """K-577 narrowing: M=4096 was excluded by K-577 (both K-451 winner and
+    K-577 fix tiles lose to Origami at that M). K-646 further narrowing:
+    M=1024 is now ALSO excluded -- K-646 paired graph-captured A/B measured
+    the K-577 tile at 8.9us/8.7us/12.9us/12.6us (1024^2 K in {256,512},
+    fp16/bf16) vs Origami at 5.0us/4.9us/7.8us/7.3us, a strict 68-77%
+    regression. The launch site must therefore use the FakeSelector defaults
+    (64x64x32) for both M=1024 and M=4096."""
+    kwargs = _run_persistent(monkeypatch, M, M, K, dtype)
     assert kwargs["BLOCK_SIZE_M"] == 64, kwargs
     assert kwargs["BLOCK_SIZE_N"] == 64, kwargs
     assert kwargs["BLOCK_SIZE_K"] == 32, kwargs
@@ -229,10 +243,11 @@ def test_persistent_origami_pick_outside_k451_gate(monkeypatch, M, N, K, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("M", [1024, 2048])
 @pytest.mark.parametrize("K", [256, 512])
-def test_streamk_k577_tile_for_M_1024_2048(monkeypatch, dtype, M, K):
-    """The streamk launch site must mirror persistent's K-577 sub-gate."""
+def test_streamk_k577_tile_for_M_2048(monkeypatch, dtype, K):
+    """K-646 narrowing: streamk launch site mirrors persistent's narrowed
+    K-577 sub-gate (M={2048} only)."""
+    M = 2048
     kwargs = _run_streamk(monkeypatch, M, M, K, dtype)
     assert kwargs["BLOCK_SIZE_M"] == 128, kwargs
     assert kwargs["BLOCK_SIZE_N"] == 128, kwargs
@@ -242,11 +257,12 @@ def test_streamk_k577_tile_for_M_1024_2048(monkeypatch, dtype, M, K):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("M", [1024, 4096])
 @pytest.mark.parametrize("K", [256, 512])
-def test_streamk_M_4096_falls_through_to_selector(monkeypatch, dtype, K):
-    """For M=4096 the streamk launch site must also fall through to the
-    selector pick (FakeSelector defaults: 64x64x32)."""
-    kwargs = _run_streamk(monkeypatch, 4096, 4096, K, dtype)
+def test_streamk_M_1024_and_4096_fall_through_to_selector(monkeypatch, dtype, M, K):
+    """K-646: M=1024 (new) and M=4096 (K-577 carve-out) must fall through to
+    the selector pick (FakeSelector defaults: 64x64x32) on the streamk site."""
+    kwargs = _run_streamk(monkeypatch, M, M, K, dtype)
     assert kwargs["BLOCK_SIZE_M"] == 64, kwargs
     assert kwargs["BLOCK_SIZE_N"] == 64, kwargs
     assert kwargs["BLOCK_SIZE_K"] == 32, kwargs

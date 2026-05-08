@@ -14,6 +14,119 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# ============================================================================
+# K-697: tall-skinny FP16/BF16 dispatch override
+# ----------------------------------------------------------------------------
+# K-668 profiled the (M >= 2048, N <= 256, K >= 1024, dtype in {fp16, bf16})
+# cohort on MI300X and found tritonblas runs at 0.51x hipBLASLt geomean
+# across 128 shapes. The N=32 slice is the worst (geomean 0.28x): the
+# Origami selector picks (BLOCK_M, BLOCK_N, BLOCK_K) = (16, 16, 32) or
+# (32, 16, 32) which (a) under-decomposes the K loop (256 mainloop iters
+# at K=8192 vs hipBLASLt's 32 with MT_K=256), (b) wastes 50% of MFMA
+# N-lanes via padded BLOCK_N=16 against N=32, and (c) routes through the
+# persistent-only path despite total_tiles < N_CU.
+#
+# The K-697 81-config tile sweep on the four worst K-668 shapes
+# (rocprof-confirmed VALU-bound, non-MFMA-bound) found a single winner:
+# Stream-K with (BLOCK_M=32, BLOCK_N=32, BLOCK_K=128, num_warps=2,
+# num_stages=3). Verification on 16 tall-skinny shapes (the four worst
+# plus 12 cohort siblings spanning M in {2048..16384}, K in {1024..8192})
+# gives geomean +2.91x vs Origami (range 1.20x..7.57x) and lifts the
+# cohort from 0.51x to 0.69x vs hipBLASLt with no cell regressing below
+# 1.20x Origami. Adjacent-cohort leakage check (K-278 small-M-large-N,
+# K-353 small-M-very-large-K, K-518/K-644-P1 M<=8, K-644-P2 large-square,
+# K-667 large-K square) shows every shape outside the gate is left alone.
+#
+# Implementation follows the K-667/K-644 pattern: a strict-equality gate
+# on N (no padding when BN=BLOCK_N=32==N), a measured M-lower-bound, and
+# a measured K-lower-bound, all conjunctive. The kernel launch bypasses
+# the Origami selector entirely (lru_cache ineligible -- selector is ~180
+# us/call which alone wipes the 5-25 us hbl baseline at this size) and
+# hand-picks the verified Stream-K parameters.
+# ============================================================================
+
+# Hand-picked Stream-K tile (verified K-697 winner across 16 cohort shapes).
+_K697_BLOCK_M = 32
+_K697_BLOCK_N = 32
+_K697_BLOCK_K = 128
+_K697_NUM_WARPS = 2
+_K697_NUM_STAGES = 3
+_K697_GROUP_M = 8
+_K697_NUM_XCDS = 8
+
+# Cohort gate bounds (measured from the K-697 verify + leakage sweeps).
+_K697_M_MIN = 2048   # K-668 cohort lower bound; M=1024 won 6.3x but was outside
+                     # the verified envelope, so left in Origami's hands.
+_K697_K_MIN = 1024   # K=1024 was the smallest verified-winning K (1.20x..1.41x);
+                     # K=512 measured 0.86x Origami (REGRESSION) -> excluded.
+
+
+def _is_k697_tall_skinny(M, N, K, dtype):
+    """K-697 cohort gate: tall-skinny FP16/BF16 GEMM where Origami's
+    persistent-mode tile is structurally wrong (under-decomposed K-loop,
+    padded MFMA N-lane, total_tiles << N_CU).
+
+    Strict on N (must equal _K697_BLOCK_N=32 to avoid padding); measured
+    bounds on M and K from the K-697 verify and leakage sweeps.
+    """
+    return (
+        dtype in (torch.float16, torch.bfloat16)
+        and N == _K697_BLOCK_N
+        and M >= _K697_M_MIN
+        and K >= _K697_K_MIN
+    )
+
+
+def _k697_tall_skinny_streamk(a, b, c):
+    """Launch the streamk kernel directly with the K-697 winning tile.
+    Bypasses _make_matmul_selector to avoid Origami's ~180us setup cost
+    (which alone is >baseline kernel time at these sizes).
+    """
+    M, K = a.shape
+    _, N = b.shape
+
+    BM = _K697_BLOCK_M
+    BN = _K697_BLOCK_N
+    BK = _K697_BLOCK_K
+    grids = MAX_SMS  # 304 on MI300X
+    total_blocks_M = triton.cdiv(M, BM)
+    total_blocks_N = triton.cdiv(N, BN)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_tiles_streamk = (total_tiles % grids) if grids > 0 else 0
+    even_k = (K % BK) == 0
+    block_size = BM * BN
+    if grids <= MAX_SMS and block_size <= MAX_BLOCK_SIZE:
+        locks = _global_locks[:grids]
+        P = _global_P[:grids, :block_size]
+    else:
+        locks = torch.empty(grids, device=a.device, dtype=torch.uint8)
+        P = torch.empty(grids, block_size, device=a.device, dtype=torch.float32)
+    chunk_size = _K697_GROUP_M * _K697_GROUP_M
+    if _K697_NUM_XCDS > 0:
+        chunk_size = min(chunk_size, max(1, grids // _K697_NUM_XCDS))
+
+    _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
+        a, b, c, None, None, None,
+        P, locks,
+        M, N, K,
+        a.stride(0), b.stride(1), c.stride(0), c.stride(1),
+        0,
+        stride_ak=a.stride(1), stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BM, BLOCK_SIZE_N=BN, BLOCK_SIZE_K=BK,
+        GROUP_SIZE_M=_K697_GROUP_M,
+        NUM_SMS=grids, NUM_XCDS=_K697_NUM_XCDS,
+        CHUNK_SIZE=chunk_size,
+        STREAMK_TILES=total_tiles_streamk,
+        BIAS=False, EVEN_K=even_k,
+        CACHE_MODIFIER_A=None, CACHE_MODIFIER_B=None,
+        QUANTIZED=False,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=_K697_NUM_STAGES, num_warps=_K697_NUM_WARPS,
+        waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+    )
+    return c
+
+
 
 _tensor_cache = {}
 
@@ -404,6 +517,15 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-697: tall-skinny FP16/BF16 dispatch override.  Skips the Origami
+    # selector entirely (its ~180us setup is >baseline kernel time at
+    # these sizes) and routes to a hand-picked Stream-K tile that the
+    # K-697 sweep proved beats Origami by 1.20x..7.57x (geomean 2.91x)
+    # and lifts cohort-vs-hipBLASLt from 0.51x to 0.69x.  See the gate
+    # docstring above for cohort definition and verification protocol.
+    if not work_stealing and _is_k697_tall_skinny(M, N, K, a.dtype):
+        return _k697_tall_skinny_streamk(a, b, out)
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +582,11 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-697: tall-skinny FP16/BF16 dispatch override (see _matmul above).
+    if not work_stealing and _is_k697_tall_skinny(M, N, K, a.dtype):
+        _k697_tall_skinny_streamk(a, b, out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

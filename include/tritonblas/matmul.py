@@ -63,16 +63,33 @@ _TSKINNY_GATE_ENABLED = _os.environ.get("TRITONBLAS_DISABLE_TSKINNY_OVERRIDE", "
 
 def _tskinny_tile_override(M, N, K, dtype):
     """Return a tile/dispatch override dict for the tall-skinny FP16/BF16
-    cohort, or None when out of cohort."""
+    cohort, or None when out of cohort.
+
+    Two disjoint sub-bands (if/elif chain, K-545 / K-667 / K-644 precedent):
+      * N == 32  (K-697 ship): Stream-K, BM=BN=32, BK=256, nw=4, ns=2
+      * N == 64  (K-693 ship): persistent, BM=32, BN=64, BK=128, nw=8, ns=2,
+        gated to M >= 4096 (M=2048,N=64 is competitive for Origami; including
+        it would regress ~19%).  Pure tile-geometry fix: BK=128 cuts mainloop
+        iter count 4x vs Origami's BLOCK_K=32, and BM=32 (vs Origami's 256
+        macrotile at M>=4096) eliminates the VGPR-pressure / LDS-occupancy
+        cliff that Origami's over-tiled BM creates on this M-row -- per the
+        K-668 §3 mechanism analysis.
+    """
     if not _TSKINNY_GATE_ENABLED:
         return None
     if dtype is not torch.float16 and dtype is not torch.bfloat16:
         return None
-    if M < 2048 or N > 32 or K < 4096:
+    if M < 2048 or K < 4096:
         return None
-    return {"BM": 32, "BN": 32, "BK": 256,
-            "num_stages": 2, "num_warps": 4, "kpack": 1,
-            "force_streamk": True}
+    if N == 32:
+        return {"BM": 32, "BN": 32, "BK": 256,
+                "num_stages": 2, "num_warps": 4, "kpack": 1,
+                "force_streamk": True}
+    elif N == 64 and M >= 4096:
+        return {"BM": 32, "BN": 64, "BK": 128,
+                "num_stages": 2, "num_warps": 8, "kpack": 2,
+                "force_streamk": False}
+    return None
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -104,12 +121,19 @@ def _make_matmul_selector(
         num_stages=num_stages,
     )
     spec = _tskinny_tile_override(M, N, K, a_dtype)
-    if spec is not None and a_dtype is b_dtype and streamk:
-        sel._tskinny_override = spec  # consumed by persistent_matmul_lt / streamk_matmul_lt
-        # Origami's sk_grid is derived from its own tile pick; the override
-        # changes the tile, so re-pin the StreamK grid to N_CU (the tile
-        # sweep showed sk_grid = N_CU dominates on this cohort).
-        sel._grid = sel._hardware.N_CU
+    if spec is not None and a_dtype is b_dtype:
+        # The persistent-path sub-band (N=64, K-693) does not need streamk.
+        # The Stream-K sub-band (N=32, K-697) only attaches when streamk=True
+        # so the persistent dispatcher does not see a force_streamk override.
+        if spec.get("force_streamk", False) and not streamk:
+            pass  # caller (_matmul / _matmul_out) re-runs us with streamk=True
+        else:
+            sel._tskinny_override = spec  # consumed by persistent_matmul_lt / streamk_matmul_lt
+            if spec.get("force_streamk", False):
+                # Origami's sk_grid is derived from its own tile pick; the override
+                # changes the tile, so re-pin the StreamK grid to N_CU (the tile
+                # sweep showed sk_grid = N_CU dominates on this N=32 cohort).
+                sel._grid = sel._hardware.N_CU
     return sel
 
 
@@ -463,8 +487,10 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
-        enable_streamk = True
+    if not enable_streamk and a.dtype is b.dtype:
+        _spec = _tskinny_tile_override(M, N, K, a.dtype)
+        if _spec is not None and _spec.get("force_streamk", False):
+            enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -522,8 +548,10 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
-        enable_streamk = True
+    if not enable_streamk and a.dtype is b.dtype:
+        _spec = _tskinny_tile_override(M, N, K, a.dtype)
+        if _spec is not None and _spec.get("force_streamk", False):
+            enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
@@ -701,8 +729,10 @@ def _addmm(
     M, K = a.shape
     _, N = b.shape
 
-    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
-        enable_streamk = True
+    if not enable_streamk and a.dtype is b.dtype:
+        _spec = _tskinny_tile_override(M, N, K, a.dtype)
+        if _spec is not None and _spec.get("force_streamk", False):
+            enable_streamk = True
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -775,8 +805,10 @@ def _addmm_out(
     M, K = a.shape
     _, N = b.shape
 
-    if not enable_streamk and _tskinny_tile_override(M, N, K, a.dtype) is not None and a.dtype is b.dtype:
-        enable_streamk = True
+    if not enable_streamk and a.dtype is b.dtype:
+        _spec = _tskinny_tile_override(M, N, K, a.dtype)
+        if _spec is not None and _spec.get("force_streamk", False):
+            enable_streamk = True
     # Query Origami for solution
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, bias.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

@@ -98,7 +98,23 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-612: Gated kpack=2 mitigation for LDS bank conflicts on tile widths
+    # where BLOCK_K * sizeof(dtype) is a multiple of two LDS rows (>= 256 B
+    # on MI300X's 128-byte LDS row). Empirical rocprofv3 SQ_LDS_BANK_CONFLICT:
+    #   tile=64x64x128  fp16/bf16 (BK*2=256B):  20% -> 11% with kpack=2  (helps)
+    #   tile=128x128x64 fp16/bf16 (BK*2=128B):   0% -> 11% with kpack=2  (hurts)
+    #   tile=256x256x64 fp16/bf16 (BK*2=128B):   0% -> 11% with kpack=2  (hurts)
+    # So the gate is BLOCK_K*itemsize >= 256 AND dtype in {fp16, bf16}. This
+    # captures the M=N=1024 K-451 cohort shapes (4 of 12) that suffer from the
+    # half-row LDS bank-conflict pattern, without regressing the BK=64 tiles.
     kpack = 1
+    try:
+        _itemsize = a.element_size()
+        _is_fp16_like = a.dtype in (torch.float16, torch.bfloat16)
+        if _is_fp16_like and (BLK_K * _itemsize) >= 256:
+            kpack = 2
+    except Exception:
+        pass
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +260,23 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-612: Gated kpack=2 mitigation for LDS bank conflicts on tile widths
+    # where BLOCK_K * sizeof(dtype) is a multiple of two LDS rows (>= 256 B
+    # on MI300X's 128-byte LDS row). Empirical rocprofv3 SQ_LDS_BANK_CONFLICT:
+    #   tile=64x64x128  fp16/bf16 (BK*2=256B):  20% -> 11% with kpack=2  (helps)
+    #   tile=128x128x64 fp16/bf16 (BK*2=128B):   0% -> 11% with kpack=2  (hurts)
+    #   tile=256x256x64 fp16/bf16 (BK*2=128B):   0% -> 11% with kpack=2  (hurts)
+    # So the gate is BLOCK_K*itemsize >= 256 AND dtype in {fp16, bf16}. This
+    # captures the M=N=1024 K-451 cohort shapes (4 of 12) that suffer from the
+    # half-row LDS bank-conflict pattern, without regressing the BK=64 tiles.
     kpack = 1
+    try:
+        _itemsize = a.element_size()
+        _is_fp16_like = a.dtype in (torch.float16, torch.bfloat16)
+        if _is_fp16_like and (BLK_K * _itemsize) >= 256:
+            kpack = 2
+    except Exception:
+        pass
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

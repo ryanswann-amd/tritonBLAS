@@ -1,32 +1,60 @@
 """K-935 — guarded-override structural tests (CPU-only).
 
-These tests verify the K-935 cohort-A LDS-pressure mitigation gate:
+These tests verify the K-935 cohort-A LDS-pressure mitigation gate's
+**structural correctness** (predicate, killswitch, dispatch-site shim,
+LDS-budget guard).  They do NOT touch CUDA — the GPU paired-CI verdict
+lives in ``scripts/run_falsification_k935.py`` (current verdict on
+c42/MI300X gfx942: NO-LAND, geomean ON/OFF ~0.99x, V2/V3 PASS).
 
-  - is registered in the production registry on import
-  - is fail-closed (env-var OFF -> never fires)
-  - fires only on the strict-equality (M,N,K,dtype) cohort keys
-  - returns the K-935 payload (kpack=2, num_warps=8, num_stages=2)
-  - does not bleed onto neighbour cells in the K-905 cohort-A neighbourhood
-  - composes correctly with the work-stealing dispatcher (refuses by default
-    per K-883 L5)
-
-GPU paired-CI falsification lives in ``scripts/run_falsification_k935.py``.
+Per K-901 M2 the gate definition lives only in scripts/ + tests/ until
+its harness verdict flips to LAND, so these tests import the canonical
+fixture from the script via importlib path manipulation.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
+import pathlib
+import sys
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-import tritonblas  # noqa: E402  -- triggers override registration
 from tritonblas.guarded_override import (  # noqa: E402
     GuardedOverride,
     OverrideRegistry,
     apply_override_in_dispatcher,
 )
-from tritonblas.overrides.k935_lds_pressure import K935_GATE  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Load the K-935 gate definition from the script (canonical fixture site).
+# ---------------------------------------------------------------------------
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_SCRIPT_PATH = _REPO_ROOT / "scripts" / "run_falsification_k935.py"
+
+
+def _load_k935_module():
+    spec = importlib.util.spec_from_file_location(
+        "_k935_falsify", str(_SCRIPT_PATH),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_k935_falsify"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_k935_mod = _load_k935_module()
+
+
+@pytest.fixture
+def gate():
+    """Fresh K-935 gate per test (counters reset, no env leakage)."""
+    g = _k935_mod.build_k935_gate()
+    OverrideRegistry.register(g)
+    yield g
+    OverrideRegistry.unregister("K-935")
 
 
 COHORT = [
@@ -35,9 +63,9 @@ COHORT = [
 ]
 
 
-# ----------------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Env hygiene
+# ---------------------------------------------------------------------------
 def _disable():
     os.environ.pop("TB_K935_ENABLE", None)
 
@@ -57,45 +85,57 @@ def _restore_env():
         os.environ["TB_K935_ENABLE"] = prev
 
 
-# ----------------------------------------------------------------------------
-# Registration
-# ----------------------------------------------------------------------------
-def test_k935_gate_registered_in_production_singleton():
+# ---------------------------------------------------------------------------
+# K-901 M2 — production tree must NOT carry the K-935 gate.
+# ---------------------------------------------------------------------------
+def test_k935_not_in_production_registry_after_clean_import():
+    """Fail-closed: `import tritonblas` registers ZERO concrete overrides."""
+    import tritonblas  # noqa: F401
     tickets = {g.ticket for g in OverrideRegistry.all()}
-    assert "K-935" in tickets, (
-        "K-935 gate must register on `import tritonblas`; got tickets="
+    assert "K-935" not in tickets, (
+        "K-935 gate auto-registered in production -- violates K-901 M2 "
+        "(fail-closed; only LAND verdicts ship).  Tickets seen: "
         f"{tickets}"
     )
 
 
-def test_k935_gate_is_singleton():
-    """Registering twice is a no-op (idempotence — K-883 L8)."""
+def test_k935_overrides_subpackage_does_not_exist():
+    """K-901 M2: NO-LAND prototypes are deleted, not disabled."""
+    overrides_dir = _REPO_ROOT / "include" / "tritonblas" / "overrides"
+    assert not overrides_dir.exists(), (
+        f"include/tritonblas/overrides/ exists -- K-901 M2 says delete "
+        f"NO-LAND prototypes from production tree, do not stash them as "
+        f"disabled-by-default packages."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Idempotence (K-883 L8)
+# ---------------------------------------------------------------------------
+def test_k935_register_idempotent(gate):
     n_before = len(OverrideRegistry.all())
-    OverrideRegistry.register(K935_GATE)
+    OverrideRegistry.register(_k935_mod.build_k935_gate())
     n_after = len(OverrideRegistry.all())
     assert n_before == n_after
 
 
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Fail-closed semantics (K-883 L3)
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("M,N,K,dtype", COHORT)
-def test_k935_off_by_default(M, N, K, dtype):
+def test_k935_off_by_default(M, N, K, dtype, gate):
     _disable()
-    assert K935_GATE.lookup(M, N, K, dtype) is None, (
-        "Cohort-A key fired with TB_K935_ENABLE unset; gate is not fail-closed."
-    )
+    assert gate.lookup(M, N, K, dtype) is None
 
 
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Cohort enumeration (K-883 L1 strict-equality dispatch)
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("M,N,K,dtype", COHORT)
-def test_k935_fires_on_each_cohort_key(M, N, K, dtype):
-    K935_GATE.reset_counters()
+def test_k935_fires_on_each_cohort_key(M, N, K, dtype, gate):
     _enable()
-    payload = K935_GATE.lookup(M, N, K, dtype)
-    assert payload is not None, f"Cohort key ({M},{N},{K},{dtype}) did not fire."
+    payload = gate.lookup(M, N, K, dtype)
+    assert payload is not None
     assert payload["kpack"] == 2
     assert payload["num_warps"] == 8
     assert payload["num_stages"] == 2
@@ -104,85 +144,76 @@ def test_k935_fires_on_each_cohort_key(M, N, K, dtype):
 @pytest.mark.parametrize(
     "M,N,K,dtype",
     [
-        # K-905 cohort-A near-neighbours that MUST NOT fire (R1 strict equality).
-        (1024, 1024, 8192, torch.float16),    # smaller K
-        (1024, 1024, 16384, torch.float32),   # disallowed dtype
-        (2048, 2048, 16384, torch.float16),   # K-882 cohort cell
-        (1024, 1024, 32768, torch.bfloat16),  # larger K
-        (768, 1024, 16384, torch.float16),    # asymmetric square
+        (1024, 1024, 8192, torch.float16),
+        (1024, 1024, 16384, torch.float32),
+        (2048, 2048, 16384, torch.float16),
+        (1024, 1024, 32768, torch.bfloat16),
+        (768, 1024, 16384, torch.float16),
         (1024, 768, 16384, torch.bfloat16),
         (512, 512, 16384, torch.float16),
         (1024, 1024, 4096, torch.bfloat16),
     ],
 )
-def test_k935_does_not_fire_on_neighbours(M, N, K, dtype):
-    K935_GATE.reset_counters()
+def test_k935_does_not_fire_on_neighbours(M, N, K, dtype, gate):
     _enable()
-    assert K935_GATE.lookup(M, N, K, dtype) is None, (
-        f"Neighbour key ({M},{N},{K},{dtype}) fired -- predicate bleed "
-        "(K-654 anti-pattern)."
+    assert gate.lookup(M, N, K, dtype) is None, (
+        f"Predicate bleed at ({M},{N},{K},{dtype}) -- K-654 anti-pattern."
     )
 
 
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Dtype allowlist (K-883 L2)
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.int8])
-def test_k935_dtype_allowlist_blocks(dtype):
+def test_k935_dtype_allowlist_blocks(dtype, gate):
     _enable()
-    assert K935_GATE.lookup(1024, 1024, 16384, dtype) is None
+    assert gate.lookup(1024, 1024, 16384, dtype) is None
 
 
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Routing-trace counters (K-883 L6)
-# ----------------------------------------------------------------------------
-def test_k935_routing_counters_track_fires_and_nonfires():
-    K935_GATE.reset_counters()
+# ---------------------------------------------------------------------------
+def test_k935_routing_counters(gate):
     _enable()
-    K935_GATE.lookup(1024, 1024, 16384, torch.float16)        # fire
-    K935_GATE.lookup(1024, 1024, 16384, torch.bfloat16)       # fire
-    K935_GATE.lookup(2048, 2048, 16384, torch.float16)        # nonfire (OOC)
+    gate.lookup(1024, 1024, 16384, torch.float16)
+    gate.lookup(1024, 1024, 16384, torch.bfloat16)
+    gate.lookup(2048, 2048, 16384, torch.float16)         # OOC nonfire
     _disable()
-    K935_GATE.lookup(1024, 1024, 16384, torch.float16)        # nonfire (env)
-    snap = K935_GATE.routing_snapshot()
+    gate.lookup(1024, 1024, 16384, torch.float16)         # env nonfire
+    snap = gate.routing_snapshot()
     assert snap["fire_total"] == 2
     assert snap["nonfire_total"] == 2
     assert snap["per_key_fires"][(1024, 1024, 16384, torch.float16)] == 1
     assert snap["per_key_fires"][(1024, 1024, 16384, torch.bfloat16)] == 1
 
 
-# ----------------------------------------------------------------------------
-# Composability guard (K-883 L5) -- default refuses under work_stealing.
-# ----------------------------------------------------------------------------
-def test_k935_refuses_under_work_stealing():
+# ---------------------------------------------------------------------------
+# Composability guard (K-883 L5)
+# ---------------------------------------------------------------------------
+def test_k935_refuses_under_work_stealing(gate):
     _enable()
-    K935_GATE.reset_counters()
     hit = OverrideRegistry.apply(
         1024, 1024, 16384, torch.float16, work_stealing=True
     )
-    assert hit is None, (
-        "K-935 fired under work_stealing=True; L5 composability guard broken."
-    )
+    assert hit is None, "K-935 fired under work_stealing=True; L5 broken."
 
 
-def test_k935_fires_via_registry_apply_without_work_stealing():
+def test_k935_fires_via_registry_apply(gate):
     _enable()
-    K935_GATE.reset_counters()
     hit = OverrideRegistry.apply(
         1024, 1024, 16384, torch.float16, work_stealing=False
     )
     assert hit is not None
-    gate, payload = hit
-    assert gate.ticket == "K-935"
+    g, payload = hit
+    assert g.ticket == "K-935"
     assert payload == {"kpack": 2, "num_warps": 8, "num_stages": 2}
 
 
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Dispatch-site shim integration (K-883 L4 LDS budget enforced)
-# ----------------------------------------------------------------------------
-def test_k935_dispatch_site_returns_kpack_and_num_warps():
+# ---------------------------------------------------------------------------
+def test_k935_dispatch_site_returns_kpack_diff(gate):
     _enable()
-    K935_GATE.reset_counters()
     out = apply_override_in_dispatcher(
         M=1024, N=1024, K=16384, dtype=torch.float16,
         block_m=128, block_n=128, block_k=64,
@@ -193,16 +224,15 @@ def test_k935_dispatch_site_returns_kpack_and_num_warps():
     )
     assert out.get("fired_ticket") == "K-935"
     assert out.get("kpack") == 2
-    # num_warps already 8 -- shim only emits diffs, so num_warps should NOT be
-    # in the output (no-change diff is omitted).
+    # No-change diffs must be omitted from the patch dict.
     assert "num_warps" not in out
+    assert "num_stages" not in out
 
 
-def test_k935_dispatch_site_lds_budget_blocks_oversized_tile():
-    """Synthetic guard-test: a hypothetical oversized tile triggers L4."""
+def test_k935_dispatch_site_lds_budget_blocks_oversized_tile(gate):
+    """Synthetic guard-test: an oversized tile must trip the L4 LDS guard."""
     _enable()
-    K935_GATE.reset_counters()
-    # 2 * (256 + 256) * 256 * 2 = 524288 bytes >> 64KiB.  L4 should block.
+    # 2 * (256 + 256) * 256 * 2 = 524288 bytes >> 64 KiB -- L4 must block.
     out = apply_override_in_dispatcher(
         M=1024, N=1024, K=16384, dtype=torch.float16,
         block_m=256, block_n=256, block_k=256,
@@ -213,22 +243,21 @@ def test_k935_dispatch_site_lds_budget_blocks_oversized_tile():
     )
     assert out.get("lds_blocked") is True
     assert out.get("fired_ticket") == "K-935"
-    # When L4 trips, the kpack diff must NOT be applied (caller would skip).
     assert "kpack" not in out
 
 
-# ----------------------------------------------------------------------------
-# Regression — K-905 cohort-A documented bf16/fp16 keys must be present.
-# ----------------------------------------------------------------------------
-def test_k935_cohort_keys_match_k905_cohortA():
+# ---------------------------------------------------------------------------
+# Regression -- cohort spec must match K-905 / K-913 grounding.
+# ---------------------------------------------------------------------------
+def test_k935_cohort_keys_match_k905_cohortA(gate):
     expected = {
         (1024, 1024, 16384, torch.float16),
         (1024, 1024, 16384, torch.bfloat16),
     }
-    assert set(K935_GATE.cohort_keys) == expected
+    assert set(gate.cohort_keys) == expected
 
 
-def test_k935_cohort_size_cap_respected():
+def test_k935_cohort_size_cap_respected(gate):
     """A future PR cannot grow this gate without explicitly raising the cap."""
-    assert K935_GATE.cohort_size_cap <= 4
-    assert len(K935_GATE.cohort_keys) <= K935_GATE.cohort_size_cap
+    assert gate.cohort_size_cap <= 4
+    assert len(gate.cohort_keys) <= gate.cohort_size_cap

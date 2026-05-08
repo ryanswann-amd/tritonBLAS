@@ -36,6 +36,31 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# --- K-451 medium-K square FP16/BF16 cohort dispatch gate -----------------
+# Origami's pick for M=N in {1024,2048,4096} x K in {256,512} fp16/bf16 hits a
+# dispatch-tax-bound floor (~0.36x hipBLASLt geomean). K-451's 5312-config
+# sweep on MI300X found a universal config that lifts cohort geomean by
+# +7.19% with 0 per-shape regressions vs Origami. The PRD's >=0.85x target is
+# structurally infeasible per K-423/TRITONBLAS-0042; this gate captures the
+# best achievable lift within feasibility limits.
+#
+# IMPORTANT: this gate is applied INSIDE the kernel-launch functions
+# (persistent_matmul_lt, streamk_matmul_lt) rather than via a selector wrapper,
+# because Python attribute-proxy overhead (~3us per dispatch via __getattr__ /
+# __slots__) consumes ~half of the +6-7% cohort lift K-451 measured. Inlining
+# avoids any proxy and preserves the full lift.
+_K451_COHORT_M = frozenset({1024, 2048, 4096})
+_K451_COHORT_K = frozenset({256, 512})
+_K451_COHORT_DTYPES = frozenset({torch.float16, torch.bfloat16})
+
+def _k451_match(M, N, K, a_dtype):
+    """Return True if (M, N, K, a_dtype) falls in the K-451 medium-K square cohort."""
+    return (M == N
+            and M in _K451_COHORT_M
+            and K in _K451_COHORT_K
+            and a_dtype in _K451_COHORT_DTYPES)
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -82,11 +107,26 @@ def persistent_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M    = selector.block_m
-    BLK_N    = selector.block_n
-    BLK_K    = selector.block_k
-    gsize_m  = selector.group_m
-    num_xcds = selector.num_sms
+    # K-451 medium-K square fp16/bf16 cohort: override Origami pick with the
+    # universal-winner config from the 5312-config sweep. Branched BEFORE the
+    # Origami @property reads to skip the wasted descriptor lookups that would
+    # otherwise consume ~3-4us per dispatch (half of the +7.19% cohort lift).
+    if _k451_match(M, N, K, a.dtype):
+        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        gsize_m = 8
+        num_stages = 3
+        num_warps = 8
+        waves_per_eu = 2
+        num_xcds = selector.num_sms
+    else:
+        BLK_M    = selector.block_m
+        BLK_N    = selector.block_n
+        BLK_K    = selector.block_k
+        gsize_m  = selector.group_m
+        num_xcds = selector.num_sms
+        num_stages = getattr(selector, "num_stages", 2)
+        num_warps = getattr(selector, "num_warps", 8)        # K-451 / K-398: read from selector
+        waves_per_eu = getattr(selector, "waves_per_eu", 0)  # K-451 / K-398: read from selector
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -94,9 +134,6 @@ def persistent_matmul_lt(
     total_programs = total_tiles
     even_k = K % BLK_K == 0
 
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
@@ -216,11 +253,23 @@ def streamk_matmul_lt(
     M, K = a.shape
     _, N = b.shape
 
-    BLK_M    = selector.block_m
-    BLK_N    = selector.block_n
-    BLK_K    = selector.block_k
-    gsize_m  = selector.group_m
-    num_xcds = selector.num_sms
+    # K-451 medium-K square fp16/bf16 cohort gate (see persistent_matmul_lt).
+    if _k451_match(M, N, K, a.dtype):
+        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        gsize_m = 8
+        num_stages = 3
+        num_warps = 8
+        waves_per_eu = 2
+        num_xcds = selector.num_sms
+    else:
+        BLK_M    = selector.block_m
+        BLK_N    = selector.block_n
+        BLK_K    = selector.block_k
+        gsize_m  = selector.group_m
+        num_xcds = selector.num_sms
+        num_stages = getattr(selector, "num_stages", 2)
+        num_warps = getattr(selector, "num_warps", 8)        # K-451 / K-398: read from selector
+        waves_per_eu = getattr(selector, "waves_per_eu", 0)  # K-451 / K-398: read from selector
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
@@ -239,10 +288,6 @@ def streamk_matmul_lt(
         total_tiles_streamk = total_tiles % total_programs_streamk
     else:
         total_tiles_streamk = 0
-
-    num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None

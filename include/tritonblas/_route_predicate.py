@@ -420,25 +420,47 @@ _K1131_P8_NEIGHBORS_12 = frozenset({
     ( 4480, 3072, 1536, "torch.bfloat16"),  # N12 S24 K*2  IN_COHORT
 })
 
-# Composed 25-cell P8 envelope.  Anchors and neighbors are deliberately
-# kept as separate constants so reviewers (and the K-1131 manifest auditor)
-# can see provenance at a glance; the dispatch path consults the union.
-_P8_MFMA_ISSUE_STALL_ROUTEOUT = _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25, (
-    "K-1144 P8 envelope must be exactly 25 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors); a duplicate or stray entry has crept in.")
-# Cross-check: the two sub-sets must be disjoint by construction
-# (K-1131 perturbed AWAY from the K-1121 anchors).
+# K-1175 / K-1161 E2 admits.  Three cells from the K-1161 paired n=30
+# HIP-graph hot-cache validation that landed at hbl/tb >= 1.315x with
+# CI95-lo > 1.05x on a gfx942 reference node.  K-1161 returned
+# NEGATIVE_AXIS_PIVOT overall (3/8 admit) -- the broader K-floor=128 /
+# K=512 interior axis is NOT hipBLASLt-favourable for this regime; only
+# these three measured-safe cells are staged here.  Strict-equality only.
+_K1161_E2_ADMITS_3 = frozenset({
+    (  736, 1792,  736, "torch.bfloat16"),  # E2_I4 hbl/tb=1.315x  (K-interior upper edge)
+    (10112, 2048, 1024, "torch.bfloat16"),  # E2_M1 hbl/tb=1.759x  (M-axis at K-1121 anchor K)
+    (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x  (M-axis at K-1121 anchor K)
+})
+
+# Composed 28-cell P8 envelope.  Anchors, neighbors, and K-1175/K-1161 E2
+# admits are deliberately kept as separate constants so reviewers (and
+# the manifest auditors) can see provenance at a glance; the dispatch
+# path consults the union.
+_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_E2_ADMITS_3
+)
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
+    "K-1175 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate or stray "
+    "entry has crept in.")
+# Cross-check: the three sub-sets must be pairwise-disjoint by construction
+# (K-1131 perturbed AWAY from K-1121 anchors; K-1161 candidate generator
+# excluded all K-1121 anchors and K-1131 neighbors before measurement).
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
     "rules require strict disjointness from the 13 K-1121 anchors.")
+assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1175 K-1161 E2 admits overlap with K-1121 anchors.")
+assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1175 K-1161 E2 admits overlap with K-1131 neighbors.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 — direct hipBLASLt route-OUT for the triply-validated
-    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors).
+    """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
+    triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
+    neighbors + K-1175/K-1161 E2 admits).
 
-    Returns True iff (M, N, K, dtype) matches one of the 25 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

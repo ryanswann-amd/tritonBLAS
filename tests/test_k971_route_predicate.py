@@ -35,6 +35,7 @@ from tritonblas._route_predicate import (
     _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
+    _K1161_E2_ADMITS_3,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -679,18 +680,42 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_25():
-    """The triply-validated cohort is 13 K-1121 + 12 K-1131 = 25 cells.
-    Any silent edit changes this count and trips this canary."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25
+K1161_E2_ADMITS_3_LIST = [
+    # (cid,    M,    N,    K) -- K-1161 paired n=30 hbl/tb >= 1.315x, CI95-lo > 1.05x
+    ("E2_I4",   736, 1792,  736),  # hbl/tb=1.315x  (K-interior upper edge)
+    ("E2_M1", 10112, 2048, 1024),  # hbl/tb=1.759x  (M-axis at K-1121 anchor K)
+    ("E2_M2", 12160, 2048, 1024),  # hbl/tb=1.499x  (M-axis at K-1121 anchor K)
+]
+
+
+def test_k1175_p8_envelope_size_is_exactly_28():
+    """The triply-validated cohort is 13 K-1121 + 12 K-1131 + 3 K-1161 = 28
+    cells.  Any silent edit changes this count and trips this canary."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
+    assert len(_K1161_E2_ADMITS_3) == 3
 
 
-def test_k1144_p8_anchors_and_neighbors_are_disjoint():
-    """K-1131 neighbor generation rules require strict disjointness from
-    the 13 K-1121 anchors (perturbation moves AWAY from the anchor)."""
+def test_k1175_p8_subsets_are_pairwise_disjoint():
+    """K-1131 neighbors are perturbed AWAY from K-1121 anchors; K-1161 E2
+    candidates were generated excluding both prior subsets by construction."""
     assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1161_E2_ADMITS_3_LIST,
+                         ids=[c[0] for c in K1161_E2_ADMITS_3_LIST])
+def test_k1175_p8_admits_all_3_k1161_e2_cells(cid, M, N, K):
+    """Every K-1161 E2 admit must fire the P8 strict-equality match.
+    These 3 cells were paired n=30 measured at hbl/tb >= 1.315x AND
+    CI95-lo > 1.05x on a gfx942 reference node."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1161 E2 admit {cid} ({M},{N},{K}) missed P8 envelope")
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True
 
 
 def test_k1144_p8_envelope_contents_are_pinned_to_k1121_manifest():

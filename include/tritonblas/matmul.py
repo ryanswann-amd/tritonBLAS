@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,55 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ============================================================================
+# K-982 — guarded scheduler-knob overrides for K-931 Bucket-3 MFMA-issue-stall
+# ============================================================================
+# Two variants, env-gated, default OFF; activated independently. Cohort = the
+# top-5 K-931 Bucket-3 MFMA-issue-stall cells (S29 + 4 siblings, bf16, MI300X).
+# K-901 layers used: L1 strict-equality frozenset cell key, L2 dtype allowlist
+# (bf16 only), L3 env killswitch read every call (no lru_cache).
+#
+# Variant A: waves_per_eu = 2  (TB_K982_WPEU2=1)
+#   Less aggressive than K-967's wpeu=1 — keeps 2 waves/EU instead of cutting
+#   to 1. Decomposes K-967 NULL into "occupancy collapse" vs "wrong knob".
+#
+# Variant B: schedule_hint = 'attention'  (TB_K982_SCHED=1)
+#   Triton-AMD compile-time scheduler knob (the only available "instruction-
+#   fence-only" lever — sets iglp 2 + sched.barrier wrappers in ttgpuir per
+#   triton/backends/amd/compiler.py:236). NOTE: this is the closest available
+#   approximation to the literal `s_sched_barrier 0xC` instruction-level fence;
+#   true asm injection via tl.inline_asm_elementwise was deferred per task scope.
+#
+_TB_K982_MFMA_CELLS = frozenset([
+    (14208, 2048, 1024),  # S29 top-1 in-cohort
+    (5972,  1792,  768),  # S18 sibling
+    (4480,  3072,  768),  # S24 sibling
+    (6016,  2048, 1024),  # S25 sibling
+    (16256, 2048, 1024),  # S30 closest spatial neighbor (occupancy-bound,
+                          # included to detect leakage into adjacent bucket)
+])
+
+def _tb_k982_wpeu2_override(M, N, K, dtype):
+    """Variant A: waves_per_eu = 2 if env-gated and cell+dtype match."""
+    if os.environ.get("TB_K982_WPEU2", "0") not in ("1", "true", "TRUE", "on", "ON"):
+        return None
+    if dtype is not torch.bfloat16:
+        return None
+    if (int(M), int(N), int(K)) not in _TB_K982_MFMA_CELLS:
+        return None
+    return 2
+
+def _tb_k982_sched_override(M, N, K, dtype):
+    """Variant B: schedule_hint = 'attention' if env-gated and cell+dtype match."""
+    if os.environ.get("TB_K982_SCHED", "0") not in ("1", "true", "TRUE", "on", "ON"):
+        return None
+    if dtype is not torch.bfloat16:
+        return None
+    if (int(M), int(N), int(K)) not in _TB_K982_MFMA_CELLS:
+        return None
+    return "attention"
 
 
 
@@ -102,6 +152,14 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # K-982: variant A — waves_per_eu=2 (env-gated, default OFF)
+    _k982_wpeu2 = _tb_k982_wpeu2_override(M, N, K, a.dtype)
+    if _k982_wpeu2 is not None:
+        waves_per_eu = _k982_wpeu2
+    # K-982: variant B — schedule_hint='attention' (env-gated, default OFF)
+    _k982_sched = _tb_k982_sched_override(M, N, K, a.dtype)
+    _k982_sched_kwargs = {"schedule_hint": _k982_sched} if _k982_sched is not None else {}
+
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     if num_xcds > 0:
@@ -156,6 +214,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **_k982_sched_kwargs,
         )
     else:
         grids = total_tiles
@@ -195,6 +254,7 @@ def persistent_matmul_lt(
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            **_k982_sched_kwargs,
         )
 
     return c

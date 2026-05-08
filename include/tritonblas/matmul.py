@@ -298,6 +298,46 @@ def _k695_tile_override(M, N, K, a_dtype):
     return _K695_GATE_TABLE.get((M, N, K))
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# K-693: tall-skinny FP16/BF16 N=64 persistent-path tile override.
+#
+# Origami over-tiles BM (256 macrotile at M >= 4096) and under-stages BK
+# (BLOCK_K=32 -> 256 mainloop iters at K=8192) on the N=64 sub-band of
+# the K-668 tall-skinny cohort. A narrow tile sweep on the 4 worst-offender
+# shapes (M in {4096,8192,16384} x N=64 x K in {4096,8192} x {fp16,bf16})
+# found a single cross-shape persistent-path winner:
+#   BLOCK_M=32, BLOCK_N=64, BLOCK_K=128, num_stages=2, num_warps=8, kpack=2
+# Persistent dispatch (no Stream-K) -- with BM=32 there are enough output
+# tiles to fill MI300X's 304 CUs, so Stream-K only adds atomic overhead.
+#
+# Predicate: M >= 4096 AND N == 64 AND K >= 4096 AND {fp16, bf16}.
+# M=2048,N=64 row excluded -- Origami's default beats the override there.
+#
+# Disjoint from K-697 (N==32 strict-equality, dispatched via early-return
+# in _matmul / _matmul_out). Overlaps K-710 on (M=4096, N=64, K in
+# {4096,8192}); K-693 force-restores num_warps=8 over K-710's 4 because
+# the K-693 tile geometry needs the larger warp count for issue density.
+#
+# Set TRITONBLAS_DISABLE_K693=1 to bypass.
+# ---------------------------------------------------------------------------
+_K693_GATE_ENABLED = _os.environ.get("TRITONBLAS_DISABLE_K693", "0") != "1"
+
+
+def _k693_tile_override(M, N, K, a_dtype, b_dtype):
+    """Return (BM, BN, BK, NS, NW, KP) override for the K-693 N=64 cohort,
+    else None.  Strict-equality on N; conservative measured bounds on M, K.
+    """
+    if not _K693_GATE_ENABLED:
+        return None
+    if a_dtype is not b_dtype:
+        return None
+    if a_dtype is not torch.float16 and a_dtype is not torch.bfloat16:
+        return None
+    if N != 64 or M < 4096 or K < 4096:
+        return None
+    return (32, 64, 128, 2, 8, 2)
+# ---------------------------------------------------------------------------
+
 
 def _num_warps_for_tall_skinny_fp16_bf16(M: int, N: int, K: int, dtype: torch.dtype) -> int:
     """Tall-skinny FP16/BF16 cohort override (default 8 -> 4).
@@ -509,6 +549,22 @@ def persistent_matmul_lt(
             total_blocks_M = triton.cdiv(M, BLK_M)
             total_tiles = total_blocks_M * total_blocks_N
             total_programs = total_tiles
+
+    # K-693: tall-skinny FP16/BF16 N=64 persistent override. Applied after
+    # K-695 (FP8 only -- no overlap) and after K-710's num_warps helper so
+    # that K-693's num_warps=8 wins back over K-710's num_warps=4 on the
+    # M=4096,N=64,K in {4096,8192} overlap region (K-693 tile geometry needs
+    # the larger warp count for issue density).
+    _k693_ovr = _k693_tile_override(M, N, K, a.dtype, b.dtype)
+    if _k693_ovr is not None and not work_stealing:
+        _bm, _bn, _bk, _ns, _nw, _kp = _k693_ovr
+        BLK_M, BLK_N, BLK_K = _bm, _bn, _bk
+        num_stages, num_warps, kpack = _ns, _nw, _kp
+        even_k = (K % BLK_K) == 0
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

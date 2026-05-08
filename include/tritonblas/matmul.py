@@ -120,6 +120,45 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# ---------------------------------------------------------------------------
+# FP8 e5m2fnuz medium-K square tile-override gate (K-656).
+#
+# Cohort: M==N==4096, K in {1024, 2048}, dtype = float8_e5m2fnuz, non-streamk.
+#
+# Origami picks BM=BN=256, BK=128, NS=2 for these shapes. A K-624-style
+# tile/pipeline sweep across the 9-shape symmetric FP8 e5m2fnuz medium-K
+# cohort (M=N in {1024,2048,4096} x K in {512,1024,2048}) shows BK=64 wins
+# only on M=N=4096 with K in {1024, 2048} (+8.4% / +5.5% vs Origami,
+# paired ON/OFF n=25x100). The other 7 cohort shapes either match Origami
+# or regress under any override -- the predicate is the cohort.
+#
+# Set K656_DISABLE=1 in the environment to bypass the override (A/B harness).
+# ---------------------------------------------------------------------------
+import os as _os_k656
+
+
+def _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
+    """Strict shape+dtype predicate for the K-656 tile override."""
+    if streamk or _os_k656.environ.get("K656_DISABLE", "0") == "1":
+        return False
+    if a_dtype is not torch.float8_e5m2fnuz or b_dtype is not torch.float8_e5m2fnuz:
+        return False
+    return M == 4096 and N == 4096 and K in (1024, 2048)
+
+
+class _K656Selector(OrigamiMatmulSelector):
+    """OrigamiMatmulSelector subclass that pins BM=BN=256, BK=64, NS=2.
+
+    Class-level overrides shadow the @property descriptors on the parent.
+    All other attributes (group_m, num_sms, sk_grid, _hardware, ...) are
+    inherited unchanged.
+    """
+    block_m = 256
+    block_n = 256
+    block_k = 64
+    num_stages = 2
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -136,7 +175,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -148,6 +187,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
+        sel.__class__ = _K656Selector
+    return sel
 
 
 def persistent_matmul_lt(

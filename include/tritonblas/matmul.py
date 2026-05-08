@@ -443,20 +443,25 @@ def _kpack_for_large_k_square(M: int, N: int, K: int, dtype) -> int:
     return 2
 
 
-# K-757: BLOCK_K=32 + num_stages=4 mainloop-shrink override for the M=N=2048
-# FP16/BF16 large-K cohort. K-750/K-756 rocprofv2 evidence shows mainloop
-# iteration inflation and low MfmaUtil at this cohort; shrinking BLOCK_K to 32
-# with num_stages=4 (kpack=2 already set by K-667 on this exact cohort) raises
-# pipeline depth and MfmaUtil at the cost of LDS pressure. Strict cohort gate;
-# LDS guard falls back to default if 4*(BM*32 + 32*BN)*2B exceeds 64KiB.
-def _is_k757_cohort(M: int, N: int, K: int, dtype) -> bool:
-    if _os_k656.environ.get("TRITONBLAS_DISABLE_K757", "0") == "1":
-        return False
-    if dtype not in _LARGE_K_SQUARE_KPACK2_DTYPES:
-        return False
-    if M != _LARGE_K_SQUARE_KPACK2_M or N != _LARGE_K_SQUARE_KPACK2_M:
-        return False
-    return K in _LARGE_K_SQUARE_KPACK2_K_VALUES
+# K-757 / K-766: NEGATIVE RESULT. The proposed BLOCK_K=32 + num_stages=4
+# mainloop-shrink override for the M=N=2048 fp16/bf16 large-K cohort
+# (K in {4096,8192,16384}) was benchmarked paired ON/OFF on MI300X (gfx942,
+# rocm/pytorch:rocm7.2, HIP-graph kernel-only, n=32x50 ops, 5 trials, hot
+# cache). Every in-cohort cell regressed +47%-+54% (geomean 1.508x; ship
+# gate <=0.95). Two guard cells also regressed >2% (M=N=1024,K=8192,fp16
+# +5.77%; M=N=1024,K=16384,fp16 +6.97%).
+#
+# Root cause: Origami's default tile for this cohort is BM=BN=BK=128 (32
+# mainloop iters at K=4096). Cutting BK to 32 quadruples iters to 128 and
+# adds register pressure from the deeper 4-stage pipeline -- the opposite
+# of the K-750/K-756 hypothesis. The "mainloop iteration inflation" the
+# rocprofv2 evidence pointed to was relative to a different baseline tile,
+# not Origami's actual choice on this cohort.
+#
+# The override is intentionally NOT landed. Future iterations should
+# re-derive the setpoint from rocprofv2 evidence captured against the
+# tile Origami actually selects, not the assumed BLOCK_K=128 default.
+# Raw data: see reports/prs/K-766-pr.md and the K-766 task workspace.
 
 
 # Function will behave like an LRU-Cache of heuristic results
@@ -583,14 +588,10 @@ def persistent_matmul_lt(
         total_tiles = total_blocks_M * total_blocks_N
         total_programs = total_tiles
 
-    # K-757: BLOCK_K=32 + num_stages=4 mainloop-shrink for M=N=2048 fp16/bf16
-    # large-K cohort (kpack=2 already set by K-667 helper above). LDS guard:
-    # 2 bytes/elem * num_stages * (BM*BK + BK*BN) <= 64KiB MI300X workgroup.
-    if _is_k757_cohort(M, N, K, a.dtype) and not work_stealing:
-        if 4 * (BLK_M * 32 + 32 * BLK_N) * 2 <= 65536:
-            BLK_K = 32
-            num_stages = 4
-            even_k = (K % BLK_K) == 0
+    # K-757 / K-766: BLOCK_K=32 + num_stages=4 mainloop-shrink override
+    # was tested for M=N=2048 fp16/bf16 large-K cohort and regressed
+    # +47%-+54% in-cohort. See module-level note above _matmul_lt_heuristic
+    # for the empirical refutation. No tile change applied here.
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

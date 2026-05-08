@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,88 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ---------------------------------------------------------------------------
+# K-709: tall-skinny FP16/BF16 (large-M, small-N, medium/large-K) cohort override.
+#
+# Per K-668 characterization on MI300X (gfx942), Origami picks BLOCK_K=32 and
+# BLOCK_N=16 for shapes with (M >= 2048, N <= 32, K >= 4096) in fp16/bf16,
+# producing ~10x slowdown vs hipBLASLt. Raw rocprofv2 PMC on the worst shape
+# (M=2048, N=32, K=8192, bf16) shows the persistent kernel at VALUUtil=99.98%,
+# MfmaUtil=3.93%, MemUnitStalled=0.001%, LDSBankConflict=7.87%: VALU-bound on
+# loop overhead, NOT memory-bound and NOT MFMA-bound. The kernel is doing
+# K/BLOCK_K = 256 mainloop iterations vs hipBLASLt's 32 (BLOCK_K=256 there).
+#
+# Override widens BLOCK_K from 32 to 128 (4x fewer mainloop iterations).
+# Per the K-709 8-shape ablation: gmean 2.16x lift, min 1.73x, max 2.55x,
+# 0/8 cells regress. Widening BLOCK_N (16->32) ALSO was tried and lost to
+# wider_bk-only (gmean 1.96x): collapsing N=32 into a single N-tile gives
+# up CU-level parallelism that wider-BK preserves. The predicate is
+# tightened (vs the broader K-668 envelope of N<=256, K>=1024) to the worst
+# sub-cohort only -- per K-692 lessons, single-modal-config gates must be
+# narrow enough that the override beats Origami's natural pick on every
+# in-envelope shape (avoid the K-654-class leakage pattern).
+#
+# Kill-switch:        TRITONBLAS_DISABLE_K709=1     (disables override)
+# Ablation variants:  TRITONBLAS_K709_VARIANT in {production, baseline,
+#                       smaller_bm, smaller_ns, combined, wider_bk, wider_bn}
+# ---------------------------------------------------------------------------
+
+_K709_FP_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _k709_should_override(M, N, K, a_dtype, b_dtype, enable_streamk):
+    if os.environ.get("TRITONBLAS_DISABLE_K709") == "1":
+        return False
+    if os.environ.get("TRITONBLAS_K709_VARIANT", "").lower() == "baseline":
+        return False
+    if enable_streamk:
+        return False
+    if a_dtype not in _K709_FP_DTYPES or b_dtype != a_dtype:
+        return False
+    # Tightened predicate: WORST sub-cohort only (K-668 Table 4 row "WORST"):
+    #   N <= 32 AND K >= 4096 AND M >= 2048.
+    # Excludes N>=64 (BORDERLINE/MID) where Origami's natural pick is in-band
+    # and would regress under a fixed override -- the K-692 / K-654 lesson.
+    return M >= 2048 and N <= 32 and K >= 4096
+
+
+def _k709_apply_override(selector):
+    """Mutate selector tile attrs in-place per the chosen ablation variant.
+
+    Default (production) widens BLOCK_K from 32 to 128: 4x fewer mainloop
+    iterations directly addresses the dominant VALU-bound loop-overhead
+    bottleneck. Per K-709 ablation on the 8-shape cohort (M>=2048, N=32,
+    K>=4096, fp16/bf16), wider_bk gives geomean 2.16x lift (min 1.73x,
+    max 2.55x) -- never regresses within the gated envelope, and beats
+    the BK+BN combination (gmean 1.96x) because BLOCK_N=16 keeps two
+    N-tiles per row at N=32 which preserves CU-level parallelism that
+    BLOCK_N=32 collapses.
+
+    Other variants are kept for ablation reproducibility.
+    """
+    variant = os.environ.get("TRITONBLAS_K709_VARIANT", "production").lower()
+    mt = selector._result.config.mt
+    if variant == "production":
+        mt.k = 128
+    elif variant == "wider_bk":
+        mt.k = 128
+    elif variant in ("wider_bk_bn", "wider_bn_bk"):
+        mt.k = 128
+        mt.n = 32
+    elif variant == "wider_bn":
+        mt.n = 32
+    elif variant == "smaller_bm":
+        if mt.m > 16:
+            mt.m = max(16, mt.m // 2)
+    elif variant == "smaller_ns":
+        selector._num_stages = 1
+    elif variant == "combined":
+        if mt.m > 16:
+            mt.m = max(16, mt.m // 2)
+        selector._num_stages = 1
+    # else: unknown variant -> no-op (treated as baseline)
 
 
 
@@ -81,6 +164,13 @@ def persistent_matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-709: tall-skinny FP16/BF16 cohort override (see header comment).
+    # Mutates `selector` in place when the predicate fires; no-op otherwise.
+    # `quantized` short-circuits the predicate (FP8/INT8 paths use a_scale/b_scale
+    # but the dtype check inside _k709_should_override gates on a.dtype/b.dtype only).
+    if not quantized and _k709_should_override(M, N, K, a.dtype, b.dtype, enable_streamk=False):
+        _k709_apply_override(selector)
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n

@@ -35,6 +35,7 @@ from tritonblas._route_predicate import (
     _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
+    _K1161_E2_ADMITS_3,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -679,12 +680,18 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_25():
-    """The triply-validated cohort is 13 K-1121 + 12 K-1131 = 25 cells.
-    Any silent edit changes this count and trips this canary."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25
+def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
+    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
+    Any silent edit changes this count and trips this canary.
+
+    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
+    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
+    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
+    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
+    assert len(_K1161_E2_ADMITS_3) == 3
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -915,3 +922,160 @@ def test_k1144_p8_does_not_match_perturbations_outside_envelope():
     # M=4479 / M=4481 not in envelope.
     assert _p8_mfma_issue_stall_routeout(4479, 3072, 768, torch.bfloat16) is False
     assert _p8_mfma_issue_stall_routeout(4481, 3072, 768, torch.bfloat16) is False
+
+
+# ---------------------------------------------------------------------------
+# K-1175 / K-1161 E2 axis-extension pin tests.  K-1161 paired n=30 HIP-graph
+# hot-cache (B=10000 bootstrap CI95) on rad-mi300x-1 / MI300X / ROCm 7.2
+# returned NEGATIVE_AXIS_PIVOT for the K-floor=128 + K=512 interior axis
+# (3/8 = 37.5% admit, below 50% pivot threshold).  Three cells admit cleanly
+# and are staged here as strict-equality additions to P8:
+#   E2_I4  ( 736, 1792,  736)  hbl/tb=1.315x  CI95=[1.313, 1.317]
+#   E2_M1  (10112, 2048, 1024) hbl/tb=1.759x  CI95=[1.753, 1.770]
+#   E2_M2  (12160, 2048, 1024) hbl/tb=1.499x  CI95=[1.496, 1.504]
+#
+# Pin tests cover (a) 3/3 envelope cells route-OUT at the dispatch level,
+# (b) bf16-only carve-out, (c) disjointness with K-1121 anchors and K-1131
+# neighbors, (d) NO-LEAK guarantees: the 5 K-1161 cells classified as
+# route-IN-safe / ambiguous (E2_K1, E2_K2, E2_I1, E2_I2, E2_I3) MUST NOT
+# fire P8 -- staging them would cause production false-positives (TB-WIN
+# cells routed to slower hipBLASLt).  See the _K1161_E2_ADMITS_3 docstring
+# for the K-floor relaxation mechanism (R-1161 small-M Triton-favoured tail).
+# ---------------------------------------------------------------------------
+K1161_E2_ADMITS_3_LIST = [
+    # (cid,    M,    N,    K, hbl_tb_med, ci95_lo, ci95_hi)  per K-1161 manifest
+    ("E2_I4",   736, 1792,  736),  # K=736 K-interior single admit (hbl/tb=1.315x)
+    ("E2_M1", 10112, 2048, 1024),  # M-axis extension at K=1024 (hbl/tb=1.759x)
+    ("E2_M2", 12160, 2048, 1024),  # M-axis extension at K=1024 (hbl/tb=1.499x)
+]
+
+
+# K-1161 cells that K-1161 measured as route-IN-safe (TB strictly faster) or
+# ambiguous.  These cells are inside the E2 envelope but were REJECTED by
+# the paired n=30 measurement -- staging them as route-OUT would create
+# production FALSE POSITIVES (TB wins routed to slower hipBLASLt).  Pinned
+# here as a no-leak witness so any future contributor who tries to widen
+# the K-floor or the K=512 interior must trip these tests first.
+K1161_E2_REJECTED_5_LIST = [
+    # (cid,    M,    N,    K, hbl_tb_med, classification)  per K-1161 manifest
+    ("E2_K1",  512, 2048,   96),  # 0.810x  route-IN-safe (TB +23% faster)
+    ("E2_K2",  512, 2048,  192),  # 1.020x  ambiguous     (within noise floor)
+    ("E2_I1",  192, 2048,  512),  # 0.868x  route-IN-safe (TB +15% faster)
+    ("E2_I2",  156, 1792,  512),  # 0.914x  route-IN-safe (TB +9% faster)
+    ("E2_I3",  160, 3072,  512),  # 0.907x  route-IN-safe (TB +10% faster)
+]
+
+
+def test_k1175_e2_admits_envelope_size_is_exactly_3():
+    """K-1161 measured 8 E2 candidates (K-floor=128 + K=512/736 interior +
+    M-axis extension).  Exactly 3 admit route-OUT-safe (hbl/tb >= 1.05x AND
+    CI95-lo > 1.00).  Any silent edit changes this count and trips here."""
+    assert len(_K1161_E2_ADMITS_3) == 3
+
+
+def test_k1175_e2_admits_disjoint_from_k1121_and_k1131():
+    """K-1161 candidate generator (K-931 always-uncovered top-40 catalog
+    intersected with E2 envelope) excluded all K-1121 anchors and all
+    K-1131 neighbors by construction."""
+    assert _K1161_E2_ADMITS_3.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1161_E2_ADMITS_3.isdisjoint(_K1131_P8_NEIGHBORS_12)
+
+
+def test_k1175_e2_admits_envelope_contents_pinned_to_k1161_manifest():
+    """Pin the 3-cell E2 admit envelope to source-of-truth (the K-1161
+    paired n=30 manifest at workspace K-1161/output/k1161_per_cell.csv).
+    A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1161_E2_ADMITS_3_LIST)
+    assert _K1161_E2_ADMITS_3 == expected
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1161_E2_ADMITS_3_LIST,
+                         ids=[c[0] for c in K1161_E2_ADMITS_3_LIST])
+def test_k1175_p8_admits_all_3_k1161_e2_cells(cid, M, N, K):
+    """Every K-1161 E2 admit must fire the P8 strict-equality match.
+    These 3 cells were paired n=30 measured at hbl/tb >= 1.315x mean
+    AND CI95-lo > 1.05x (route-OUT-safe gate) on rad-mi300x-1."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1161 E2 admit {cid} ({M},{N},{K}) missed P8 envelope")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1161_E2_ADMITS_3_LIST,
+                         ids=[c[0] for c in K1161_E2_ADMITS_3_LIST])
+def test_k1175_p8_dispatch_routes_all_3_k1161_e2_cells_out_to_hbl(cid, M, N, K):
+    """Integration pin: every K-1161 E2 admit must dispatch to hipBLASLt
+    at the full ``_k971_route_to_hbl`` decision level (composition with
+    P5/P6/K-905-K-971 anchor table).  K-1161's paired n=30 measurement
+    shows hipBLASLt wins on every one of these 3 cells at >= 1.315x."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True, (
+        f"K-1161 E2 admit {cid} ({M},{N},{K}) failed to route-OUT through "
+        f"_k971_route_to_hbl; check P8 precedence vs K-1089 P6 admit")
+
+
+def test_k1175_p8_e2_admits_are_bf16_only():
+    """K-1161 measurement scope is bf16; fp16/fp32 must short-circuit."""
+    M, N, K = 736, 1792, 736  # E2_I4
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float16) is False
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float32) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1161_E2_REJECTED_5_LIST,
+                         ids=[c[0] for c in K1161_E2_REJECTED_5_LIST])
+def test_k1175_p8_does_not_leak_into_k1161_rejected_cells(cid, M, N, K):
+    """K-1161 NO-LEAK pin: the 5 E2 candidates that classified as
+    route-IN-safe (TB strictly faster) or ambiguous MUST NOT fire P8.
+
+    Staging any of these as route-OUT would create production FALSE
+    POSITIVES -- TB-WIN cells (M <= 512 small-M Triton-favoured tail
+    per R-1161) routed to a slower hipBLASLt path.  This is the load-
+    bearing K-floor=128 + K=512 NEGATIVE_AXIS_PIVOT contract: K-floor
+    must remain at K >= 256 and K=512 interior is not a hipBLASLt-favored
+    region for the small-M sub-cohort.  If a future contributor widens
+    the envelope to K-floor=128 or to K=512 with M < ~600, this test
+    fails and they must re-validate at paired n=30 first."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+        f"K-1161 REJECTED cell {cid} ({M},{N},{K}) leaked into P8 -- "
+        f"this cell is TB-favoured (hbl/tb < 1.05x); routing it OUT "
+        f"would be a strict pessimisation per K-1161 paired n=30 evidence.")
+
+
+def test_k1175_p8_does_not_leak_into_k1142_fp_controls():
+    """K-1142 documented 2 false positives at K=256 small-M corner.
+    K-1161 re-confirmed both at n=30: FP1 (256, 2048, 256) hbl/tb=0.972x,
+    FP2 (2048, 1792, 256) hbl/tb=1.035x.  Both must remain OUT of P8."""
+    # FP1 — clear route-IN-safe
+    assert _p8_mfma_issue_stall_routeout(256, 2048, 256, torch.bfloat16) is False
+    # FP2 — ambiguous, drifted +0.020 between K-1142 and K-1161
+    assert _p8_mfma_issue_stall_routeout(2048, 1792, 256, torch.bfloat16) is False
+
+
+def test_k1175_p8_e2_admits_e2_i4_is_in_k_interior_upper_edge():
+    """Documentation pin: E2_I4 is the only K-interior cell that admitted.
+    It sits at K=736, on the upper edge of the K-axis extension (closer to
+    E1's existing K=768 anchor than to the K=512 interior gap or K=128
+    floor relaxation).  This is consistent with K-1161's R-1161 finding
+    that the small-K / small-M corner is Triton-favoured -- E2_I4 has
+    M=736 which is well above the small-M tail threshold (M <= 512)."""
+    M, N, K = 736, 1792, 736
+    assert (M, N, K, "torch.bfloat16") in _K1161_E2_ADMITS_3
+    assert M > 600   # outside small-M Triton-favoured tail
+    assert K >= 512  # K-interior, not K-floor
+    assert K < 768   # but below E1's K-floor anchor
+
+
+def test_k1175_p8_e2_admits_m_axis_cells_at_k1024_anchor_k():
+    """Documentation pin: E2_M1 and E2_M2 are at K=1024 (E1 anchor K) with
+    M values interior to the K-1121 anchor M-range (between S26 M=8064
+    and S29 M=14208).  These are NOT K-floor or K=512 cells -- they are
+    M-axis extension cells that K-1161 incidentally validated.  K-1127
+    classified both as EXT and they re-confirm at K-1161's measurement
+    context (hbl/tb 1.499x and 1.759x respectively)."""
+    for cid, M, N, K in (("E2_M1", 10112, 2048, 1024), ("E2_M2", 12160, 2048, 1024)):
+        assert (M, N, K, "torch.bfloat16") in _K1161_E2_ADMITS_3
+        assert K == 1024  # K-1121 anchor K, NOT K=512 / K=128
+        assert N == 2048  # K-1121 anchor N
+        # M is interior to the K-1121 anchor M-range:
+        assert 8064 < M < 14208

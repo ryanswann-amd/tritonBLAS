@@ -129,6 +129,74 @@ def test_k935_off_by_default(M, N, K, dtype, gate):
 
 
 # ---------------------------------------------------------------------------
+# Killswitch happy/error pair (explicit on each in-cohort key) -- K-883 L7
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("M,N,K,dtype", COHORT)
+def test_k935_killswitch_pair_lookup(M, N, K, dtype, gate):
+    """Env-set fires, env-unset refuses -- on the SAME in-cohort key.
+
+    Guards against silent regressions where the killswitch becomes a
+    no-op (e.g. env read at import-time, hardcoded True, predicate
+    bypass).  The lookup happy/error pair MUST hold on every in-cohort
+    cell, not merely "off by default" before any enable.
+    """
+    _enable()
+    assert gate.lookup(M, N, K, dtype) is not None, (
+        f"Killswitch happy path broken: gate refused in-cohort key "
+        f"({M},{N},{K},{dtype}) with TB_K935_ENABLE=1."
+    )
+    _disable()
+    assert gate.lookup(M, N, K, dtype) is None, (
+        f"Killswitch error path broken: gate fired on in-cohort key "
+        f"({M},{N},{K},{dtype}) with TB_K935_ENABLE unset."
+    )
+
+
+@pytest.mark.parametrize("M,N,K,dtype", COHORT)
+def test_k935_killswitch_pair_routing_trace(M, N, K, dtype, gate):
+    """Same pair, but observed via the routing-trace counters.
+
+    The on->off->on triple verifies fire_total / nonfire_total move
+    independently and that disabling the env flips a true would-fire
+    into the nonfire bucket (rather than skipping the predicate
+    entirely, which would also leave fire_total at 0 and silently mask
+    a kill-switch bypass).
+    """
+    _enable()
+    gate.lookup(M, N, K, dtype)
+    snap = gate.routing_snapshot()
+    assert snap["fire_total"] == 1, snap
+    assert snap["nonfire_total"] == 0, snap
+
+    _disable()
+    gate.lookup(M, N, K, dtype)
+    snap = gate.routing_snapshot()
+    assert snap["fire_total"] == 1, snap
+    assert snap["nonfire_total"] == 1, snap
+
+    _enable()
+    gate.lookup(M, N, K, dtype)
+    snap = gate.routing_snapshot()
+    assert snap["fire_total"] == 2, snap
+    assert snap["nonfire_total"] == 1, snap
+
+
+@pytest.mark.parametrize("M,N,K,dtype", COHORT)
+def test_k935_killswitch_pair_via_registry_apply(M, N, K, dtype, gate):
+    """End-to-end: dispatcher entry-point honours the env on EVERY cohort key."""
+    _enable()
+    hit = OverrideRegistry.apply(M, N, K, dtype, work_stealing=False)
+    assert hit is not None and hit[0].ticket == "K-935"
+
+    _disable()
+    hit = OverrideRegistry.apply(M, N, K, dtype, work_stealing=False)
+    assert hit is None, (
+        f"Dispatcher fired K-935 on ({M},{N},{K},{dtype}) with env unset -- "
+        f"killswitch bypass."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cohort enumeration (K-883 L1 strict-equality dispatch)
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("M,N,K,dtype", COHORT)

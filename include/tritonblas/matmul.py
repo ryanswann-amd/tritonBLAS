@@ -10,6 +10,11 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.splitk_smallm_gemm import (
+    splitk_smallm_matmul,
+    should_dispatch_splitk_smallm,
+    get_splitk_smallm_config,
+)
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
@@ -66,6 +71,28 @@ def _make_matmul_selector(
     )
 
 
+def _try_dispatch_splitk_smallm(a, b, c, bias, a_scale, b_scale, quantized):
+    """K-513 narrow gate: route the M<=8 / K>=4096 small-M decode sub-cohort
+    to the split-K kernel. Returns True if dispatched, False otherwise.
+
+    The gate intentionally excludes anything that needs bias / scales /
+    quantization / unusual dtypes — outside the gate the K-144 persistent
+    kernel remains the path of record.
+    """
+    if quantized or bias is not None or a_scale is not None or b_scale is not None:
+        return False
+    M, K = a.shape
+    _, N = b.shape
+    if not should_dispatch_splitk_smallm(M, N, K, a.dtype, b.dtype, c.dtype):
+        return False
+    cfg = get_splitk_smallm_config(M, N, K, a.dtype)
+    if cfg is None:
+        return False
+    split_k, block_n, block_k = cfg
+    splitk_smallm_matmul(a, b, c, split_k=split_k, block_n=block_n, block_k=block_k)
+    return True
+
+
 def persistent_matmul_lt(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -81,6 +108,12 @@ def persistent_matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-513: narrow split-K gate for the small-M decode sub-cohort.
+    # Only triggers for the 32 in-scope shapes; everything else continues
+    # to the K-144 persistent path below.
+    if _try_dispatch_splitk_smallm(a, b, c, bias, a_scale, b_scale, quantized):
+        return c
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n

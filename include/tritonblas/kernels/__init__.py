@@ -36,9 +36,18 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# K-513: split-K small-M decode kernel
+from .splitk_smallm_gemm import (
+    splitk_smallm_matmul,
+    should_dispatch_splitk_smallm,
+    get_splitk_smallm_config,
+)
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
-           'fp4_matmul', 'stages']
+           'fp4_matmul', 'stages',
+           'splitk_smallm_matmul', 'should_dispatch_splitk_smallm',
+           'get_splitk_smallm_config']

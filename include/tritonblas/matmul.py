@@ -12,6 +12,8 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from ._route_predicate import K971_ROUTE_TABLE as _HBL_ROUTE_TABLE
+from ._route_predicate import should_route_out as _should_route_out
 
 
 
@@ -480,6 +482,24 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Route-OUT to hipBLASLt for the empirically validated
+    # K-971 / K-1131 strict-equality entries OR the K-1148 axis-aligned
+    # structural envelope E1 over the K-1121 cohort. Only kicks in for
+    # the default eager path (out=None, no streamk, no work_stealing) so
+    # that explicitly requested kernel paths and gradient capture remain
+    # untouched. See `_route_predicate.should_route_out` for the full
+    # admit logic and the K-1142 inverse-predicate FP carve-out policy.
+    if (
+        out is None
+        and not enable_streamk
+        and not work_stealing
+        and a.dim() == 2
+        and b.dim() == 2
+        and a.dtype == b.dtype
+        and a.shape[1] == b.shape[0]
+        and _should_route_out(a.shape[0], b.shape[1], a.shape[1], a.dtype)
+    ):
+        return torch.matmul(a, b)
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

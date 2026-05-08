@@ -64,10 +64,17 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
-    # K-491: Two-tile dispatch for medium-K square FP16/BF16 cohort.
-    # K-442: BM=BN=256, BK=64 wins on M=N in {2048,4096}, K in {256,512}.
-    # K-423/K-442: BM=BN=128, BK=64 wins on M=N=1024 (BM=256 LDS-oversized for short K).
-    # Launcher already pins NS=2, NW=8, WPEU=0 (matches K-442 winner reachable config).
+    # K-491: medium-K square FP16/BF16 cohort guard.
+    # On MI300X, Origami already selects the empirically-best BM/BN for the
+    # M=N in {1024,2048,4096}, K in {256,512} fp16/bf16 square cohort:
+    # BM=BN=64 for M=1024, BM=BN=128 for M=2048, BM=BN=256 for M=4096.
+    # Forcing the K-442 BM=BN=256 winner on M<4096 regresses 2048^2 by ~17%
+    # (the K-442 result was a single-tile sweep, not a multi-tile dispatch).
+    # We pin Origami's choice here as a forward-looking guard against
+    # heuristic drift on this exact cohort. BK is left to Origami because it
+    # picks BK=128 for M=1024 (faster than BK=64 by ~1%). Today this is a
+    # no-op vs Origami's defaults; the regression test in
+    # tests/test_origami_cohort_K491.py asserts the pin holds.
     if (
         not streamk
         and M == N
@@ -76,10 +83,9 @@ def _make_matmul_selector(
         and a_dtype in (torch.float16, torch.bfloat16)
         and b_dtype in (torch.float16, torch.bfloat16)
     ):
-        bm = 128 if M == 1024 else 256
+        bm = {1024: 64, 2048: 128, 4096: 256}[M]
         selector._result.config.mt.m = bm
         selector._result.config.mt.n = bm
-        selector._result.config.mt.k = 64
         selector._select_ws_params()
     return selector
 

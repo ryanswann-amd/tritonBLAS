@@ -167,6 +167,35 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
         S07 (2048, 1792, 256)  -> False (K=256<512 / N=1792)
         S16 (256, 256, 2048)   -> False (minMN=256<2048)
         S38 (384, 128, 200)    -> False (K=200<512)
+
+    K-1104 NULL-RESULT (do not relax these envelopes):
+        K-1098 4-iteration RESEARCH (primary-source-verified) showed that
+        the 8 K-1074 candidate cells (S26, S31, S32, S33, S34, S35, S37,
+        S39) fire P6 on **0/8** under K-1037's paired-PMC classifier --
+        all 8 fail load-bearing C1 with waves_per_CU_ratio (tb/hbl) in
+        [1.753, 2.740]. The K-1074 paired n=30 round-robin on c42/MI300X
+        confirmed: 0/8 cells clear the K-901 +2% LAND margin under wpeu=1,
+        2/8 (S32, S37) are confirmed regressions (CI95 hi < 0), cohort
+        geomean ~= 1.000x. P5 Clause-2 already routes the K=1024 family
+        OUT to hipBLASLt with 2.6x-3.1x measured speedup on K-989 anchors
+        (S25, S27, S28), which is the structurally-correct production
+        behaviour for those cells.
+
+        Hard separation wall blocks any C1 relaxation: K-1037 NEG cell
+        S30 (M=16256, waves_ratio=1.7530) and K-1074 candidate S34
+        (M=24448, waves_ratio=1.7530) collide exactly on C1, so no cutoff
+        in the (1.5320, 1.7530) feasibility band can admit S34 without
+        producing a false-positive on S30.
+
+        Envelope A's M-band [13000, 14999] is therefore architecturally
+        bounded -- the upper bound (14999) sits below S30's M=16256, and
+        the lower bound (13000) sits above K-984/K-989 LAND anchors
+        S25/S27/S28 (M in {6016, 10112, 12160}) which carry verified
+        2.6x-3.1x P5 Clause-2 routing speedup.
+
+        References: K-1098 backtest (output/p6_clause_by_clause_k1074.csv),
+        K-1074 paired n=30 (rr_summary.csv), K-1049/K-1055/K-1062 adversarial
+        gate (FAIL: zero NEW NO-LAND-leak gain).
     """
     if not _dtype_is_bf16(dtype):
         return False

@@ -25,6 +25,7 @@ from . import guarded_override as _go
 from ._route_predicate import (
     K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
+    R_K1037_P6_mfma_issue_stall_route_to_hbl as _R_K1037_P6_mfma_issue_stall_route_to_hbl,
 )
 
 
@@ -39,9 +40,19 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # broader K-984+K-989+K-931 cohort dispatches via closed-form rather
     # than per-shape entries; strict-equality table retained for K-905/K-971
     # mid-square long-K anchors that structurally collide with K-950 LAND.
+    #
+    # K-1092: K-1037 P6 (MFMA-issue-stall route-OUT) is layered AFTER P5 and
+    # AHEAD of the strict-equality table.  Opt-in via TRITONBLAS_ENABLE_K1037_P6
+    # (default OFF — additive carve-out for the K-1017 S24/S29 cohort that P5
+    # leaves uncovered).  K-1031/K-1043 adversarial held-out: 0 LAND-leaks,
+    # validated against the K-1055 12-cell + K-984/K-989 14-anchor union.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
     if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
+    if (os.environ.get("TRITONBLAS_ENABLE_K1037_P6") == "1"
+            and _R_K1037_P6_mfma_issue_stall_route_to_hbl(
+                int(M), int(N), int(K), a_dtype)):
+        return True
     return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
 
 

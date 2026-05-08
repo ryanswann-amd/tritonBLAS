@@ -217,11 +217,22 @@ class GemmContext:
         # ═══════════════════════════════════════════════════════════════════
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
+        # K-605: For quantized inputs, route the dot's output dtype through
+        # ``self.acc_dtype`` instead of hard-coding ``tl.int32``. The previous
+        # code path crashed for FP8 (e4m3fnuz / e5m2fnuz) inputs with
+        #   mlir::DenseElementsAttr::get(): floatAttr.getType() == eltType
+        # because Triton tries to construct an int32-typed DenseElementsAttr
+        # from a float8 element type when ``out_dtype`` doesn't match the
+        # FP8-typed accumulator that ``init_accumulator`` produces. ``acc_dtype``
+        # is already set correctly upstream by ``persistent_matmul`` /
+        # ``streamk_matmul`` (``tl.int32`` only when C is ``tl.int8``,
+        # otherwise ``tl.float32``), so propagating it here is the minimal
+        # fix and keeps int8 quantized GEMMs unchanged.
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=tl.int32)
+            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
-        
+
         return acc
     
     @triton.jit

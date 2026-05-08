@@ -390,6 +390,38 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+# Strict (M, K) cohort where StreamK beats Origami's persistent selection on
+# fp16/bf16 square (M==N) shapes on MI300X (gfx942). Membership is enumerated
+# from a per-shape kernel-only HIP-graph A/B sweep — only the cells that
+# verified a paired lift over persistent are listed here. Adjacent cells
+# regress under StreamK and are deliberately excluded so the gate cannot leak.
+_LARGEK_SQUARE_STREAMK_CELLS = frozenset({
+    (1024, 4096),
+    (2048, 4096),
+    (2048, 8192),
+    (4096, 4096),
+    (4096, 8192),
+    (4096, 16384),
+})
+
+
+def _largeK_square_streamk_gate(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
+    """Auto-enable StreamK for large-K square fp16/bf16 shapes on MI300X.
+
+    Origami's persistent tile selection on these shapes is LDS-bound (every
+    cell sits at the 65 536-byte per-stage limit), so num_stages+1 and
+    kpack=2 overrides either overflow LDS or regress. The remaining
+    actionable axis is the scheduler: switching to StreamK at Origami's
+    selected streamk-mode tile recovers measurable kernel-time on the
+    enumerated cells with no leakage into adjacent cohorts.
+    """
+    return (
+        M == N
+        and dtype in (torch.float16, torch.bfloat16)
+        and (M, K) in _LARGEK_SQUARE_STREAMK_CELLS
+    )
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -404,6 +436,8 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    if not enable_streamk and _largeK_square_streamk_gate(M, N, K, a.dtype):
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -461,6 +495,8 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if not enable_streamk and _largeK_square_streamk_gate(M, N, K, a.dtype):
+        enable_streamk = True
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 

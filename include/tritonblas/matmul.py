@@ -185,6 +185,32 @@ class _K656Selector(OrigamiMatmulSelector):
     num_stages = 2
 
 
+# Per-shape kpack override for the large-K square FP16/BF16 GEMM regime (K-667).
+#
+# Empirical kernel-only HIP-graph A/B (5 trials, 50-op chain x 3 replays/cell
+# on MI300X / gfx942 / ROCm 7.2) over the cohort
+#     M = N in {1024, 2048, 4096}, K in {4096, 8192, 16384}, dtype in {fp16, bf16}
+# shows that flipping kpack from 1 -> 2 is non-regressing only on the M=N=2048
+# sub-row; the M=N=1024 sub-row regresses +1.7% .. +4.5% and the M=N=4096
+# sub-row regresses +8.9% .. +11.6%. Set TRITONBLAS_DISABLE_K667=1 to bypass.
+_LARGE_K_SQUARE_KPACK2_M = 2048
+_LARGE_K_SQUARE_KPACK2_K_VALUES = (4096, 8192, 16384)
+_LARGE_K_SQUARE_KPACK2_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _kpack_for_large_k_square(M: int, N: int, K: int, dtype) -> int:
+    """Return kpack=2 only on (M==N==2048, K in {4096,8192,16384}, fp16/bf16)."""
+    if _os_k656.environ.get("TRITONBLAS_DISABLE_K667", "0") == "1":
+        return 1
+    if dtype not in _LARGE_K_SQUARE_KPACK2_DTYPES:
+        return 1
+    if M != N or M != _LARGE_K_SQUARE_KPACK2_M:
+        return 1
+    if K not in _LARGE_K_SQUARE_KPACK2_K_VALUES:
+        return 1
+    return 2
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -250,6 +276,10 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-667: narrow per-shape kpack gate. Default is kpack=1; on the large-K
+    # square FP16/BF16 sub-cohort the helper returns 2. K-683's _lds_cfg may
+    # override below for its own (medium-K residual) band.
+    kpack = _kpack_for_large_k_square(M, N, K, a.dtype)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -262,7 +292,10 @@ def persistent_matmul_lt(
         streamk=False, work_stealing=work_stealing,
     )
     num_warps = _lds_cfg.num_warps
-    kpack = _lds_cfg.kpack
+    # K-683 overrides kpack only when its predicate band fires (non-default).
+    # Outside that band, preserve K-667's kpack value (default=1, =2 on cohort).
+    if _lds_cfg.kpack != 1:
+        kpack = _lds_cfg.kpack
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -410,6 +443,10 @@ def streamk_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-667: narrow per-shape kpack gate. Default is kpack=1; on the large-K
+    # square FP16/BF16 sub-cohort the helper returns 2. K-683's _lds_cfg may
+    # override below for its own (medium-K residual) band.
+    kpack = _kpack_for_large_k_square(M, N, K, a.dtype)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -422,7 +459,10 @@ def streamk_matmul_lt(
         streamk=True, work_stealing=work_stealing,
     )
     num_warps = _lds_cfg.num_warps
-    kpack = _lds_cfg.kpack
+    # K-683 overrides kpack only when its predicate band fires (non-default).
+    # Outside that band, preserve K-667's kpack value (default=1, =2 on cohort).
+    if _lds_cfg.kpack != 1:
+        kpack = _lds_cfg.kpack
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

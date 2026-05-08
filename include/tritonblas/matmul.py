@@ -385,6 +385,61 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+
+# K-776: shape+dtype-guarded tile override for FP8 e4m3fnuz square large-K cohort.
+# 5-entry table; routed BEFORE any sibling FP8 hooks (mirrors K-751 dispatch-order).
+# Strict (M,N,K) equality + dtype identity check; work_stealing path skipped.
+_FP8_E4M3FNUZ_K776 = getattr(torch, "float8_e4m3fnuz", None)
+_FP8_SQUARE_LARGEK_TILE_TABLE = {
+    (4096, 4096,  8192): (128, 128, 128, 2, 1, 4),
+    (4096, 4096, 16384): (128, 128, 128, 2, 1, 4),
+    (8192, 8192,  4096): (128, 128, 128, 2, 1, 4),
+    (8192, 8192,  8192): (128, 128, 128, 2, 1, 4),
+    (8192, 8192, 16384): (128, 128, 128, 2, 1, 4),
+}
+_FP8_SQUARE_LARGEK_FIRE_COUNT = 0
+_FP8_SQUARE_LARGEK_FIRE_BY_SHAPE = {}
+_K776_DISABLED = os.environ.get("TB_K776_DISABLE", "") == "1"
+
+
+def _fp8_square_largek_tile_override(M, N, K, a_dtype, work_stealing):
+    if _K776_DISABLED:
+        return None
+    if _FP8_E4M3FNUZ_K776 is None or a_dtype is not _FP8_E4M3FNUZ_K776:
+        return None
+    if work_stealing:
+        return None
+    return _FP8_SQUARE_LARGEK_TILE_TABLE.get((M, N, K))
+
+
+def _fp8_square_largek_lds_fits(BM, BN, BK, NS, lds_cap=65536):
+    return NS * (BM * BK + BK * BN) <= lds_cap
+
+# K-777: TB_K777_DISABLE escape hatch -- overrides K-667's kpack=2 back to 1
+# when set. K-667 already implements the same predicate as K-777 in this
+# composite branch; adding TB_K777_DISABLE gives the audit harness a
+# composite-level kill switch that disables both K-667 and K-777 attribution.
+_K777_LARGEK_SQUARE_2048_KS = frozenset({4096, 8192, 16384})
+_K777_DISABLED = os.environ.get("TB_K777_DISABLE", "") == "1"
+
+
+def _k777_largeK_square_2048_kpack(M, N, K, dtype):
+    """Return overridden kpack=2 for K-777 cohort, else None.
+    On composite-13 K-667 already implements this; the function exists so
+    the audit harness can verify routing and so the disable env can be
+    introspected uniformly with K-776/K-767 disable envs.
+    """
+    if _K777_DISABLED:
+        return None
+    if dtype is not torch.float16 and dtype is not torch.bfloat16:
+        return None
+    if M != 2048 or N != 2048:
+        return None
+    if K not in _K777_LARGEK_SQUARE_2048_KS:
+        return None
+    return 2
+
+
 # ---------------------------------------------------------------------------
 # K-695: FP8 e4m3fnuz tall-skinny (small-M, large-N) tile override.
 # Origami over-tiles BM and under-stages BK on this cohort, costing up to
@@ -652,6 +707,26 @@ def persistent_matmul_lt(
     # square FP16/BF16 sub-cohort the helper returns 2. K-683's _lds_cfg may
     # override below for its own (medium-K residual) band.
     kpack = _kpack_for_large_k_square(M, N, K, a.dtype)
+    # K-777: explicit disable env honors composite-level kill switch on top
+    # of K-667. When TB_K777_DISABLE=1, force kpack=1 unconditionally.
+    if _K777_DISABLED and (a.dtype is torch.float16 or a.dtype is torch.bfloat16) \
+            and M == 2048 and N == 2048 and K in _K777_LARGEK_SQUARE_2048_KS:
+        kpack = 1
+    # K-776: FP8 e4m3fnuz square large-K shape+dtype-guarded tile override.
+    # Routed AFTER the kpack default but BEFORE any sibling FP8 hooks.
+    _k776_ov = _fp8_square_largek_tile_override(M, N, K, a.dtype, work_stealing)
+    if _k776_ov is not None and _fp8_square_largek_lds_fits(*_k776_ov[:4]):
+        BLK_M, BLK_N, BLK_K, num_stages, kpack, num_warps = _k776_ov
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = K % BLK_K == 0
+        global _FP8_SQUARE_LARGEK_FIRE_COUNT
+        _FP8_SQUARE_LARGEK_FIRE_COUNT += 1
+        _FP8_SQUARE_LARGEK_FIRE_BY_SHAPE[(M, N, K)] = (
+            _FP8_SQUARE_LARGEK_FIRE_BY_SHAPE.get((M, N, K), 0) + 1
+        )
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -857,6 +932,11 @@ def streamk_matmul_lt(
     # square FP16/BF16 sub-cohort the helper returns 2. K-683's _lds_cfg may
     # override below for its own (medium-K residual) band.
     kpack = _kpack_for_large_k_square(M, N, K, a.dtype)
+    # K-777: explicit disable env honors composite-level kill switch on top
+    # of K-667. When TB_K777_DISABLE=1, force kpack=1 unconditionally.
+    if _K777_DISABLED and (a.dtype is torch.float16 or a.dtype is torch.bfloat16) \
+            and M == 2048 and N == 2048 and K in _K777_LARGEK_SQUARE_2048_KS:
+        kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

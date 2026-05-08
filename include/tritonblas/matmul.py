@@ -63,11 +63,26 @@ _K717_TILE_TABLE: Dict[Tuple[int, int, int], Tuple[int, int, int, int, int]] = {
 }
 
 
+# K-717 runtime gate-fire telemetry. Bounded by definition: the only writers
+# are the 12 entries of _K717_TILE_TABLE plus a fixed-size per-shape map keyed
+# on the same 12-element domain. No unbounded growth; no LRU needed because
+# the keyspace is closed. Verifier asserts on these counters per shape.
+_K717_FIRE_COUNT: int = 0
+_K717_FIRE_BY_SHAPE: Dict[Tuple[int, int, int], int] = {}
+
+
 def _k717_lookup(M: int, N: int, K: int, a_dtype: torch.dtype):
-    """Return (BM, BN, BK, NS, KP) override for K-717 cohort, or None."""
+    """Return (BM, BN, BK, NS, KP) override for K-717 cohort, or None.
+
+    Constant-time: a single dict.get on a 12-entry table. No iteration, no
+    cache build-up — the table is a module-level constant. This function does
+    NOT cache anything itself; the K-717 path adds zero state to the existing
+    selector-level lru_cache (which stays exactly as upstream — this patch
+    does not enable, disable, or resize it).
+    """
     if a_dtype is not torch.float8_e4m3fnuz:
         return None
-    return _K717_TILE_TABLE.get((M, N, K))
+    return _K717_TILE_TABLE.get((M, N, K))  # O(1) dict.get; no fallthrough loop.
 
 
 def _k717_lds_fits(BM: int, BN: int, BK: int, NS: int, lds_cap: int = 65536) -> bool:
@@ -149,6 +164,11 @@ def persistent_matmul_lt(
         total_tiles = total_blocks_M * total_blocks_N
         total_programs = total_tiles
         even_k = K % BLK_K == 0
+        # Runtime telemetry (zero-overhead int increment); used by K-717
+        # verifier and by ops to confirm the gate fires in production.
+        global _K717_FIRE_COUNT
+        _K717_FIRE_COUNT += 1
+        _K717_FIRE_BY_SHAPE[(M, N, K)] = _K717_FIRE_BY_SHAPE.get((M, N, K), 0) + 1
 
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

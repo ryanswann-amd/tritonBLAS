@@ -99,6 +99,31 @@ def _k349_apply_fp8_overrides(a, b, selector):
     return True
 
 
+# Per-shape tile overrides for FP8 e5m2fnuz x e4m3fnuz square GEMMs on MI300X
+# where the analytical selector picks tiles that trail hipBLASLt by >=15%.
+# Each entry below is the winning config from a paired ON/OFF graph-captured
+# sweep (BM/BN/BK in {64,128,256} x num_stages in {2,3} x num_warps in {4,8}).
+_FP8_SQUARE_TILE_OVERRIDES: Dict[Tuple[int, int, int],
+                                  Tuple[int, int, int, int, int]] = {
+    # (M, N, K) -> (BM, BN, BK, num_stages, num_warps)
+    (1024, 1024,  512): ( 64,  64, 256, 2, 8),
+    (4096, 4096, 1024): (256, 256,  64, 2, 8),
+    (4096, 4096, 2048): (256, 256,  64, 2, 8),
+}
+
+
+class _TileOverride:
+    """Override tile knobs on a selector; delegate everything else."""
+
+    def __init__(self, inner, bm, bn, bk, ns, nw):
+        self._inner = inner
+        self.block_m, self.block_n, self.block_k = bm, bn, bk
+        self.num_stages, self.num_warps = ns, nw
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 
 _tensor_cache = {}
 
@@ -695,6 +720,10 @@ def matmul_a8w8(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    if (a.dtype is torch.float8_e5m2fnuz and b.dtype is torch.float8_e4m3fnuz):
+        cfg = _FP8_SQUARE_TILE_OVERRIDES.get((M, N, K))
+        if cfg is not None:
+            selector = _TileOverride(selector, *cfg)
     config = matmul_preamble(selector) if work_stealing else None
     # K-349: FP8 cohort tile override + force monolithic kernel for non-streamk/non-WS.
     is_fp8 = (not enable_streamk) and (not work_stealing) and \

@@ -274,6 +274,31 @@ P6_LAND_ANCHORS = [
 ]
 
 
+# K-1104 lock-in cohort: K-1074's 8 candidate cells which K-1098 verified
+# as 0/8 P6 paired-PMC admits (all fail load-bearing C1 with
+# waves_per_CU_ratio (tb/hbl) in [1.753, 2.740]).  K-1074 paired n=30
+# round-robin on c42/MI300X confirmed 0/8 cells clear the K-901 +2% LAND
+# margin under wpeu=1, 2/8 (S32, S37) are confirmed regressions, cohort
+# geomean ~= 1.000x.  These cells MUST stay rejected by P6 — any future
+# envelope relaxation that admits them would (a) leak P5 Clause-2's
+# 2.6x-3.1x measured K-989 anchor speedup, and (b) admit measured-zero
+# or measured-negative cells.  S26 and S31 are already in
+# P6_NEGATIVES_K1017; included here too to keep the K-1074 cohort
+# semantically self-contained.
+# Source: K-1098 output/p6_clause_by_clause_k1074.csv.
+P6_K1074_REJECT_LOCK = [
+    # (cid, M, N, K, waves_ratio_tb_hbl, k1074_timing_delta_pct)
+    ("S26",  8064, 2048, 1024, 2.032, +0.51),
+    ("S31", 18304, 2048, 1024, 2.014, -2.96),
+    ("S32", 20352, 2048, 1024, 2.254, -0.51),  # confirmed regression CI95 hi<0
+    ("S33", 22400, 2048, 1024, 2.378, +1.34),
+    ("S34", 24448, 2048, 1024, 1.753, +0.65),  # collides on C1 with S30
+    ("S35", 26496, 2048, 1024, 1.887, +0.77),
+    ("S37", 25600, 2048,  256, 2.740, -0.68),  # confirmed regression CI95 hi<0
+    ("S39", 49152, 2048,  256, 2.122, +0.24),
+]
+
+
 @pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
 def test_p6_admits_k1017_mfma_issue_stall_positives(cid, M, N, K):
     """K-1017 P6+ cells (S24, S29) must admit so dispatch sets wpeu=1
@@ -361,3 +386,71 @@ def test_p6_admit_does_not_break_k984_k989_route_out_anchors(cid, M, N, K):
         M, N, K, torch.bfloat16, torch.bfloat16,
         enable_streamk=False, work_stealing=False) is True, (
         f"P6 wiring regressed K-984/K-989 LAND anchor {cid} ({M},{N},{K})")
+
+
+# ---------------------------------------------------------------------------
+# K-1104 P7-extension lock-in: K-1074's 8 candidate cells MUST stay rejected
+# by R_K1037_P6_admit_wpeu1.  K-1098 4-iter PMC RESEARCH + K-1074 paired
+# n=30 round-robin both falsified the brief's proposed cohort extension:
+#   * 0/8 K-1074 cells fire P6 under K-1037's paired-PMC classifier
+#     (load-bearing C1 ratio in [1.753, 2.740], all > 1.70 cutoff)
+#   * 0/8 cells clear K-901 +2% LAND margin under wpeu=1 (n=30 paired
+#     timing on c42/MI300X)
+#   * 2/8 (S32, S37) are confirmed regressions (CI95 hi < 0)
+#   * Cohort geomean ~= 1.000x (measured-zero net effect)
+# These tests fence the predicate against future relaxations attempting
+# to admit any of these cells without re-validating against the K-1098
+# verified record.  Hard separation wall: S30 (NEG) and S34 (NEW)
+# share waves_ratio = 1.7530 — no admissible C1 cutoff exists in the
+# (1.5320, 1.7530) feasibility band.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cid,M,N,K,_ratio,_dpct", P6_K1074_REJECT_LOCK,
+                         ids=[c[0] for c in P6_K1074_REJECT_LOCK])
+def test_p6_does_not_admit_k1074_falsified_extension_cohort(
+        cid, M, N, K, _ratio, _dpct):
+    """K-1074's 8 candidate cells must REJECT P6 admit.  K-1098 verified
+    0/8 fire under K-1037's paired-PMC classifier, and K-1074 paired n=30
+    on c42/MI300X measured 0/8 cells clear the K-901 +2% LAND margin.
+    Admitting any of these cells would either silence P5 Clause-2's
+    measured 2.6x-3.1x routing speedup (K=1024 family) or admit a
+    confirmed regression (S32, S37: CI95 hi < 0)."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"K-1074 NEG {cid} ({M},{N},{K}) waves_ratio={_ratio:.3f} "
+        f"timing_delta={_dpct:+.2f}% admitted by P6 — envelope leak. "
+        f"K-1098 paired-PMC and K-1074 paired n=30 both falsify admission.")
+
+
+@pytest.mark.parametrize("cid,M,N,K,_ratio,_dpct", P6_K1074_REJECT_LOCK,
+                         ids=[c[0] for c in P6_K1074_REJECT_LOCK])
+def test_p6_full_dispatch_does_not_silence_p5_route_out_for_k1074(
+        cid, M, N, K, _ratio, _dpct):
+    """K-1074 K=1024/K=256 cells with M>=5000 and N==2048 are caught by
+    P5 Clause-2 (R_K979_P5_route_to_hbl) and route OUT to hipBLASLt,
+    where K-989 anchors S25/S27/S28 measured 2.6x-3.1x speedup.  P6
+    admit must NOT short-circuit that routing for any K-1074 cell.
+    Witness: full _k971_route_to_hbl must return True for every K-1074
+    cell (the route-OUT path), not False (the in-kernel admit path)."""
+    routed_out = _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert routed_out is True, (
+        f"K-1074 cell {cid} ({M},{N},{K}) failed to route OUT — "
+        f"P6 admit incorrectly silenced P5 Clause-2's verified 2.6x-3.1x "
+        f"hipBLASLt speedup.  Re-check Envelope A/B floors before relaxing.")
+
+
+def test_p6_envelope_a_c1_separation_wall_is_locked():
+    """Hard separation wall: K-1037 NEG cell S30 (M=16256, ratio=1.7530)
+    and K-1074 candidate S34 (M=24448, ratio=1.7530) share an IDENTICAL
+    paired-PMC waves_per_CU_ratio.  No C1 relaxation in the (1.5320,
+    1.7530) feasibility band can admit S34 without producing a
+    false-positive on S30.  Locking this asserts Envelope A's M-band
+    [13000, 14999] cannot be widened to M=24448 for any reason that does
+    not also break the K-1037 18/18 perfect agreement."""
+    # S30 (NEG) and S34 (NEW NEG) must both reject; M=15000..16256 and
+    # M=16257..24448 must all reject.  Sample the boundaries of the
+    # locked-out region.
+    for M in (15000, 16256, 16257, 18304, 20352, 22400, 24448, 26496):
+        assert R_K1037_P6_admit_wpeu1(M, 2048, 1024, torch.bfloat16) is False, (
+            f"Envelope A separation wall breached at M={M}: any admit here "
+            f"requires re-running the K-1037 PMC sweep + K-1074 paired n=30.")

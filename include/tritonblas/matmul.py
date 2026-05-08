@@ -111,10 +111,21 @@ def persistent_matmul_lt(
     # universal-winner config from the 5312-config sweep. Branched BEFORE the
     # Origami @property reads to skip the wasted descriptor lookups that would
     # otherwise consume ~3-4us per dispatch (half of the +7.19% cohort lift).
+    #
+    # K-569 LDS bank-conflict mitigation: K-519's 18-counter rocprofv3 capture
+    # at M=N=2048, K=512, fp16 measured SQ_LDS_BANK_CONFLICT/disp = 7.86e+05
+    # (3.43 conflicts per LDS instr) on the K-451 winner (BK=32) vs 0 for
+    # hipBLASLt. Root cause: with fp16 each LDS-tile row at BK=32 = 64 B = only
+    # 16 of the MI300X's 32 LDS banks -> guaranteed 2-way conflict with an
+    # 8-warp WG. Widening BK 32 -> 64 makes each row 128 B = full 32 banks =
+    # 1-1 lane-bank mapping, eliminating the conflict pattern. NS 3 -> 2 keeps
+    # total LDS at 48 KiB ((2-1) * (128*64 + 64*256) * 2 B = 49152 B), within
+    # the MI300X 64 KiB per-WG budget (the BK=64 NS=3 alternative would consume
+    # 96 KiB and not fit).
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 256, 64    # K-569: BK 32 -> 64 (LDS bank align)
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2                         # K-569: NS 3 -> 2 (keep LDS = 48 KiB)
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms
@@ -254,10 +265,13 @@ def streamk_matmul_lt(
     _, N = b.shape
 
     # K-451 medium-K square fp16/bf16 cohort gate (see persistent_matmul_lt).
+    # K-569: BK 32 -> 64 + NS 3 -> 2 to eliminate LDS bank conflicts (see
+    # persistent_matmul_lt header comment for the K-519 measurement and
+    # bank-alignment derivation).
     if _k451_match(M, N, K, a.dtype):
-        BLK_M, BLK_N, BLK_K = 128, 256, 32
+        BLK_M, BLK_N, BLK_K = 128, 256, 64    # K-569: BK 32 -> 64 (LDS bank align)
         gsize_m = 8
-        num_stages = 3
+        num_stages = 2                         # K-569: NS 3 -> 2 (keep LDS = 48 KiB)
         num_warps = 8
         waves_per_eu = 2
         num_xcds = selector.num_sms

@@ -9,10 +9,44 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels.persistent_gemm_monolithic import persistent_matmul as _persistent_matmul_monolithic
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+
+# K-349: FP8 (e4m3fnuz / e5m2fnuz) on MI300X (gfx942):
+#  (1) Composable persistent_gemm hits an MLIR DenseElementsAttr assertion on
+#      every FP8 tile -> route FP8 through the monolithic kernel.
+#  (2) Origami picks BLOCK_K in {128, 256} for FP8 4096x4096x{2048,4096}; the
+#      K-349 sweep on the K-313 medium-K cohort shows BLOCK_K=64 with
+#      BLOCK_M=BLOCK_N=256 wins 9-13% (LDS-bw vs fp32 acc-pressure tradeoff).
+#  Exact (M, N, K, dtype) gate per K-654/K-683. Streamk/WS bypass.
+_K349_FP8_DTYPES = tuple(
+    dt for dt in (getattr(torch, "float8_e4m3fnuz", None),
+                  getattr(torch, "float8_e5m2fnuz", None)) if dt is not None
+)
+_K349_TILE_TABLE = {
+    (4096, 4096, 4096): (256, 256, 64, 2),
+    (4096, 4096, 2048): (256, 256, 64, 2),
+}
+
+
+def _k349_fp8_dispatch(a, b, selector):
+    """Return True iff `a.dtype` is FP8 fnuz so the caller forces the
+    monolithic kernel (composable persistent_gemm has a known FP8 compile
+    failure). When (M, N, K) is in the K-349 cohort, also override
+    (BLOCK_M, BLOCK_N, BLOCK_K, num_stages) on `selector` in place."""
+    if a.dtype not in _K349_FP8_DTYPES:
+        return False
+    o = _K349_TILE_TABLE.get((a.shape[0], b.shape[1], a.shape[1]))
+    if o is not None:
+        BM, BN, BK, ns = o
+        selector._result.config.mt.m = BM
+        selector._result.config.mt.n = BN
+        selector._result.config.mt.k = BK
+        selector._num_stages = ns
+    return True
 
 
 _tensor_cache = {}
@@ -77,6 +111,7 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    force_monolithic: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -160,7 +195,10 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
+        # K-349: route FP8 dispatches to monolithic kernel — composable
+        # persistent_gemm hits an MLIR assertion on FP8 tiles.
+        _kfn = _persistent_matmul_monolithic if force_monolithic else persistent_matmul
+        kk = _maybe_wrap(_kfn, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -384,10 +422,13 @@ def matmul_a8w8_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    # K-349: FP8 medium-K cohort tile override + force monolithic kernel.
+    is_fp8 = (not enable_streamk) and (not work_stealing) and \
+        _k349_fp8_dispatch(a, b, selector)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, force_monolithic=is_fp8)
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})
@@ -511,10 +552,13 @@ def matmul_a8w8(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+    # K-349: FP8 medium-K cohort tile override + force monolithic kernel.
+    is_fp8 = (not enable_streamk) and (not work_stealing) and \
+        _k349_fp8_dispatch(a, b, selector)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, force_monolithic=is_fp8)
 
 def matmul_fp4(
     a: torch.Tensor,

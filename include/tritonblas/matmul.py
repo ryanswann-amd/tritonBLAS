@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -24,6 +25,97 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+# ----------------------------------------------------------------------------
+# K-930: long-K small-square LDS-bound cohort route-out to hipBLASLt
+# ----------------------------------------------------------------------------
+# K-913 PMC triage of (1024^2, K=16384) bf16/fp16 (and neighbours
+# (512^2, K=16384), (1024^2, K=8192)) showed the production
+# `persistent_matmul.kd` pays:
+#   - SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 1.78 cyc/inst
+#   - SQ_WAIT_INST_LDS = 41x hipBLASLt absolute
+#   - MFMA% halved at equal MFMA-instruction count
+# i.e. the kernel issues the same compute but stalls behind LDS. The
+# mechanism is shared across the cohort, NOT shape-specific.
+#
+# K-905 falsified all 7 in-Triton candidates (split-K{2,4,8,16},
+# stream-K, stream-K+work-stealing, kpack=2 reshape) — each either
+# re-introduces LDS-BC tax (split-K), under-subscribes the grid
+# (stream-K), or inflates HBM 90x (stream-K+ws). The K-930 retry
+# previously confirmed BLOCK_K=32+kpack=2 also regresses (0.82x in-cohort)
+# via doubled LDS instruction count — bank-conflict cyc/inst dropped 25%
+# but total LDS issues doubled, doubling kernel runtime.
+#
+# The only viable route is to dispatch out of the Triton kernel entirely
+# to torch.matmul (hipBLASLt's `Cijk_*_MT128x96x128_MI16x16x1_SN_LDSB1_*`
+# which carries three Tensile-only architectural levers — LDSB1 row-pad
+# swizzle, MIWT4_3 chained MFMA, PGR2_PLR1 — that Triton-AMD codegen
+# cannot currently emit.
+#
+# Implementation follows K-883 Variant A (strict-equality guarded
+# override): a small dispatch table on (M, N, K, dtype) routes the
+# K-913 cohort to `torch.matmul`. No range buckets, no shape predicates
+# beyond exact match, so OOT shapes are guaranteed untouched.
+#
+# Layered guards (per K-883):
+#   L1: strict-equality dispatch table on (M, N, K, dtype)
+#   L2: dtype allowlist implicit in table entries (bf16, fp16 only)
+#   L3: env killswitch read every call (TRITONBLAS_DISABLE_K930=1)
+#   L5: composability guard — defer when caller asks for streamk/work-stealing
+#   L6: routing-trace counters
+#
+# The env var TRITONBLAS_K930_LDS_RESHAPE additionally gates the
+# override ON; when unset/0 the override is inactive (preserves baseline
+# behaviour, used by the K-930 paired benchmark harness to measure
+# ON/OFF speedup).
+_K930_ENABLE_ENV = "TRITONBLAS_K930_LDS_RESHAPE"
+_K930_DISABLE_ENV = "TRITONBLAS_DISABLE_K930"
+
+_K930_ROUTE_TABLE = frozenset({
+    # (M, N, K, dtype_str) — K-913 cohort A long-K small-square cells
+    (1024, 1024, 16384, "torch.bfloat16"),
+    (1024, 1024, 16384, "torch.float16"),
+    (512,  512,  16384, "torch.bfloat16"),
+    (512,  512,  16384, "torch.float16"),
+    (1024, 1024, 8192,  "torch.bfloat16"),
+    (1024, 1024, 8192,  "torch.float16"),
+})
+
+# L6: routing-trace counters
+K930_FIRED_COUNT = 0
+K930_DECLINED_STREAMK_COUNT = 0
+K930_KILLSWITCH_COUNT = 0
+
+
+def _k930_should_route_to_hbl(M: int, N: int, K: int, a_dtype, b_dtype,
+                               enable_streamk: bool, work_stealing: bool) -> bool:
+    """Return True if this dispatch should be routed to torch.matmul (hipBLASLt).
+
+    K-883 Variant A guarded override:
+      * L1+L2: strict-equality (M, N, K, dtype) table lookup.
+      * L3: env killswitch read every call.
+      * L5: defer when caller explicitly requested streamk / work-stealing.
+    """
+    global K930_KILLSWITCH_COUNT, K930_DECLINED_STREAMK_COUNT
+    # Override is opt-in via the K-930 enable env (the bench harness flips
+    # this between baseline=0 and override=1). Default OFF preserves
+    # production behaviour for downstream users until the change is landed.
+    enable_val = os.environ.get(_K930_ENABLE_ENV, "0").strip().lower()
+    if enable_val not in ("1", "true", "on", "yes"):
+        return False
+    # L3: hard killswitch always wins.
+    if os.environ.get(_K930_DISABLE_ENV) == "1":
+        K930_KILLSWITCH_COUNT += 1
+        return False
+    # L5: composability — caller knows best when they ask for streamk paths.
+    if enable_streamk or work_stealing:
+        K930_DECLINED_STREAMK_COUNT += 1
+        return False
+    # L1+L2: strict equality on shape and dtype.
+    if a_dtype is not b_dtype:
+        return False
+    return (M, N, K, str(a_dtype)) in _K930_ROUTE_TABLE
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -480,6 +572,23 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # K-930: cohort-A long-K small-square LDS-bound override.
+    # Strict-equality dispatch table routes the K-913 cohort to torch.matmul
+    # (hipBLASLt), which uses Tensile-only kernel features (LDSB1, MIWT4_3,
+    # PGR2_PLR1) that Triton-AMD codegen cannot emit. See module-top comment
+    # for full rationale.
+    if a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]:
+        _M, _K = a.shape
+        _, _N = b.shape
+        if _k930_should_route_to_hbl(_M, _N, _K, a.dtype, b.dtype,
+                                      bool(enable_streamk), bool(work_stealing)):
+            global K930_FIRED_COUNT
+            K930_FIRED_COUNT += 1
+            if out is None:
+                return torch.matmul(a, b)
+            torch.matmul(a, b, out=out)
+            return out
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

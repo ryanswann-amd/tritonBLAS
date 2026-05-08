@@ -45,6 +45,17 @@ _HBL_ROUTE_TABLE = frozenset({
     (768, 1792, 4480, torch.bfloat16),  # SR3
     (768, 1792, 3744, torch.bfloat16),  # SR4
     (1024, 3072, 4480, torch.bfloat16),  # SR5
+    # K-1093 — fp16 mirrors of the 7 K-1013 LDS-bound residuals.
+    # Empirically verified on MI300X (rad-mi300x-1, ROCm 7.2): paired n=20
+    # HIP-graph hot-cache geomean speedup vs hipBLASLt = 1.213x (min 1.142x,
+    # max 1.264x). All 7 cells PASS the K-1007 1.05x admission gate.
+    (736, 1792, 3744, torch.float16),   # S13 fp16  (1.215x)
+    (4480, 3072, 768, torch.float16),   # S20 fp16  (1.149x)
+    (1024, 2048, 4480, torch.float16),  # SR1 fp16  (1.262x)
+    (1024, 2048, 1792, torch.float16),  # SR2 fp16  (1.142x)
+    (768, 1792, 4480, torch.float16),   # SR3 fp16  (1.264x)
+    (768, 1792, 3744, torch.float16),   # SR4 fp16  (1.228x)
+    (1024, 3072, 4480, torch.float16),  # SR5 fp16  (1.236x)
 })
 
 _tensor_cache = {}

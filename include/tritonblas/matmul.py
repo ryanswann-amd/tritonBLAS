@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,22 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .splitk2_kernel import maybe_dispatch_splitk2
+
+# K-827 routed split-K=2 override gate (M=N=2048, K∈{4096,8192,16384}, fp16/bf16).
+# Disabled by default because paired HIP-graph kernel-only n=50 measurement
+# (K-795/K-809/K-811/K-817 + K-827 retries 1-7, all on c42/MI300X gfx942) shows
+# the K-795 prototype regresses by 32-112% per cohort cell vs the OFF baseline:
+# the binding constraint is per-shard codegen density inside the Triton-AMD
+# compiler backend (K-791 PMC: 2.0-2.8x lower MFMA-cycles-per-VALU-inst than
+# hipBLASLt; LDS bank conflicts not present in hbl), not MFMA-issue stalls
+# reducible at the user-facing autotune surface.
+#
+# The override is wired behind this env-var gate (default OFF) so the dispatch
+# path is testable / re-runnable when the K-760 backend successor work
+# (MIWT4_7 chained MFMAs + LDSB1 swizzle) lands and changes the per-shard
+# arithmetic intensity that makes split-K profitable.
+_K827_SPLITK2_ENABLED = os.environ.get("TRITONBLAS_ENABLE_K827_SPLITK2", "0") == "1"
 
 
 
@@ -404,6 +421,14 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-827 routed split-K=2 override (default OFF; opt-in via env var).
+    # Strict (M,N,K,dtype) shape gate; falls through on every other shape.
+    if (_K827_SPLITK2_ENABLED
+            and not enable_streamk
+            and not is_fake(a)
+            and maybe_dispatch_splitk2(a, b, out)):
+        return out
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +485,14 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-827 routed split-K=2 override (default OFF; opt-in via env var).
+    # Strict (M,N,K,dtype) shape gate; falls through on every other shape.
+    if (_K827_SPLITK2_ENABLED
+            and not enable_streamk
+            and not is_fake(a)
+            and maybe_dispatch_splitk2(a, b, out)):
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

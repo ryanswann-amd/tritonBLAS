@@ -36,6 +36,60 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# --- K-464: medium-K square FP16/BF16 cohort gate ----------------------------
+# Cohort: M = N in {1024, 2048, 4096} x K in {256, 512} x dtype in {fp16, bf16}
+# = 12 shapes on MI300X.  Origami's default pick yields cohort geomean
+# ~0.34x hipBLASLt -- the worst gap among live tritonblas dispatch envelopes.
+# K-442 swept 48 LDS-feasible configs (BM=BN in {128,256} x BK in {32,64,128}
+# x NS in {2,3} x WPEU in {0,1,2} x NW in {4,8}) and identified the single
+# tile below as the cohort plateau winner: it lifts every cohort shape over
+# Origami and matches the per-shape oracle within 0.4%.  Full hipBLASLt
+# parity (>=0.9x) is bounded by the Triton AMD codegen MFMA/VALU density gap
+# and per-call wrapper tax (K-138 / K-176 / K-273 / K-381 / K-398), neither
+# of which is fixable from tile selection -- this gate's contract is the
+# tile-selection-bounded lift, not closing the codegen gap.
+# The predicate is exact-match on (M, N, K, dtype) so the gate cannot fire
+# on neighbor cohorts (K-381/K-388 medium-square K in {1024, 2048};
+# K-428 small-K K in {128, 256, 512}) per the K-654 anti-pattern.
+_K464_FP_DTYPES = frozenset((torch.float16, torch.bfloat16))
+_K464_M = frozenset((1024, 2048, 4096))
+_K464_K = frozenset((256, 512))
+_K464_TILE = dict(block_m=256, block_n=256, block_k=64,
+                  num_stages=2, num_warps=8, waves_per_eu=2)
+
+
+def _k464_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+    return (
+        not streamk
+        and mx_block_size == 0
+        and M == N
+        and M in _K464_M
+        and K in _K464_K
+        and a_dtype in _K464_FP_DTYPES
+        and b_dtype in _K464_FP_DTYPES
+        and c_dtype in _K464_FP_DTYPES
+    )
+
+
+def _k464_apply_override(selector):
+    """Mutate an OrigamiMatmulSelector in place so block_m/block_n/block_k/
+    num_stages reflect the K-442 winner tile, then re-run _select_ws_params
+    so the work-stealing parameters are sized for the override.  Sets
+    _k464_override so persistent_matmul_lt pulls the gate-supplied
+    num_warps / waves_per_eu instead of the historical hardcoded defaults.
+    Non-cohort calls never see _k464_override and are untouched."""
+    selector._result.config.mt.m = _K464_TILE["block_m"]
+    selector._result.config.mt.n = _K464_TILE["block_n"]
+    selector._result.config.mt.k = _K464_TILE["block_k"]
+    selector._num_stages = _K464_TILE["num_stages"]
+    selector._k464_num_warps = _K464_TILE["num_warps"]
+    selector._k464_waves_per_eu = _K464_TILE["waves_per_eu"]
+    selector._k464_override = True
+    selector._select_ws_params()
+    return selector
+# --- end K-464 gate ----------------------------------------------------------
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +106,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +118,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _k464_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+        _k464_apply_override(selector)
+    return selector
 
 
 def persistent_matmul_lt(
@@ -97,6 +154,12 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
+    # K-464: only pull tuned launch params when the cohort wrapper signals an
+    # override.  Non-cohort calls keep the historical hardcoded defaults so the
+    # 84-shape neighbor cohorts (K-381/K-388/K-428) cannot be perturbed.
+    if getattr(selector, "_k464_override", False):
+        num_warps = selector._k464_num_warps
+        waves_per_eu = selector._k464_waves_per_eu
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None

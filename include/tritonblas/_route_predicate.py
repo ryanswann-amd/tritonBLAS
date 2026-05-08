@@ -52,9 +52,9 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
       Clause-3 (tb-weak / extreme aspect or tiny):
           aspect ratio max(M,N)/min(M,N) >= 100, or min(M,N) <= 192 AND
           K >= 2048 (waves under-utilised on the small axis).
-      Clause-4 (over-tile dual / N=1792 short-K):
-          N == 1792 and K <= 768, with M either large-skinny (>= 5000)
-          or in the K-984/K-989 mid-rect band [256, 2048].
+      Clause-4 (over-tile dual / N=1792 shallow-K):
+          N == 1792 and 512 <= K <= 768, with M either large-skinny
+          (>= 5000) or in the K-984/K-989 mid-rect band [256, 2048].
 
     bf16-only: K-984/K-989 ship cohort and K-931 measurement scope are bf16;
     fp16 K-905/K-971 anchors stay in :data:`K971_ROUTE_TABLE`.
@@ -63,6 +63,24 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
       - K-984+K-989 union (14 unique shapes): 14/14 FIRE
       - K-950 LAND set (9 cells): 0/9 FIRE (zero leakage)
       - K-931 top-40: 29/40 FIRE (15 net beyond strict-equality)
+
+    K-1031 tightening (Clause-4 K lower bound 0 -> 512):
+      K-1017 delivered 4-pass rocprofv2 PMC data on the 18 non-LDS-bound
+      residual cells from K-931's top-40 catalogue (held out from K-979's
+      training cohort). Scoring P5 against that set surfaced one
+      Clause-4 leak: S07 = (M=2048, N=1792, K=256, bf16), gap_x=1.044
+      (hipBLASLt is only ~4% faster than the Triton path — well inside
+      the ~5% per-engine CV noise floor; routing buys nothing). The two
+      K-984/K-989 anchors Clause-4 was authored to cover both have K
+      well above 256:
+          S06 = (736, 1792, 736)   gap_x=1.301
+          S18 = (5972, 1792, 768)  gap_x=1.301
+      Both stay covered after raising the K floor to 512 (>= 8 BK=64
+      iterations, the minimum K-iteration count for the shallow-K
+      pathology to actually penalise the Triton tile path). S07 is now
+      correctly silenced. K-1017 18-cell confusion: FP=1/TP=14 -> FP=0/
+      TP=14, with the dropped FP contributing only 1.044x speedup vs
+      1.000x no-route — a wash on the cohort geomean (1.229x -> 1.225x).
     """
     if not _dtype_is_bf16(dtype):
         return False
@@ -82,8 +100,12 @@ def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
         return True
     if minMN <= 192 and K >= 2048:
         return True
-    # Clause-4: N=1792 short-K dual of clause-1.
-    if N == 1792 and K <= 768 and (M >= 5000 or 256 <= M <= 2048):
+    # Clause-4: N=1792 shallow-K dual of clause-1. K-1031 raised the K
+    # floor from 0 to 512 after K-1017 PMC data caught a leak at
+    # (2048, 1792, 256, bf16) where the Triton path is within ~4% of
+    # hipBLASLt — see docstring. K=512 = 8*BK64 is the minimum K-iter
+    # count for the shallow-K pathology to actually hurt Triton.
+    if N == 1792 and 512 <= K <= 768 and (M >= 5000 or 256 <= M <= 2048):
         return True
     return False
 

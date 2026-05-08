@@ -377,12 +377,66 @@ def matmul_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 
+# MI300X (gfx942) FP8 e5m2fnuz mid-K tile overrides.
+# Sweep on tritonblas main (K-352) found the Origami selector picks tiles tuned
+# for e4m3fnuz dynamic range; the wider e5m2fnuz exponent inflates LDS bank
+# pressure on the dot path so a wider macro tile (and shallower K-stage) wins.
+# Keys: (M, N) → (BLOCK_M, BLOCK_N, BLOCK_K, num_stages); only fires when
+# K is in the mid-K band [2048, 4096] and a/b dtype is float8_e5m2fnuz.
+_E5M2FNUZ_MIDK_TILES = {
+    (2048, 4096): (128, 256, 128, 2),
+    (4096, 2048): (256, 128, 128, 2),
+    (4096, 4096): (256, 256,  64, 2),
+}
+
+
+class _E5M2FnuzTileOverride:
+    """Read-through wrapper that injects a (BM, BN, BK, num_stages) override
+    on top of an OrigamiMatmulSelector without mutating it (the selector
+    exposes block_m/n/k/num_stages as read-only properties)."""
+    __slots__ = ("_inner", "block_m", "block_n", "block_k", "num_stages")
+
+    def __init__(self, inner, bm, bn, bk, ns):
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "block_m", bm)
+        object.__setattr__(self, "block_n", bn)
+        object.__setattr__(self, "block_k", bk)
+        object.__setattr__(self, "num_stages", ns)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _maybe_override_e5m2fnuz_tile(a, b, selector):
+    """Per-dtype dispatch gate: return a tile-overriding selector wrapper for
+    e5m2fnuz on MI300X mid-K shapes; otherwise return the selector unchanged.
+
+    Disabled by setting env TRITONBLAS_DISABLE_E5M2FNUZ_GATE=1.
+    """
+    import os
+    if os.environ.get("TRITONBLAS_DISABLE_E5M2FNUZ_GATE"):
+        return selector
+    e5m2 = getattr(torch, "float8_e5m2fnuz", None)
+    if e5m2 is None or a.dtype is not e5m2 or b.dtype is not e5m2:
+        return selector
+    M, K = a.shape
+    _, N = b.shape
+    if not (2048 <= K <= 4096):
+        return selector
+    tile = _E5M2FNUZ_MIDK_TILES.get((M, N))
+    if tile is None:
+        return selector
+    return _E5M2FnuzTileOverride(selector, *tile)
+
+
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
     c: torch.Tensor, selector, config: MatmulConfig,
     enable_streamk=False, work_stealing=False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
+
+    selector = _maybe_override_e5m2fnuz_tile(a, b, selector)
 
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)

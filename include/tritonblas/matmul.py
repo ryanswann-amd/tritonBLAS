@@ -23,7 +23,7 @@ from . import guarded_override as _go
 
 _tensor_cache = {}
 
-# ----- K-989 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) -------
+# ----- K-989 + K-1002 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) ---
 # Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
 # LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
 # >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
@@ -37,6 +37,18 @@ _tensor_cache = {}
 #   the K-971 LDS fingerprint (LDS_BC>=0.7 cyc/inst OR LDS_Wait/wave 5x+
 #   hbl). Bucket excludes MFMA-issue-stall shapes (K-967 falsified the
 #   waves_per_eu=1 lever transfer to that cohort, 0/7 LAND).
+# - K-1002 entries: fp16 mirrors of 8 of the 10 K-989 bf16 keys, filtered
+#   through K-973 override_eligibility.py. The K-950 PMC sweep showed fp16
+#   cells in the same (M,N,K) tuples exhibit identical SQ_LDS_BANK_CONFLICT/
+#   INSTS_LDS ratios as their bf16 siblings (R-K979 P5 predicate fires 12/12
+#   on the LDS-bound candidate set). The K-973 filter (extended mode, knobs={},
+#   pmc imputed) returned ELIGIBLE on 8 of 10 fp16 mirrors — the 2 skinny
+#   cells (S05 256x1792x2048, S21 768x3072x4480; both aspect>=4 with min<=1024)
+#   were REJECTED via R1_LDS_BC_NO_KPACK as a conservative carve-out (skinny
+#   geometry × LDS-BC imputation is a known R-936 aspect-bucket-mismatch
+#   risk class). fp16 was excluded from K-989 originally because K-984/K-989
+#   both reused K-931's bf16-only PMC sweep; K-1002 closes that gap by
+#   leveraging K-979's P5 NO-LAND filter as the dtype-parity attestation.
 _K971_ROUTE_TABLE = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
@@ -57,6 +69,18 @@ _K971_ROUTE_TABLE = frozenset({
     (1024,  2048, 6016, "torch.bfloat16"),  # K-989 S22  sp= 3.76x  p<1e-9
     ( 768,  3072, 4480, "torch.bfloat16"),  # K-989 S21  sp= 4.61x  p<1e-9
     (1024,  2048, 8064, "torch.bfloat16"),  # K-989 S23  sp= 3.10x  p<1e-9
+    # K-1002 NEW (fp16 mirrors of K-989 entries; K-973 ELIGIBLE; K-979 P5)
+    (1024,  2048, 1240, "torch.float16"),   # K-1002 S40 fp16 (mirror of K-989)
+    ( 768,  1792, 5972, "torch.float16"),   # K-1002 S17 fp16 (mirror of K-989)
+    ( 736,  1792,  736, "torch.float16"),   # K-1002 S06 fp16 (mirror of K-989)
+    (2304,  2048, 4800, "torch.float16"),   # K-1002 S04 fp16 (mirror of K-989)
+    (10112, 2048, 1024, "torch.float16"),   # K-1002 S27 fp16 (mirror of K-989)
+    (12160, 2048, 1024, "torch.float16"),   # K-1002 S28 fp16 (mirror of K-989)
+    (1024,  2048, 6016, "torch.float16"),   # K-1002 S22 fp16 (mirror of K-989)
+    (1024,  2048, 8064, "torch.float16"),   # K-1002 S23 fp16 (mirror of K-989)
+    # K-1002 EXCLUDED (K-973 R1_LDS_BC_NO_KPACK; skinny aspect>=4 carve-out):
+    #   ( 256, 1792, 2048, "torch.float16"),  # K-989 S05 fp16 — skinny REJECT
+    #   ( 768, 3072, 4480, "torch.float16"),  # K-989 S21 fp16 — skinny REJECT
 })
 
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):

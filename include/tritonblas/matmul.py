@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -36,6 +37,108 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# --- K-535: small-M decode cohort tile dispatch gate -------------------------
+# K-501 characterised the small-M decode regime (M ∈ {1,2,4,8,16,32} ×
+# N,K ∈ {1024..8192} × {fp16,bf16}, 192 shapes) and found that Origami's
+# default tile (BM=128, BN=128/256, BK=64, NS=2, NW=8, WPEU=0) wastes ~M/BM
+# of every output tile and underfills the MI300X grid for tiny M.  K-535's
+# 297-config skinny-M sweep (BM ∈ {16,32,64} × BN ∈ {64,128,256} × BK ∈
+# {32,64,128} × NS ∈ {2,3} × NW ∈ {2,4,8} × WPEU ∈ {0,1,2}, LDS-feasibility
+# filtered) found a single universal-winner tile that lifts the cohort
+# without regressing any in-cohort shape: BM=32, BN=64, BK=64, NS=3, NW=4,
+# WPEU=0.
+#
+# The lift is structurally bounded by the per-call Python+JIT dispatch floor
+# (~50–80 µs steady-state, immutable from tile selection — see K-138 / K-176
+# / K-381 / K-398 / K-501 caveats).  Headline target ≥1.0× hipBLASLt is
+# infeasible because hipBLASLt resolves these shapes in 10–70 µs end-to-end
+# while the dispatch floor alone caps tritonblas above ~80 µs; this gate
+# captures the Python-side lift available at HEAD without that floor moving.
+#
+# Anti-pattern guard (per K-580 / K-654 lessons.md):
+#   1. Predicate is exact-match on (M, N, K, dtype) — fires only on the
+#      K-501 cohort; K-654's 61-shape regression sweep contains exactly one
+#      M ≤ 32 cell (M=16,N=4096,K=4096,fp16, |Δ| < 2% measured), which is
+#      well within K-887's documented inter-node noise band.
+#   2. Gate enforced inside _make_matmul_selector AND in persistent_matmul_lt
+#      via a `_k535_override` flag (mirroring K-464's wrapper pattern), so
+#      the historical num_warps=8 / waves_per_eu=0 hardcoded defaults
+#      cannot accidentally override the cohort-tuned values.
+#   3. Env-var kill-switch TRITONBLAS_DISABLE_K535_OVERRIDES=1 disables the
+#      gate at process start (not per-call) — for fast rollback if a
+#      downstream consumer hits an edge case the sweep didn't cover.
+#   4. streamk and quantized paths are excluded (cohort is dense fp16/bf16
+#      eager dispatch only).
+_K535_FP_DTYPES = frozenset((torch.float16, torch.bfloat16))
+_K535_M = frozenset((1, 2, 4, 8, 16, 32))
+_K535_N = frozenset((1024, 2048, 4096, 8192))
+_K535_K = frozenset((1024, 2048, 4096, 8192))
+_K535_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K535_OVERRIDES", "0") == "1"
+
+
+def _k535_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+    if _K535_DISABLED:
+        return False
+    return (
+        not streamk
+        and mx_block_size == 0
+        and M in _K535_M
+        and N in _K535_N
+        and K in _K535_K
+        and a_dtype in _K535_FP_DTYPES
+        and b_dtype in _K535_FP_DTYPES
+        and c_dtype in _K535_FP_DTYPES
+    )
+
+
+class _K535Selector:
+    """Wrapper applying the K-535 universal-winner config (BM=32, BN=64,
+    BK=64, NS=3, NW=4, WPEU=0) on top of a freshly-built Origami selector.
+    `_k535_override` is consumed by persistent_matmul_lt to pull num_warps /
+    waves_per_eu from this wrapper instead of the historical hardcoded
+    defaults (which would otherwise silently overwrite NW=4 with NW=8).
+
+    All non-tile attributes (num_sms, sk_grid, _hardware, ...) delegate to
+    the inner Origami selector.
+    """
+    _k535_override = True
+    block_m = 32
+    block_n = 64
+    block_k = 64
+    num_stages = 3
+    num_warps = 4
+    waves_per_eu = 0
+
+    def __init__(self, inner):
+        # Best-effort push of the K-535 tile into Origami's bound result so
+        # that downstream introspectors (e.g. _select_ws_params) see the
+        # same tile we will launch with.  If the bound struct rejects the
+        # assignment, the wrapper still serves the correct values via class
+        # attributes.
+        try:
+            inner._result.config.mt.m = self.block_m
+            inner._result.config.mt.n = self.block_n
+            inner._result.config.mt.k = self.block_k
+            inner._num_stages = self.num_stages
+            inner._select_ws_params()
+        except (AttributeError, TypeError):
+            pass
+        self._inner = inner
+
+    @property
+    def even_k(self):
+        return self._inner._k % self.block_k == 0
+
+    # Use group_size_m = 1 for skinny-M; large group_m has no benefit when M
+    # already fits in a single block and we want to maximise N-direction
+    # CTAs (which the small BN=64 already does).
+    group_m = 1
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+# --- end K-535 gate ----------------------------------------------------------
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +155,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +167,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _k535_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+        selector = _K535Selector(selector)
+    return selector
 
 
 def persistent_matmul_lt(
@@ -97,6 +203,13 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
+    # K-535: only pull tuned launch params when the cohort wrapper signals an
+    # override.  Non-cohort calls keep the historical hardcoded defaults so
+    # the rest of the dispatch envelope (incl. the K-654 61-shape regression
+    # cohort) cannot be perturbed by this gate.
+    if getattr(selector, "_k535_override", False):
+        num_warps = selector.num_warps
+        waves_per_eu = selector.waves_per_eu
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None

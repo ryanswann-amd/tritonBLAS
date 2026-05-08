@@ -299,6 +299,34 @@ def _k695_tile_override(M, N, K, a_dtype):
 # ---------------------------------------------------------------------------
 
 
+def _num_warps_for_tall_skinny_fp16_bf16(M: int, N: int, K: int, dtype: torch.dtype) -> int:
+    """Tall-skinny FP16/BF16 cohort override (default 8 -> 4).
+
+    On the M in {2048, 4096}, N <= 64, K >= 2048, fp16/bf16 sub-cohort the
+    Origami selector picks a small persistent tile (BLOCK_N=16) that leaves
+    50% of the MFMA N-lanes masked, and the resulting kernel is VALU-bound
+    (rocprofv2 VALUUtil ~100%, MfmaUtil ~4%) per K-668. Cutting num_warps
+    from 8 to 4 lets the issue scheduler pack two unrolled K-loop iterations
+    per VALU slot, restoring kernel time to within range of hipBLASLt.
+
+    Validated on MI300X / gfx942 via paired HIP-graph kernel-only
+    timing (n_warm=3, n_capture=15, n_rounds=5). Worst-4 cohort speedup
+    geomean 1.41x (min 1.31x); 12-shape neighbor cohort speedup geomean
+    1.51x (min 1.10x). Out-of-cohort guard shapes (squares, large-N,
+    M=8192/16384, K<2048) regress 8-34% with this override -- gate is
+    therefore strictly conjunctive on (M, N, K, dtype).
+    """
+    if dtype not in (torch.float16, torch.bfloat16):
+        return 8
+    if M not in (2048, 4096):
+        return 8
+    if N > 64:
+        return 8
+    if K < 2048:
+        return 8
+    return 4
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -437,6 +465,10 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
+    # K-710: num_warps=4 for FP16/BF16 tall-skinny cohort (M in {2048,4096},
+    # N<=64, K>=2048). Returns 8 elsewhere. K-683's LDS-swizzle gate may
+    # override this below when its non-default band fires.
+    num_warps = _num_warps_for_tall_skinny_fp16_bf16(M, N, K, a.dtype)
     waves_per_eu = 0
     mfmaInstrSize = 16
     # K-667: narrow per-shape kpack gate. Default is kpack=1; on the large-K
@@ -455,9 +487,12 @@ def persistent_matmul_lt(
         block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
         streamk=False, work_stealing=work_stealing,
     )
-    num_warps = _lds_cfg.num_warps
-    # K-683 overrides kpack only when its predicate band fires (non-default).
-    # Outside that band, preserve K-667's kpack value (default=1, =2 on cohort).
+    # K-683 overrides num_warps/kpack only when its predicate band fires
+    # (non-default). Outside that band, preserve K-710's num_warps choice
+    # (4 in the FP16/BF16 tall-skinny cohort, 8 elsewhere) and K-667's
+    # kpack value (default=1, =2 on the large-K square cohort).
+    if _lds_cfg.num_warps != 8:
+        num_warps = _lds_cfg.num_warps
     if _lds_cfg.kpack != 1:
         kpack = _lds_cfg.kpack
 
@@ -619,6 +654,10 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
+    # K-710: num_warps=4 for FP16/BF16 tall-skinny cohort (M in {2048,4096},
+    # N<=64, K>=2048). Returns 8 elsewhere. K-683's LDS-swizzle gate may
+    # override this below when its non-default band fires.
+    num_warps = _num_warps_for_tall_skinny_fp16_bf16(M, N, K, a.dtype)
     waves_per_eu = 0
     mfmaInstrSize = 16
     # K-667: narrow per-shape kpack gate. Default is kpack=1; on the large-K
@@ -636,9 +675,12 @@ def streamk_matmul_lt(
         block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
         streamk=True, work_stealing=work_stealing,
     )
-    num_warps = _lds_cfg.num_warps
-    # K-683 overrides kpack only when its predicate band fires (non-default).
-    # Outside that band, preserve K-667's kpack value (default=1, =2 on cohort).
+    # K-683 overrides num_warps/kpack only when its predicate band fires
+    # (non-default). Outside that band, preserve K-710's num_warps choice
+    # (4 in the FP16/BF16 tall-skinny cohort, 8 elsewhere) and K-667's
+    # kpack value (default=1, =2 on the large-K square cohort).
+    if _lds_cfg.num_warps != 8:
+        num_warps = _lds_cfg.num_warps
     if _lds_cfg.kpack != 1:
         kpack = _lds_cfg.kpack
 

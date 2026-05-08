@@ -25,6 +25,34 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+# ---------------------------------------------------------------------------
+# K-695: FP8 e4m3fnuz tall-skinny (small-M, large-N) tile override.
+# Origami over-tiles BM and under-stages BK on this 27-shape cohort,
+# costing 1.46-2.10x vs hipBLASLt. A narrow predicate routing to
+# (BM=32, NS=2, KP=1) (or (32,1,2) for the M=64,N=4096 sub-band) lifts the
+# cohort geomean from 0.34x -> 0.41x of hipBLASLt (+21.5% over Origami)
+# with one within-noise regression (-4.3% on M=16,N=4096,K=16384) and zero
+# leakage outside the predicate. M=64,N=8192 is intentionally skipped --
+# Origami already wins there. See K-695.
+_FP8_E4M3FNUZ = getattr(torch, "float8_e4m3fnuz", None)
+_K695_M = (16, 32, 64)
+_K695_N = (4096, 8192, 16384)
+_K695_K = (4096, 8192, 16384)
+
+
+def _k695_tile_override(M, N, K, a_dtype):
+    """Return (BM, NS, KP) override for the K-695 cohort, else None."""
+    if _FP8_E4M3FNUZ is None or a_dtype is not _FP8_E4M3FNUZ:
+        return None
+    if M not in _K695_M or N not in _K695_N or K not in _K695_K:
+        return None
+    if M == 64 and N == 8192:  # Origami already optimal on this sub-band
+        return None
+    if M == 64 and N == 4096:  # NS=1 needed because Origami picks BK=512
+        return (32, 1, 2)
+    return (32, 2, 1)
+# ---------------------------------------------------------------------------
+
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -101,6 +129,18 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-695: tile override for FP8 e4m3fnuz tall-skinny cohort. LDS-fit guard
+    # falls back to Origami on the (rare) BN/BK combo where the override
+    # exceeds the 64KiB MI300X workgroup LDS budget.
+    _ovr = _k695_tile_override(M, N, K, a.dtype)
+    if _ovr is not None and not work_stealing:
+        _bm, _ns, _kp = _ovr
+        if _ns * (_bm * BLK_K + BLK_K * BLK_N) <= 65536:
+            BLK_M, num_stages, kpack = _bm, _ns, _kp
+            total_blocks_M = triton.cdiv(M, BLK_M)
+            total_tiles = total_blocks_M * total_blocks_N
+            total_programs = total_tiles
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

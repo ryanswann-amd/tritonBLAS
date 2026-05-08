@@ -96,31 +96,19 @@ def persistent_matmul_lt(
 
     # NS-pipeline note (K-677, MI300X gfx942). DO NOT add a hardcoded NS=3
     # (or higher) override here for the K-570 large-K square FP16/BF16
-    # cohort (M=N in {1024,2048,4096} x K in {4096,8192,16384}). Empirically
-    # refuted; CI guard lives in tests/test_num_stages_cohort_guard.py.
-    #
-    # Root cause (measured, not modeled):
-    #   Triton's gfx942 software-pipeliner double-buffers the K loop, so the
-    #   shared-memory allocation is (NS-1) * per_stage_lds, NOT NS *
-    #   per_stage_lds (the naive NS multiplier is wrong because NS=2 means
-    #   "1 prefetch buffer + 1 compute buffer" and Triton aliases compute
-    #   onto the same physical slot the next iter overwrites).
-    #   per_stage_lds = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(dtype) = 65536
-    #   bytes for every cell in this cohort (Origami's selector picks
-    #   {64,64,256}, {128,128,128}, {256,256,64} for M=N=1024/2048/4096).
-    #   At NS=2 that is 1 * 65536 = 65536 bytes — exactly fills gfx942's
-    #   64 KiB LDS budget. At NS=3 it is 2 * 65536 = 131072 bytes and Triton
-    #   raises OutOfResources("Required: 131072, Hardware limit: 65536") on
-    #   18/18 cells (confirmed via direct compile probe in K-677 sweep).
-    #
-    # Why co-modifying the tile to make NS=3 fit doesn't help either:
-    #   A wide paired graph-captured sweep (15 NS in {3,4} candidates per
-    #   shape, axes BLOCK_K halved/quartered, BLOCK_M/N halved, num_warps
-    #   in {4,8}, waves_per_eu in {0,1,2}, kpack in {1,2}; 5 trials per
-    #   cell) regressed every cohort cell (mean +7.28%, median +4.36%,
-    #   M=4096 sub-cohort +14% to +17%, only "win" -0.09% noise). Tile
-    #   shrink raises wave dispatch count and lowers MFMA density; the cost
-    #   exceeds any pipelining gain on this cohort.
+    # cohort (M=N in {1024,2048,4096} x K in {4096,8192,16384}); empirically
+    # refuted. Triton's gfx942 software-pipeliner allocates (NS-1) *
+    # per_stage_lds bytes of shared memory, where per_stage_lds =
+    # (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(dtype). Origami's selected
+    # tiles for this cohort ({64,64,256}, {128,128,128}, {256,256,64} for
+    # M=N=1024/2048/4096) all give per_stage_lds = 65536 B, exactly filling
+    # gfx942's 64 KiB LDS at NS=2; NS=3 needs 131072 B and Triton raises
+    # OutOfResources on 18/18 cells (direct compile probe). Co-shrinking
+    # the tile to make NS=3 fit also regressed every cell of a 15-candidate
+    # paired graph-captured sweep (mean +7.28%, M=4096 sub-cohort +14-17%):
+    # the tile-shrink dispatch + MFMA-density cost exceeds any pipelining
+    # gain. If Origami later picks a smaller tile that lets NS=3 fit, the
+    # selector returns it via the line below — no override needed here.
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0

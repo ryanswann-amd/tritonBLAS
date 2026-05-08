@@ -23,12 +23,20 @@ from . import guarded_override as _go
 
 _tensor_cache = {}
 
-# ----- K-971 (extends K-930/K-905 cohort A LDS-bound route-OUT) -------------
+# ----- K-989 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) -------
 # Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
 # LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
 # >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
-# K-905 entries are the validated 2 keys; K-971 adds 6 mid-square / long-K
-# keys per K-913 + K-931 PMC sweep. Paired n=30 verified on c42/MI300X.
+# - K-905 entries: 2 keys (1024^2 K=16384, both bf16/fp16) — validated.
+# - K-971 entries: 6 keys (mid-square M=N in {1024,2048} x K in {16384,32768})
+#   — validated paired n=30 in K-971 (geomean 1.85x, 0/12 OOC regress).
+# - K-989 entries: 10 keys from K-931 LDS-bound uncovered top-10 (all bf16),
+#   validated paired n=30 on c42/MI300X (geomean 5.23x, all p<1e-9, 0/9 OOC
+#   regress, 10/10 ON-vs-REF numerical-match within fp eps). All 10 cells
+#   hit K-901 §5 V1/V2/V3 LAND gates. K-931 PMC re-measurement confirms
+#   the K-971 LDS fingerprint (LDS_BC>=0.7 cyc/inst OR LDS_Wait/wave 5x+
+#   hbl). Bucket excludes MFMA-issue-stall shapes (K-967 falsified the
+#   waves_per_eu=1 lever transfer to that cohort, 0/7 LAND).
 _K971_ROUTE_TABLE = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
@@ -38,9 +46,22 @@ _K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 16384, "torch.float16"),
     (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
     (2048, 2048, 32768, "torch.float16"),
+    # K-989 NEW (K-931 top-10 LDS-bound uncovered cohort, paired n=30)
+    (1024,  2048, 1240, "torch.bfloat16"),  # K-989 S40  sp=12.80x  p<1e-9
+    ( 768,  1792, 5972, "torch.bfloat16"),  # K-989 S17  sp= 4.72x  p<1e-9
+    ( 256,  1792, 2048, "torch.bfloat16"),  # K-989 S05  sp=14.73x  p<1e-9
+    ( 736,  1792,  736, "torch.bfloat16"),  # K-989 S06  sp=14.67x  p<1e-9
+    (2304,  2048, 4800, "torch.bfloat16"),  # K-989 S04  sp= 2.72x  p<1e-9
+    (10112, 2048, 1024, "torch.bfloat16"),  # K-989 S27  sp= 3.08x  p<1e-9
+    (12160, 2048, 1024, "torch.bfloat16"),  # K-989 S28  sp= 2.60x  p<1e-9
+    (1024,  2048, 6016, "torch.bfloat16"),  # K-989 S22  sp= 3.76x  p<1e-9
+    ( 768,  3072, 4480, "torch.bfloat16"),  # K-989 S21  sp= 4.61x  p<1e-9
+    (1024,  2048, 8064, "torch.bfloat16"),  # K-989 S23  sp= 3.10x  p<1e-9
 })
 
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    # K-989: keep K-971 killswitch env var as the single L3 disable lever
+    # (per K-883 R1 — one cohort, one disable).
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
     return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE

@@ -9,9 +9,93 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels.persistent_gemm_monolithic import persistent_matmul as _persistent_matmul_monolithic
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-349: FP8 (e4m3fnuz / e5m2fnuz) medium-K cohort fix for matmul_a8w8_lt on
+# MI300X (gfx942). Two issues land together:
+#   (1) Composable persistent_gemm hits an MLIR DenseElementsAttr assertion
+#       on every FP8 tile we tested. We force the monolithic kernel for FP8
+#       (analogous to TBLAS_USE_MONOLITHIC but scoped to FP8 only).
+#   (2) Origami picks BLOCK_K in {128, 256} for FP8 medium-K, but the K-349
+#       sweep on the K-313 medium-K cohort (K in [2048,4096]) shows BLOCK_K=64
+#       wins 3-13% once BLOCK_M*BLOCK_N >= 128*128: fp32 acc pressure
+#       (2*BM*BN regs) stays fixed, LDS-bw pressure halves, mainloop_iters
+#       doubles (>=16, the K-654 amortization floor). Exact (M,N,K,dtype)
+#       gate per K-654/K-683. Bypassed for streamk and work_stealing paths.
+#       Kill switch: TRITONBLAS_DISABLE_K349_FP8.
+
+# Lazily-initialised module state. Using a single int key (M<<32 | N<<16 | K
+# packed into 48 bits) makes the per-call overhead a dict lookup with a
+# single int hash and no tuple allocation. The dispatch table has 8 entries.
+_K349_FP8_DT0 = None
+_K349_FP8_DT1 = None
+_K349_DT0_TABLE = {}  # int key -> (BM, BN, BK, ns)
+_K349_DT1_TABLE = {}
+_K349_DISABLE_OVERRIDE = False
+_K349_INIT_DONE = False
+
+
+def _k349_init():
+    global _K349_FP8_DT0, _K349_FP8_DT1
+    global _K349_DT0_TABLE, _K349_DT1_TABLE
+    global _K349_DISABLE_OVERRIDE, _K349_INIT_DONE
+    import os
+    _K349_DISABLE_OVERRIDE = bool(os.environ.get("TRITONBLAS_DISABLE_K349_FP8"))
+    _K349_FP8_DT0 = getattr(torch, "float8_e4m3fnuz", None)
+    _K349_FP8_DT1 = getattr(torch, "float8_e5m2fnuz", None)
+    base = {
+        (4096 << 32) | (4096 << 16) | 4096: (256, 256, 64, 2),
+        (4096 << 32) | (4096 << 16) | 2048: (256, 256, 64, 2),
+        (2048 << 32) | (2048 << 16) | 4096: (128, 128, 128, 2),
+        (2048 << 32) | (2048 << 16) | 2048: (128, 128, 128, 2),
+    }
+    _K349_DT0_TABLE = dict(base) if _K349_FP8_DT0 is not None else {}
+    _K349_DT1_TABLE = dict(base) if _K349_FP8_DT1 is not None else {}
+    _K349_INIT_DONE = True
+
+
+def _k349_apply_fp8_overrides(a, b, selector):
+    """Return True iff `a.dtype` is FP8 FNUZ (caller should force monolithic
+    kernel due to a known composable-kernel FP8 compile-time bug). Side
+    effect: applies the per-cohort tile/num_stages override in-place on
+    `selector` if (M, N, K, dtype) is a dispatch-table entry AND the kill
+    switch TRITONBLAS_DISABLE_K349_FP8 is unset.
+
+    The override application is cached per `selector` instance via the
+    sentinel attribute `_k349_done` so paying the dispatch-table lookup
+    once per shape — _make_matmul_selector is itself wrapped in
+    @functools.lru_cache(maxsize=1024) upstream (see K-138, K-278), so a
+    repeated call with the same (M, N, K, dtype) hits the cached selector
+    and skips this path entirely.
+    """
+    if not _K349_INIT_DONE:
+        _k349_init()
+    dt = a.dtype
+    if dt is _K349_FP8_DT0:
+        table = _K349_DT0_TABLE
+    elif dt is _K349_FP8_DT1:
+        table = _K349_DT1_TABLE
+    else:
+        return False
+    if getattr(selector, "_k349_done", False):
+        return True
+    selector._k349_done = True
+    if _K349_DISABLE_OVERRIDE:
+        return True
+    o = table.get((a.shape[0] << 32) | (b.shape[1] << 16) | a.shape[1])
+    if o is not None:
+        BM, BN, BK, ns = o
+        # LDS guard: ns * (BM*BK + BK*BN) bytes for FP8 (1 byte/elem).
+        if ns * (BM * BK + BK * BN) <= 64 * 1024:
+            selector._result.config.mt.m = BM
+            selector._result.config.mt.n = BN
+            selector._result.config.mt.k = BK
+            selector._num_stages = ns
+    return True
 
 
 
@@ -77,6 +161,7 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    force_monolithic: bool = False,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -160,7 +245,12 @@ def persistent_matmul_lt(
     else:
         grids = total_tiles
 
-        kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
+        # K-349: route FP8 quantized dispatches to the monolithic kernel
+        # because the composable persistent_gemm hits an MLIR assertion on
+        # the FP8 path. force_monolithic is set by matmul_a8w8_lt for FP8.
+        _kernel_fn = _persistent_matmul_monolithic if force_monolithic else persistent_matmul
+
+        kk = _maybe_wrap(_kernel_fn, probe_tensor=a)[(grids,)](
             a,
             b,
             c,
@@ -384,10 +474,15 @@ def matmul_a8w8_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    # K-349: FP8 medium-K cohort tile override + force monolithic kernel.
+    # Bypasses streamk and work_stealing paths (those have separate kernels).
+    is_fp8 = (not enable_streamk) and (not work_stealing) and \
+        _k349_apply_fp8_overrides(a, b, selector)
+
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, force_monolithic=is_fp8)
 
 
 @triton_op("tritonblas::_matmul", mutates_args={})
@@ -511,10 +606,13 @@ def matmul_a8w8(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+    # K-349: FP8 cohort tile override + force monolithic kernel for non-streamk/non-WS.
+    is_fp8 = (not enable_streamk) and (not work_stealing) and \
+        _k349_apply_fp8_overrides(a, b, selector)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
     else:
-        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
+        return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing, force_monolithic=is_fp8)
 
 def matmul_fp4(
     a: torch.Tensor,

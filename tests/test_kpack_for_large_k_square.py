@@ -83,9 +83,9 @@ def test_gate_skips_non_square_shapes(dtype, m, n, k):
 @pytest.mark.parametrize(
     "k",
     [
-        # Adjacent K-451 medium-K cohort
+        # Adjacent medium-K cohort (K in {128, 256, 512})
         128, 256, 512,
-        # Adjacent K-570 intermediate-K cohort
+        # Adjacent intermediate-K cohort (K in {1024, 2048})
         1024, 2048,
         # Off-by-one above and below the gated K set
         4095, 4097,

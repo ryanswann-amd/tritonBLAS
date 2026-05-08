@@ -26,6 +26,7 @@ import torch
 
 from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
+    R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
 )
 from tritonblas.matmul import _k971_route_to_hbl
@@ -234,3 +235,129 @@ def test_public_matmul_dispatches_via_predicate():
     last = calls[-1]
     assert (last[0], last[2], last[1]) == (M, K_, N), (
         f"dispatch consulted with unexpected args: {last}")
+
+
+# ---------------------------------------------------------------------------
+# K-1089 R_K1037_P6_admit_wpeu1 — structural surrogate of K-1037 P6
+# MFMA-issue-stall classifier.  Pin tests cover (a) the 2 K-1017 P6+ cells
+# (S24, S29) admit, (b) every K-984/K-989 LAND anchor and the K-1017 OCC
+# negatives are NOT leaked, (c) bf16-only carve-out, (d) full-dispatch
+# composition: P6 admit short-circuits route-OUT to in-kernel.
+# ---------------------------------------------------------------------------
+P6_POSITIVES = [
+    # (cid, M, N, K)
+    ("S24",  4480, 3072,  768),  # MFMA-issue-stall, ratio 1.532
+    ("S29", 14208, 2048, 1024),  # MFMA-issue-stall, ratio 1.514
+]
+
+
+# K-1017 OCC + HBM negatives that must NOT admit (leak risk on Envelope A).
+# Wide-rect family near the M=14208 admit window:
+P6_NEGATIVES_K1017 = [
+    ("S26",  8064, 2048, 1024),  # OCC ratio 2.03
+    ("S30", 16256, 2048, 1024),  # OCC ratio 1.75 (just above admit ceil)
+    ("S31", 18304, 2048, 1024),  # OCC ratio 2.01
+    ("S07",  2048, 1792,  256),  # OCC shallow-K
+    ("S16",   256,  256, 2048),  # OCC small-mild-rect
+    ("S38",   384,  128,  200),  # HBM-bound, K=200 fails C2 floor
+]
+
+
+# K-984/K-989 LAND anchors that must NOT admit (route-OUT must be preserved).
+P6_LAND_ANCHORS = [
+    ("S25",  6016, 2048, 1024),  # K-984 anchor, M just below admit floor
+    ("S27", 10112, 2048, 1024),  # K-984+K-989 anchor
+    ("S28", 12160, 2048, 1024),  # K-984+K-989 anchor, just below admit floor
+    ("S04",  2304, 2048, 4800),  # K-984+K-989 anchor, K outside Envelope B
+    ("S18",  5972, 1792,  768),  # K-984 anchor, N=1792 not 2048
+    ("S40",  1024, 2048, 1240),  # K-989 anchor, minMN<2048
+]
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
+def test_p6_admits_k1017_mfma_issue_stall_positives(cid, M, N, K):
+    """K-1017 P6+ cells (S24, S29) must admit so dispatch sets wpeu=1
+    in-kernel."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True, (
+        f"P6 surrogate missed K-1017 MFMA-issue-stall positive {cid} ({M},{N},{K})")
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_NEGATIVES_K1017,
+                         ids=[c[0] for c in P6_NEGATIVES_K1017])
+def test_p6_does_not_admit_k1017_negatives(cid, M, N, K):
+    """K-1017 OCC + HBM-bound cells must NOT admit (preserves K-1037
+    18/18 perfect agreement against ground truth)."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"P6 surrogate false-positive on K-1017 negative {cid} ({M},{N},{K})")
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_LAND_ANCHORS,
+                         ids=[c[0] for c in P6_LAND_ANCHORS])
+def test_p6_does_not_leak_into_k984_k989_land_anchors(cid, M, N, K):
+    """K-984/K-989 LAND anchors gain 5.31x-5.63x via route-OUT; P6 admit
+    must NOT silence them by short-circuiting the route."""
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is False, (
+        f"P6 LAND-leak into K-984/K-989 anchor {cid} ({M},{N},{K})")
+
+
+def test_p6_is_bf16_only():
+    """fp16 / fp32 must short-circuit (K-1037 ground truth scope is bf16)."""
+    M, N, K = 14208, 2048, 1024  # S29
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float16) is False
+    assert R_K1037_P6_admit_wpeu1(M, N, K, torch.float32) is False
+
+
+def test_p6_envelope_a_boundary():
+    """Pin Envelope A boundaries: M=12999 just below floor, M=15000 just
+    above ceiling. K-984/K-989 anchor S28 (M=12160) and OCC S30 (M=16256)
+    are the calibration witnesses for these floors."""
+    assert R_K1037_P6_admit_wpeu1(12999, 2048, 1024, torch.bfloat16) is False
+    assert R_K1037_P6_admit_wpeu1(13000, 2048, 1024, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(14999, 2048, 1024, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(15000, 2048, 1024, torch.bfloat16) is False
+
+
+def test_p6_envelope_b_boundary():
+    """Pin Envelope B boundaries: maxMN=4501 just above ceiling (preserves
+    K-984 S18 maxMN=5972, K-989 S25 maxMN=6016); minMN=2047 just below
+    floor (preserves K-989 S22 minMN=1024)."""
+    # On-boundary positive (S24 itself):
+    assert R_K1037_P6_admit_wpeu1(4480, 3072, 768, torch.bfloat16) is True
+    # maxMN ceiling
+    assert R_K1037_P6_admit_wpeu1(4500, 2048, 768, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(4501, 2048, 768, torch.bfloat16) is False
+    # minMN floor
+    assert R_K1037_P6_admit_wpeu1(2048, 2048, 768, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(2047, 2048, 768, torch.bfloat16) is False
+    # K floor (Surrogate-C2)
+    assert R_K1037_P6_admit_wpeu1(2048, 2048, 511, torch.bfloat16) is False
+    assert R_K1037_P6_admit_wpeu1(2048, 2048, 512, torch.bfloat16) is True
+    # K ceiling (Envelope B)
+    assert R_K1037_P6_admit_wpeu1(2048, 2048, 1024, torch.bfloat16) is True
+    assert R_K1037_P6_admit_wpeu1(2048, 2048, 1025, torch.bfloat16) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])
+def test_p6_admit_short_circuits_route_out_to_in_kernel(cid, M, N, K):
+    """When P6 admit fires, _k971_route_to_hbl must return False so the
+    cell dispatches in-kernel (where matmul.py sets waves_per_eu=1).
+    Verifies the integration path: P6 admit overrides P5 route-OUT for
+    cells in the MFMA-issue-stall structural fingerprint.
+    Witness: S29 (14208, 2048, 1024) is otherwise routed-OUT by P5
+    Clause-2 (M>=5000, N==2048, K==1024) — P6 admit must short-circuit."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is False, (
+        f"P6 admit failed to short-circuit route-OUT for {cid} ({M},{N},{K})")
+
+
+@pytest.mark.parametrize("cid,M,N,K", P6_LAND_ANCHORS,
+                         ids=[c[0] for c in P6_LAND_ANCHORS])
+def test_p6_admit_does_not_break_k984_k989_route_out_anchors(cid, M, N, K):
+    """K-984/K-989 anchors must continue to route-OUT after P6 wiring —
+    the new short-circuit must not regress the existing P5 LAND set."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True, (
+        f"P6 wiring regressed K-984/K-989 LAND anchor {cid} ({M},{N},{K})")

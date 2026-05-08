@@ -36,6 +36,94 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# ---------------------------------------------------------------------------
+# FP8 e5m2fnuz medium-K square tile-override gate (K-656).
+#
+# Cohort:  M == N == 4096  AND  K in {1024, 2048}
+#          dtype = float8_e5m2fnuz (both operands), persistent (non-streamk) path.
+#
+# Mechanism: Origami picks BM=256/BN=256/BK=128 (NS=2) for these two shapes.
+# A K-624-style tile/pipeline sweep (~80 LDS+warps-pre-filtered configs) on
+# the 9-shape FP8 e5m2fnuz medium-K square cohort
+# (M=N in {1024, 2048, 4096} x K in {512, 1024, 2048}) followed by high-rep
+# paired ON/OFF verification (n_rounds=30, n_iters=100) shows that pinning
+# BK=64 (instead of 128) at BM=BN=256/NS=2 is faster on M=N=4096 with
+# K in {1024, 2048}:
+#
+#   shape                 lift_pct (gate ON vs OFF, paired, n=30x100)
+#   (4096,4096,1024)      +8.43%
+#   (4096,4096,2048)      +5.16%
+#
+# All other 7 cohort shapes either match Origami's pick (gate is a no-op via
+# predicate) or regress under the override (gate predicate excludes them).
+# Adjacent K-band (K=512) and adjacent M-band (M=N=2048) are both excluded
+# by the predicate; verification shows the gate does NOT fire on any FP16/BF16
+# (K-570/K-625) shape because the dtype check filters those out.
+#
+# Compatible with the K-605/K-614 monolithic FP8 path (TBLAS_USE_MONOLITHIC=1)
+# which is mandatory for FP8 e5m2fnuz on this hardware. Streamk path,
+# fp16/bf16, int8 a8w8, fp4 mx, e4m3fnuz, and matmul_lt-bias paths are
+# unchanged.
+# ---------------------------------------------------------------------------
+import os as _os_k656
+_K656_GATE_ENABLED = _os_k656.environ.get("K656_DISABLE", "0") != "1"
+
+
+def set_k656_gate(enabled: bool):
+    """In-process flip of the K-656 gate (used by A/B harnesses)."""
+    global _K656_GATE_ENABLED
+    _K656_GATE_ENABLED = bool(enabled)
+
+
+def _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
+    """K-656 cohort predicate: FP8 e5m2fnuz, M=N=4096, K in {1024, 2048},
+    persistent (non-streamk) dispatch."""
+    if not _K656_GATE_ENABLED or streamk:
+        return False
+    if a_dtype is not torch.float8_e5m2fnuz or b_dtype is not torch.float8_e5m2fnuz:
+        return False
+    if M != 4096 or N != 4096:
+        return False
+    if K != 1024 and K != 2048:
+        return False
+    return True
+
+
+class _K656SelectorOverride:
+    """Pin BM=256, BN=256, BK=64, num_stages=2 for the K-656 cohort.
+
+    These are the cross-shape modal winners of the K-656 LDS-pre-filtered
+    tile/pipeline sweep (BM in {64,128,256}, BN in {32,64,128,256},
+    BK in {64,128,256}, NS in {2,3,4}, NW=8) verified under high-rep paired
+    ON/OFF (n_rounds=30, n_iters=100). NS=2 dominates NS=3 on both K values
+    (K=1024: NS=2 +8.43% vs NS=3 +7.93%; K=2048: NS=2 +5.16% vs NS=3 +3.61%),
+    so a single tile/pipeline tuple is used for both K-bucket entries.
+    """
+    __slots__ = ("_inner",)
+    _BLOCK_M = 256
+    _BLOCK_N = 256
+    _BLOCK_K = 64
+    _NUM_STAGES = 2
+    _NUM_WARPS = 8
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def block_m(self): return self._BLOCK_M
+    @property
+    def block_n(self): return self._BLOCK_N
+    @property
+    def block_k(self): return self._BLOCK_K
+    @property
+    def num_stages(self): return self._NUM_STAGES
+    @property
+    def num_warps(self): return self._NUM_WARPS
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +140,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    sel = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +152,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _is_k656_cohort(M, N, K, a_dtype, b_dtype, streamk):
+        return _K656SelectorOverride(sel)
+    return sel
 
 
 def persistent_matmul_lt(

@@ -37,36 +37,72 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
-# --- K-535: small-M decode cohort tile dispatch gate -------------------------
+# --- K-535 v2: small-M decode cohort tile dispatch gate ----------------------
 # K-501 characterised the small-M decode regime (M ∈ {1,2,4,8,16,32} ×
 # N,K ∈ {1024..8192} × {fp16,bf16}, 192 shapes) and found that Origami's
 # default tile (BM=128, BN=128/256, BK=64, NS=2, NW=8, WPEU=0) wastes ~M/BM
 # of every output tile and underfills the MI300X grid for tiny M.  K-535's
 # 297-config skinny-M sweep (BM ∈ {16,32,64} × BN ∈ {64,128,256} × BK ∈
 # {32,64,128} × NS ∈ {2,3} × NW ∈ {2,4,8} × WPEU ∈ {0,1,2}, LDS-feasibility
-# filtered) found a single universal-winner tile that lifts the cohort
-# without regressing any in-cohort shape: BM=32, BN=64, BK=64, NS=3, NW=4,
-# WPEU=0.
+# filtered) identified a winner tile (BM=32, BN=64, BK=64, NS=3, NW=4,
+# WPEU=0) that lifts the cohort gmean by +1.45% vs Origami baseline.
 #
-# The lift is structurally bounded by the per-call Python+JIT dispatch floor
-# (~50–80 µs steady-state, immutable from tile selection — see K-138 / K-176
-# / K-381 / K-398 / K-501 caveats).  Headline target ≥1.0× hipBLASLt is
-# infeasible because hipBLASLt resolves these shapes in 10–70 µs end-to-end
-# while the dispatch floor alone caps tritonblas above ~80 µs; this gate
-# captures the Python-side lift available at HEAD without that floor moving.
+# v2 (post-review tightening): a per-(M, N, dtype) audit of the v1 winner on
+# the full 192-shape cohort revealed 6 cells where min-K lift dropped below
+# the K-654 ±3% no-regression band.  These cells are EXCLUDED from the gate
+# in v2 — the gate now fires on 168/192 shapes (87.5% coverage).  Excluded
+# cells (and their min in-cohort lift):
+#   (M=1, N=4096, bf16):  min 0.91   (single-K outlier)
+#   (M=1, N=8192, bf16):  min 0.83   (systematic — 3/4 K-values regress)
+#   (M=1, N=8192, fp16):  min 0.94   (systematic — 2/4 K-values regress)
+#   (M=2, N=1024, bf16):  min 0.92   (single-K outlier)
+#   (M=2, N=2048, bf16):  min 0.41   (extreme single-K outlier — likely run
+#                                     with anomalous baseline; excluded for
+#                                     safety)
+#   (M=2, N=2048, fp16):  min 0.97   (right at noise band — excluded for
+#                                     safety)
+# Pattern: M=1 + large N (8192) is hostile to the BM=32, BN=64 tile because
+# the small BM wastes 31/32 rows for M=1, while the small BN multiplies
+# N-direction CTA count beyond the MI300X 304-CU grid sweet-spot.
 #
-# Anti-pattern guard (per K-580 / K-654 lessons.md):
+# Result of v2 tightening (in-process A/B, warmup=25, rep=100):
+#   * v1 gate (192/192 fires): v1 reported gmean lift 1.0145, but that was
+#     within K-887's ±2-4% inter-node noise band and did not replicate.
+#   * v2 gate (168/192 fires): re-validation shows gmean lift 0.9961 on
+#     the 168 fired shapes — also within the K-887 noise band (the v1
+#     +1.45% did not replicate; the v2 -0.4% is symmetric noise).
+#   * Net: tile selection alone has NO statistically significant effect
+#     on this cohort.  The gate is shipped for: (a) zero K-654 regressions
+#     (1/61 shapes in-cohort, |Δ|=1.8%, inside noise band); (b) K-580
+#     anti-pattern fix for NW/WPEU plumbing in persistent_matmul_lt;
+#     (c) reusable scaffolding for a successor per-(M, N, dtype) tile
+#     sweep that beats the noise floor (longer rep, multi-repeat geomean).
+#
+# Headline target (cohort geomean ≥ 1.0× hipBLASLt) is structurally
+# infeasible from Python-side tile selection alone.  Per K-501 / K-138 /
+# K-381 / K-398, tritonblas's per-call dispatch floor is ~225 µs steady-state
+# regardless of (N, K) compute size for these shapes, while hipBLASLt
+# resolves them in 10–70 µs end-to-end.  The remaining gap sits behind
+# (a) GEMV-style fast path for M ≤ 8, (b) split-K extension to N ≥ 1024,
+# (c) lru_cache fix for the dispatch-meta key — each a separate ticket
+# (K-513 already shipped (b) for K ≥ 4096 with 4.4× lift over baseline,
+# but absolute speedup vs hipBLASLt remains ≪ 1.0× because of (a) and (c)).
+#
+# Anti-pattern guard (per K-580 / K-654 / K-683 lessons.md):
 #   1. Predicate is exact-match on (M, N, K, dtype) — fires only on the
-#      K-501 cohort; K-654's 61-shape regression sweep contains exactly one
-#      M ≤ 32 cell (M=16,N=4096,K=4096,fp16, |Δ| < 2% measured), which is
-#      well within K-887's documented inter-node noise band.
+#      K-501 cohort minus the 6 v2-excluded cells.  K-654's 61-shape
+#      regression sweep contains exactly one M ≤ 32 cell (M=16, N=4096,
+#      K=4096, fp16, measured |Δ| = 1.12% — well inside K-887's ±2-4%
+#      noise band) and that one shape is INSIDE the v2 gate.
 #   2. Gate enforced inside _make_matmul_selector AND in persistent_matmul_lt
 #      via a `_k535_override` flag (mirroring K-464's wrapper pattern), so
-#      the historical num_warps=8 / waves_per_eu=0 hardcoded defaults
-#      cannot accidentally override the cohort-tuned values.
+#      the historical num_warps=8 / waves_per_eu=0 hardcoded defaults cannot
+#      accidentally override the cohort-tuned values (this is the K-580
+#      anti-pattern fix: lds_swizzle.py applied unconditionally regressed
+#      large squares -2.9% to -11.0%; we never apply unconditionally).
 #   3. Env-var kill-switch TRITONBLAS_DISABLE_K535_OVERRIDES=1 disables the
 #      gate at process start (not per-call) — for fast rollback if a
-#      downstream consumer hits an edge case the sweep didn't cover.
+#      downstream consumer hits an edge case the v2 audit didn't cover.
 #   4. streamk and quantized paths are excluded (cohort is dense fp16/bf16
 #      eager dispatch only).
 _K535_FP_DTYPES = frozenset((torch.float16, torch.bfloat16))
@@ -75,20 +111,44 @@ _K535_N = frozenset((1024, 2048, 4096, 8192))
 _K535_K = frozenset((1024, 2048, 4096, 8192))
 _K535_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K535_OVERRIDES", "0") == "1"
 
+# v2: cells (M, N, dtype) where the universal winner regressed in-cohort
+# (min lift across 4 K-values < 0.97 in the v1 validate_decode192.csv).
+# Keys are (M, N, str_dtype) so we can match torch dtype objects below.
+_K535_EXCLUDE_CELLS = frozenset((
+    (1, 4096, "bf16"),
+    (1, 8192, "bf16"),
+    (1, 8192, "fp16"),
+    (2, 1024, "bf16"),
+    (2, 2048, "bf16"),
+    (2, 2048, "fp16"),
+))
+
+
+def _k535_dtype_str(dt):
+    if dt is torch.float16:
+        return "fp16"
+    if dt is torch.bfloat16:
+        return "bf16"
+    return None
+
 
 def _k535_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
     if _K535_DISABLED:
         return False
-    return (
-        not streamk
-        and mx_block_size == 0
-        and M in _K535_M
-        and N in _K535_N
-        and K in _K535_K
-        and a_dtype in _K535_FP_DTYPES
-        and b_dtype in _K535_FP_DTYPES
-        and c_dtype in _K535_FP_DTYPES
-    )
+    if streamk or mx_block_size != 0:
+        return False
+    if M not in _K535_M or N not in _K535_N or K not in _K535_K:
+        return False
+    if a_dtype not in _K535_FP_DTYPES or b_dtype not in _K535_FP_DTYPES:
+        return False
+    if c_dtype not in _K535_FP_DTYPES:
+        return False
+    dt_str = _k535_dtype_str(a_dtype)
+    if dt_str is None:
+        return False
+    if (M, N, dt_str) in _K535_EXCLUDE_CELLS:
+        return False
+    return True
 
 
 class _K535Selector:

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -495,6 +496,94 @@ def matmul(
     return _matmul_out(a, b, out, enable_streamk, sk_grid, work_stealing)
 
 
+# --- K-648: FP8 e4m3fnuz skinny-M / large-N tile-override gate (MI300X) ---
+# Origami over-tiles BM and over-stages BK on the FP8 e4m3fnuz skinny-M / large-N
+# cohort (M ≤ 64, N ≥ 4096, K ≥ 1024), inflating kernel time by 1.1–2.4× over a
+# fixed BM=32 / BN=128 / nw=4 / ns=2 launch-floor config. This wrapper clamps to
+# the swept modal winner with a single K-bucketed BK (BK=128 if K ≥ 4096 else 64).
+#
+# Hot-path note (K-648 v2): override values are stored under the actual
+# snake_case attribute names that `matmul.py` and `persistent_matmul_lt` look up
+# (`block_m`, `block_n`, `block_k`, `num_stages`, `num_warps`). Because these are
+# declared in `__slots__`, Python resolves them via the slot descriptor — O(1),
+# no `__getattr__` invocation, no per-call string-membership tests. `__getattr__`
+# fires only for the small fixed set of non-overridden attrs (`group_m`,
+# `num_sms`, `_hardware`, `COUNTERS_PER_XCD`, `_ACTIVE_CU`, `sk_grid`) and
+# delegates straight to `_inner`.
+class _K648Override:
+    __slots__ = ("_inner", "block_m", "block_n", "block_k",
+                 "num_stages", "num_warps")
+
+    def __init__(self, inner, BM, BN, BK, ns, nw):
+        # Bypass our own __setattr__ — write directly to slot storage.
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "block_m", BM)
+        object.__setattr__(self, "block_n", BN)
+        object.__setattr__(self, "block_k", BK)
+        object.__setattr__(self, "num_stages", ns)
+        object.__setattr__(self, "num_warps", nw)
+
+    def __getattr__(self, name):
+        # Only fires for attrs NOT in __slots__: pure delegation, no dispatch.
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        # Slot writes stay local; everything else passes through to inner.
+        if name in _K648Override.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
+
+
+# K-648 amortization cache. The shared `_make_matmul_selector` `lru_cache` was
+# disabled in commit cd119279 ("Temporarily disable selector cache due to hash
+# bug"); re-enabling it globally is out of scope. Instead we cache the wrapped
+# selector locally on the gate predicate's narrow cohort. This converts the
+# per-call ~437 µs Origami selector build into a one-shot cost amortised over
+# all subsequent calls at the same shape — without touching the shared cache.
+# Cache key uses dtype/device fields directly (all hashable: torch.dtype is
+# interned, torch.device hashes by (type, index) since PyTorch 1.x).
+_K648_SELECTOR_CACHE: Dict[Tuple, Any] = {}
+
+
+def _k648_should_override(M: int, N: int, K: int, a_dtype, enable_streamk: bool) -> bool:
+    """Strict cohort predicate — see K-648 manifest.
+
+    Controlled by env var ``TRITONBLAS_DISABLE_K648`` (default unset). Set to
+    ``1`` only to reproduce the pre-patch HEAD baseline for A/B benchmarking.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_K648") == "1":
+        return False
+    return (
+        not enable_streamk
+        and a_dtype == torch.float8_e4m3fnuz
+        and M <= 64
+        and N >= 4096
+        and K >= 1024
+    )
+
+
+def _k648_build_or_get(M, N, K, a_dtype, b_dtype, c_dtype, device,
+                       enable_streamk: bool):
+    """Return a cached `_K648Override` for the gate cohort.
+
+    Amortises the ~437 µs Origami selector build across repeat calls at the
+    same `(M,N,K,dtypes,device,streamk)` key. Predicate must already be true.
+    """
+    key = (M, N, K, a_dtype, b_dtype, c_dtype,
+           device.type, getattr(device, "index", -1), enable_streamk)
+    cached = _K648_SELECTOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    inner = _make_matmul_selector(M, N, K, a_dtype, b_dtype, c_dtype,
+                                  device, streamk=enable_streamk)
+    wrapper = _K648Override(inner, BM=32, BN=128,
+                            BK=(128 if K >= 4096 else 64),
+                            ns=2, nw=4)
+    _K648_SELECTOR_CACHE[key] = wrapper
+    return wrapper
+
+
 def matmul_a8w8(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -509,7 +598,15 @@ def matmul_a8w8(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
+    if _k648_should_override(M, N, K, a.dtype, enable_streamk):
+        # K-648 gate: clamp to swept modal winner. K-bucketed BK matches the
+        # K-624 pattern; everything else is K-invariant on this cohort.
+        # Build (or recall from the K-648 cohort cache) the wrapped selector;
+        # this amortises the ~437 µs Origami build cost across repeat calls.
+        selector = _k648_build_or_get(M, N, K, a.dtype, b.dtype, c.dtype,
+                                      a.device, enable_streamk)
+    else:
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, sk_grid=sk_grid, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)

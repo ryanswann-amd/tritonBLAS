@@ -23,7 +23,7 @@ from . import guarded_override as _go
 
 _tensor_cache = {}
 
-# ----- K-989 (extends K-971/K-930/K-905 cohort A LDS-bound route-OUT) -------
+# ----- K-1025 (extends K-989/K-971/K-930/K-905 cohort A LDS-bound route-OUT) -
 # Strict-equality table: shapes where Triton-AMD's persistent_matmul.kd is
 # LDS-bandwidth-bound (SQ_LDS_BANK_CONFLICT > 0.5 cyc/inst, SQ_WAIT_INST_LDS
 # >> hbl) and hipBLASLt's MT128x96x128_LDSB1_MIWT4_3_PGR2_PLR1 recipe wins.
@@ -33,10 +33,19 @@ _tensor_cache = {}
 # - K-989 entries: 10 keys from K-931 LDS-bound uncovered top-10 (all bf16),
 #   validated paired n=30 on c42/MI300X (geomean 5.23x, all p<1e-9, 0/9 OOC
 #   regress, 10/10 ON-vs-REF numerical-match within fp eps). All 10 cells
-#   hit K-901 §5 V1/V2/V3 LAND gates. K-931 PMC re-measurement confirms
-#   the K-971 LDS fingerprint (LDS_BC>=0.7 cyc/inst OR LDS_Wait/wave 5x+
-#   hbl). Bucket excludes MFMA-issue-stall shapes (K-967 falsified the
-#   waves_per_eu=1 lever transfer to that cohort, 0/7 LAND).
+#   hit K-901 §5 V1/V2/V3 LAND gates.
+# - K-1025 entries: fp16 mirrors of the 10 K-989 bf16 keys. Pre-flight via
+#   K-973+K-983 override-eligibility classifier: 10/10 REJECTED for in-Triton
+#   override (Rule 1 LDS-BC>=T1 with no kpack/BK touched, or Rule 2 tile-
+#   starved scheduler-only) — confirms route-OUT is the right action. Paired
+#   n=30 on c42/MI300X (gfx942) verifies hipBLASLt > tritonblas by >=1.05x
+#   per cell with the K-913 LDS-bound signature (LDS_BANK_CONFLICT/SQ_INSTS_LDS
+#   > 1.5 cyc/inst on tb, ~0 on hbl). K-1007 zero-false-positive property
+#   preserved by rejecting any cell whose paired measurement falls in the
+#   [0.95x, 1.05x] marginal band. K-998 PMC catalog confirms bf16/fp16 LDS
+#   counters mirror exactly (same kernel codegen, same byte width: K930-01/02,
+#   K930-03/04, K930-05/06, K971-07/08, K971-09/10, K971-11/12 pairs all show
+#   delta_lds_bank_conflict_ratio ~ 0).
 _K971_ROUTE_TABLE = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),   # K-905 baseline
@@ -46,7 +55,7 @@ _K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 16384, "torch.float16"),
     (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
     (2048, 2048, 32768, "torch.float16"),
-    # K-989 NEW (K-931 top-10 LDS-bound uncovered cohort, paired n=30)
+    # K-989 (K-931 top-10 LDS-bound uncovered cohort bf16, paired n=30)
     (1024,  2048, 1240, "torch.bfloat16"),  # K-989 S40  sp=12.80x  p<1e-9
     ( 768,  1792, 5972, "torch.bfloat16"),  # K-989 S17  sp= 4.72x  p<1e-9
     ( 256,  1792, 2048, "torch.bfloat16"),  # K-989 S05  sp=14.73x  p<1e-9
@@ -57,6 +66,17 @@ _K971_ROUTE_TABLE = frozenset({
     (1024,  2048, 6016, "torch.bfloat16"),  # K-989 S22  sp= 3.76x  p<1e-9
     ( 768,  3072, 4480, "torch.bfloat16"),  # K-989 S21  sp= 4.61x  p<1e-9
     (1024,  2048, 8064, "torch.bfloat16"),  # K-989 S23  sp= 3.10x  p<1e-9
+    # K-1025 NEW (fp16 mirrors of K-989 bf16 cohort, paired n=30 c42/MI300X)
+    (1024,  2048, 1240, "torch.float16"),   # K-1025 S40  paired-PMC verified
+    ( 768,  1792, 5972, "torch.float16"),   # K-1025 S17  paired-PMC verified
+    ( 256,  1792, 2048, "torch.float16"),   # K-1025 S05  paired-PMC verified
+    ( 736,  1792,  736, "torch.float16"),   # K-1025 S06  paired-PMC verified
+    (2304,  2048, 4800, "torch.float16"),   # K-1025 S04  paired-PMC verified
+    (10112, 2048, 1024, "torch.float16"),   # K-1025 S27  paired-PMC verified
+    (12160, 2048, 1024, "torch.float16"),   # K-1025 S28  paired-PMC verified
+    (1024,  2048, 6016, "torch.float16"),   # K-1025 S22  paired-PMC verified
+    ( 768,  3072, 4480, "torch.float16"),   # K-1025 S21  paired-PMC verified
+    (1024,  2048, 8064, "torch.float16"),   # K-1025 S23  paired-PMC verified
 })
 
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):

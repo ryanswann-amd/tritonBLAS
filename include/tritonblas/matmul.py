@@ -377,38 +377,6 @@ def matmul_lt(
     else:
         return persistent_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
 
-# K-424: FP8 small-M dispatch gate. The default persistent FP8 kernel
-# (a) hard-fails for M=1 (rank-1 assertion in make_scale_view, K-251 A17),
-# and (b) stalls the K-loop pipeline for M<=32, K=8192. StreamK fixes both,
-# except at N=4096 (uniquely worse for streamk than persistent at K=8192,
-# small M -- empirically measured on MI300X). See _fp8_smallm_streamk_route.
-_FP8_DTYPES = tuple(
-    dt for dt in (
-        getattr(torch, "float8_e4m3fn", None),
-        getattr(torch, "float8_e4m3fnuz", None),
-        getattr(torch, "float8_e5m2", None),
-        getattr(torch, "float8_e5m2fnuz", None),
-    ) if dt is not None
-)
-
-
-def _fp8_smallm_streamk_route(dtype, M, N, K):
-    """Returns True if (dtype, M, N, K) should be rerouted to streamk.
-
-    Two FP8 sub-corners are rerouted:
-      - M == 1 (persistent kernel crashes in make_scale_view)
-      - M <= 32 and K == 8192 and N != 4096 (persistent K-loop stalls;
-        N=4096 excluded because streamk regresses there).
-    """
-    if dtype not in _FP8_DTYPES:
-        return False
-    if M == 1:
-        return True
-    if M <= 32 and K == 8192 and N != 4096:
-        return True
-    return False
-
-
 def matmul_a8w8_lt(
     a: torch.Tensor, b: torch.Tensor, a_scale: torch.Tensor, b_scale: torch.Tensor,
     c: torch.Tensor, selector, config: MatmulConfig,
@@ -533,18 +501,29 @@ def matmul_a8w8(
     a_scale: torch.Tensor,
     b_scale: torch.Tensor,
     c: torch.Tensor,
-    enable_streamk=False,
-    work_stealing=False,
-    sk_grid=None,
+    enable_streamk: Optional[bool] = None,
+    work_stealing: bool = False,
+    sk_grid: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
 
-    # K-424: reroute FP8 small-M corners that the default persistent path
-    # cannot handle (M=1 crash) or runs slowly (M<=32, K=8192).
-    if not enable_streamk and _fp8_smallm_streamk_route(a.dtype, M, N, K):
-        enable_streamk = True
+    # K-424: FP8 small-M dispatch gate. When the caller has not explicitly
+    # asked for a kernel (enable_streamk=None), reroute the two FP8 sub-
+    # corners the default persistent path can't handle:
+    #   - M==1 (persistent crashes in make_scale_view, K-251 A17)
+    #   - M<=32 and K==8192 and N!=4096 (persistent K-loop stalls; N=4096 is
+    #     excluded because streamk empirically regresses at exactly that shape
+    #     on MI300X). Explicit enable_streamk=True/False is always respected.
+    if enable_streamk is None:
+        _fp8 = (getattr(torch, "float8_e4m3fn", None),
+                getattr(torch, "float8_e4m3fnuz", None),
+                getattr(torch, "float8_e5m2", None),
+                getattr(torch, "float8_e5m2fnuz", None))
+        enable_streamk = a.dtype in _fp8 and (
+            M == 1 or (M <= 32 and K == 8192 and N != 4096)
+        )
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, c.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

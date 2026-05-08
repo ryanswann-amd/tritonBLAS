@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,67 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ---------------------------------------------------------------------------
+# K-849 mid-rect bf16/fp16 occupancy/tile override (PMC-mechanistic, MI300X)
+# ---------------------------------------------------------------------------
+# Source: K-812 PMC sweep + K-828 mechanistic classification (10/10 cells in the
+# mid-rect bf16/fp16 cohort classified as MFMA_ISSUE_STALL with secondary
+# L2_LOCALITY_DEFICIT).  The dominant movable lever per K-828 §5 H1 is tile
+# enlargement along the dominant problem axis (M3+M4: more MFMAs per dispatch,
+# fewer waves dispatched).  num_stages is held at 2 so that the (BM,BN,BK)
+# tiles below stay within MI300X's 64KB LDS budget at 2-stage software
+# pipelining (96KB at NS=3 would spill — see K-696 falsification).
+#
+# This override is INTENTIONALLY shape+dtype exact-match: it fires on exactly
+# the 10 cohort cells from K-812 and is a structural no-op on every other
+# shape/dtype combination, so the regression surface is bounded by the
+# override-table key set itself.
+#
+# Disable at runtime with TRITONBLAS_DISABLE_K849_MIDRECT_OVERRIDE=1.
+# ---------------------------------------------------------------------------
+_K849_MIDRECT_OVERRIDES: Dict[Tuple[int, int, int, str], Tuple[int, int, int]] = {
+    # (M, N, K, dtype_str) -> (BLOCK_M, BLOCK_N, BLOCK_K)
+    # Wide-N cells (N >= 2*M direction): grow BN to match the wide dim.
+    (2048, 4096, 4096, "bf16"): (128, 256, 64),
+    (2048, 4096, 4096, "fp16"): (128, 256, 64),
+    (2048, 4096, 2048, "bf16"): (128, 256, 64),
+    (2048, 4096, 2048, "fp16"): (128, 256, 64),
+    # Tall-M cells (M >= 2*N direction): grow BM.
+    (4096, 2048, 4096, "bf16"): (256, 128, 64),
+    (4096, 2048, 4096, "fp16"): (256, 128, 64),
+    (4096, 2048, 2048, "bf16"): (256, 128, 64),
+    (4096, 2048, 2048, "fp16"): (256, 128, 64),
+    # Square mid-rect: keep tile geometry but lower BK to match cohort H1
+    # (K-828 §5 H1 fall-back row — origami's block_mn_range lacks 192).
+    (3072, 3072, 3072, "bf16"): (128, 128, 64),
+    # Outlier — 6144 with BM=128 dispatches 3x too many waves (K-828 §2 note).
+    (6144, 4096, 4096, "bf16"): (256, 128, 64),
+}
+
+
+_DTYPE_TO_K849_KEY = {
+    torch.bfloat16: "bf16",
+    torch.float16: "fp16",
+}
+
+
+def _k849_lookup_midrect_override(
+    M: int, N: int, K: int, a_dtype: torch.dtype
+) -> Optional[Tuple[int, int, int]]:
+    """Return (BLOCK_M, BLOCK_N, BLOCK_K) override for a K-812 cohort cell.
+
+    Returns None when:
+    - the (M,N,K,dtype) combination is not in the K-828 mid-rect cohort, or
+    - the override has been disabled via TRITONBLAS_DISABLE_K849_MIDRECT_OVERRIDE.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_K849_MIDRECT_OVERRIDE", "") == "1":
+        return None
+    key_dtype = _DTYPE_TO_K849_KEY.get(a_dtype)
+    if key_dtype is None:
+        return None
+    return _K849_MIDRECT_OVERRIDES.get((int(M), int(N), int(K), key_dtype))
 
 
 
@@ -87,6 +149,18 @@ def persistent_matmul_lt(
     BLK_K    = selector.block_k
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
+
+    # K-849: routed mid-rect bf16/fp16 tile override (PMC-mechanistic per K-828).
+    # Applied BEFORE the kernel-launch totals are computed so total_blocks_M /
+    # total_blocks_N / chunk_size all reflect the overridden tile geometry.
+    # Skipped for the work-stealing path because the WS chunking has its own
+    # tile-geometry assumptions and the K-812 cohort was measured on the
+    # non-WS persistent path.
+    _k849_override = None
+    if not (work_stealing and config is not None):
+        _k849_override = _k849_lookup_midrect_override(M, N, K, a.dtype)
+        if _k849_override is not None:
+            BLK_M, BLK_N, BLK_K = _k849_override
 
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)

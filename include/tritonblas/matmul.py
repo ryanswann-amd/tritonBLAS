@@ -36,6 +36,45 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# K-717: Shape-guarded tile override for FP8 e4m3fnuz tall-skinny large-M
+# small-N cohort on MI300X. Origami picks under-staged BK=64 for tiny-N
+# (4096<=M<=16384, N<=32) and an over-tiled BM=BN=256 macrotile for
+# (M=16384, N>=64) — only 8 tiles for N=64 vs 304 CUs (96.7% under-utilized).
+# Both modes are VALU-bound (rocprofv2 VALUUtilization 99.9-100% / MemUnitBusy
+# 0.8-2.3%): the gap is too few MFMA-cycles per K-loop iteration. Mirror of
+# the K-668 FP16/BF16 finding on the same geometry.
+# Tuple = (BLOCK_M, BLOCK_N, BLOCK_K, num_stages, kpack)
+_K717_TILE_TABLE: Dict[Tuple[int, int, int], Tuple[int, int, int, int, int]] = {
+    # Mode A: tiny-N (BLOCK_N=16 padded MFMA, BK=64 too small for K>=2048).
+    (4096,  16, 2048): (32, 16, 128, 2, 1),
+    (4096,  16, 4096): (32, 16, 256, 1, 2),
+    (4096,  32, 2048): (32, 16, 128, 2, 1),
+    (4096,  32, 4096): (32, 16, 256, 1, 2),
+    (8192,  16, 2048): (32, 16, 128, 2, 1),
+    (8192,  16, 4096): (32, 16, 256, 1, 2),
+    (16384, 16, 2048): (32, 16, 128, 2, 1),
+    (16384, 16, 4096): (32, 16, 256, 1, 2),
+    # Mode B: M=16384 BM=BN=256 macrotile cliff (only 8 tiles for N=64,
+    # 16 tiles for N=128, vs 304 CUs).
+    (16384, 64,  2048): (64,  64, 256, 2, 1),
+    (16384, 64,  4096): (64,  64, 256, 2, 1),
+    (16384, 128, 2048): (64, 128, 128, 2, 1),
+    (16384, 128, 4096): (64, 128, 128, 2, 1),
+}
+
+
+def _k717_lookup(M: int, N: int, K: int, a_dtype: torch.dtype):
+    """Return (BM, BN, BK, NS, KP) override for K-717 cohort, or None."""
+    if a_dtype is not torch.float8_e4m3fnuz:
+        return None
+    return _K717_TILE_TABLE.get((M, N, K))
+
+
+def _k717_lds_fits(BM: int, BN: int, BK: int, NS: int, lds_cap: int = 65536) -> bool:
+    """LDS double-buffer budget guard (FP8 = 1 byte/element)."""
+    return NS * (BM * BK + BK * BN) <= lds_cap
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -99,6 +138,18 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+
+    # K-717: shape-guarded tile override (FP8 e4m3fnuz tall-skinny large-M small-N).
+    # LDS-fit guard auto-falls-back to Origami; skip on work-stealing path.
+    _k717_ov = _k717_lookup(M, N, K, a.dtype)
+    if _k717_ov is not None and not work_stealing and _k717_lds_fits(*_k717_ov[:4]):
+        BLK_M, BLK_N, BLK_K, num_stages, kpack = _k717_ov
+        total_blocks_M = triton.cdiv(M, BLK_M)
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
+        even_k = K % BLK_K == 0
+
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

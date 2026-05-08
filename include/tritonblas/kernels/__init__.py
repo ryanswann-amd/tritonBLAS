@@ -36,9 +36,13 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# K-811 split-K=N GEMM (FP32 atomic-add reduction). Routed override for the
+# M=N=2048 large-K fp16/bf16 cohort; see matmul.py _k811_split_k_route.
+from .split_k_gemm import split_k_matmul
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
-           'fp4_matmul', 'stages']
+           'fp4_matmul', 'split_k_matmul', 'stages']

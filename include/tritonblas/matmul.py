@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -10,9 +11,96 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.split_k_gemm import split_k_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# K-811 split-K=2 routed override — M=N=2048, large-K, fp16/bf16
+#
+# Counter-grounded predecessor evidence (K-783, K-784, K-791) shows the
+# M=N=2048 × K∈{4096,8192,16384} × {fp16,bf16} sub-band of the K-570 large-K
+# square cohort is MFMA-issue + LDS-bound in a way no single-knob persistent
+# tile / kpack / NS / NW / WPEU lever can fix:
+#
+#   K-766  block-M/N tile sweep      → 0/N improving variants
+#   K-771  num_warps single-knob     → regressions only
+#   K-772  num_stages single-knob    → regressions only
+#   K-777  kpack=2 (currently shipped) → +0.99 pp geomean (load-bearing baseline)
+#   K-780  multi-knob NW+WPEU        → −5.83 pp geomean
+#   K-798  ws_persistent_matmul WPEU → no win
+#
+# K-795 captured hipBLASLt's runtime algorithm via rocprofv2 + atomic counters
+# + Tensile-kernel-name dump and inferred GSU=2 (split-K=2) on the K=16384
+# cells using the GSUAMBSK kernel; GSU=1 on K=4096/8192. Mechanism: the
+# Tensile kernel chains 28 MFMAs per LDS load (MIWT4_7) and uses LDSB1 row-
+# padded LDS swizzle, which together amortise the atomic-write cost of GSU=2.
+#
+# This integration takes the K-795 split-K=2 prototype kernel verbatim and
+# routes to it from persistent_matmul_lt / streamk_matmul_lt for the 6
+# in-cohort cells, gated by an exact shape+dtype membership predicate.
+#
+# IMPORTANT: K-795's standalone benchmark of the prototype regressed on the
+# K=16384 cells (paired ON/OFF n=50 hot-cache HIP-graph: sk/off ≈ 0.61
+# geomean) and matched (sk=1) on K=4096/8192 (≈0.80–0.93 of OFF). The
+# integration here MUST be re-verified end-to-end on c42/MI300X under the
+# same paired protocol before any default-on landing decision. The default
+# in this commit is **gate OFF** (TB_K811_ENABLE=1 to opt in) so that the
+# routed override can be exercised by the paired-sweep harness without
+# changing the production default behaviour while empirical evidence is
+# being collected.
+#
+# Predicate is exact-membership (no monotone widening):
+#   M==2048 AND N==2048 AND K∈{4096,8192,16384} AND dtype∈{fp16, bf16}
+#
+# Out-of-cohort exclusions match K-777's audit-grounded boundaries:
+#   • M=N∈{4096, 8192}    — K-707/K-612 measured tile/kpack regressions
+#   • M=N=1024            — K-738 leakage cell regressed by −7 to −10 pp
+#   • K∉{4096,8192,16384} — outside the K-570 large-K cohort
+#   • fp32/fp8/int8       — K-654 fp8 has its own selector override path
+# ──────────────────────────────────────────────────────────────────────────────
+
+_K811_LARGEK_SQUARE_2048_KS = frozenset({4096, 8192, 16384})
+
+# Default OFF until the integrated paired-sweep verification (K-811) signs
+# off ON-by-default at +Δpp ship threshold. K-795's standalone prototype
+# benchmark regressed; the integration must be re-verified end-to-end here.
+_K811_ENABLED = os.environ.get("TB_K811_ENABLE", "") == "1"
+
+# Tunables — exposed as environment overrides so the paired sweep harness
+# can exercise alternative split-K factors / tile shapes without code edits.
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+_K811_SPLIT_K   = _env_int("TB_K811_SPLIT_K",   2)
+_K811_BLOCK_M   = _env_int("TB_K811_BLOCK_M", 128)
+_K811_BLOCK_N   = _env_int("TB_K811_BLOCK_N", 128)
+_K811_BLOCK_K   = _env_int("TB_K811_BLOCK_K",  64)
+_K811_GROUP_M   = _env_int("TB_K811_GROUP_M",   8)
+_K811_NUM_WARPS = _env_int("TB_K811_NUM_WARPS", 8)
+_K811_NUM_STAGES= _env_int("TB_K811_NUM_STAGES",2)
+_K811_KPACK     = _env_int("TB_K811_KPACK",     2)
+
+
+def _k811_route_split_k(M, N, K, dtype):
+    """Return True iff the K-811 split-K route should fire for this shape.
+
+    Exact-membership shape/dtype predicate; O(1) integer/dtype check; the
+    frozenset is a module constant. See K-811 ticket note for rationale.
+    """
+    if not _K811_ENABLED:
+        return False
+    if dtype is not torch.float16 and dtype is not torch.bfloat16:
+        return False
+    if M != 2048 or N != 2048:
+        return False
+    if K not in _K811_LARGEK_SQUARE_2048_KS:
+        return False
+    return True
 
 
 _tensor_cache = {}
@@ -81,6 +169,26 @@ def persistent_matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-811 routed override — split-K=2 with FP32 atomic-add reduction.
+    # Bypasses the persistent kernel entirely for the M=N=2048 large-K
+    # fp16/bf16 cohort. Default OFF (TB_K811_ENABLE=1 to opt in). Quantised
+    # paths are NOT routed (split-K kernel does not yet support a/b scales).
+    if (not quantized
+            and bias is None
+            and not work_stealing
+            and _k811_route_split_k(M, N, K, a.dtype)):
+        return split_k_matmul(
+            a, b, c,
+            split_k=_K811_SPLIT_K,
+            block_m=_K811_BLOCK_M,
+            block_n=_K811_BLOCK_N,
+            block_k=_K811_BLOCK_K,
+            group_m=_K811_GROUP_M,
+            num_warps=_K811_NUM_WARPS,
+            num_stages=_K811_NUM_STAGES,
+            kpack=_K811_KPACK,
+        )
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n
@@ -215,6 +323,25 @@ def streamk_matmul_lt(
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-811 routed override — split-K=2 with FP32 atomic-add reduction.
+    # Same predicate as persistent_matmul_lt; the streamk path also lands on
+    # the in-cohort cells when matmul_lt() is called with enable_streamk=True.
+    if (not quantized
+            and bias is None
+            and not work_stealing
+            and _k811_route_split_k(M, N, K, a.dtype)):
+        return split_k_matmul(
+            a, b, c,
+            split_k=_K811_SPLIT_K,
+            block_m=_K811_BLOCK_M,
+            block_n=_K811_BLOCK_N,
+            block_k=_K811_BLOCK_K,
+            group_m=_K811_GROUP_M,
+            num_warps=_K811_NUM_WARPS,
+            num_stages=_K811_NUM_STAGES,
+            kpack=_K811_KPACK,
+        )
 
     BLK_M    = selector.block_m
     BLK_N    = selector.block_n

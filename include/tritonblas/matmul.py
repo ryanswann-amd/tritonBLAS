@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -24,6 +25,125 @@ MAX_BLOCK_SIZE = 65536
 
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
+
+
+# ============================================================================
+# hipBLASLt route-out table (strict-equality dispatch)
+# ============================================================================
+# Background — three layered prior tickets:
+#
+#   K-930  (base): K-913 PMC triage of long-K small-square bf16/fp16 cohort
+#          ((1024,1024,16384), (512,512,16384), (1024,1024,8192) families)
+#          showed Triton's persistent_matmul stalls behind LDS bank conflicts
+#          (SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 1.78 cyc/inst, MFMA% halved).
+#          K-905 falsified all 7 in-Triton candidates. The only viable route
+#          is to dispatch out of the Triton kernel to torch.matmul (which
+#          uses Tensile-only architectural levers — LDSB1 row-pad swizzle,
+#          MIWT4_3 chained MFMA, PGR2_PLR1 — that Triton-AMD codegen
+#          cannot currently emit). 6 entries.
+#
+#   K-984  (extension): K-931 PMC sweep of 40 'always-uncovered' production
+#          shapes identified 8 additional bf16 cells where (a) hipBLASLt
+#          >= 1.15x faster (paired n=105/cell), (b) outside K-919
+#          successful-override corpus, and (c) K-944 has no viable in-kernel
+#          lever (DEFER NOT_LDSBOUND or unaddressed). Geomean 1.587x,
+#          5.989% production traffic captured. 8 entries.
+#
+#   K-999  (this extension): K-994 was supposed to apply the K-973
+#          override_eligibility pre-flight filter (5-rule extended) to the
+#          K-944 ranked candidate slate to partition into ELIGIBLE (ship the
+#          in-kernel lever) and REJECTED (no in-kernel knob will help —
+#          route OUT). Per the K-961/K-965/K-979 synthesis, 7 consecutive
+#          guarded-override prototypes (K-915/K-923/K-927/K-935/K-937/K-940/
+#          K-949) all NO-LANDed because they targeted non-bottleneck knobs
+#          or leaked into LAND cells; the K-973 Rule 4 (aspect-bucket
+#          mismatch / R-936/R-951) flags this failure mode pre-flight.
+#          7 K-944 C1A SHIP/SHIP_VERIFY/SHIP_WATCH cells trip Rule 4 — the
+#          aspect-mismatch C1A kpack=2 lever K-944 chose will NO-LAND per
+#          the K-979 P5 4-clause predicate cross-check. Route those cells
+#          to hipBLASLt instead. Geomean 1.513x (paired, n=105/cell, K-931
+#          PMC), per-shape range 1.202x .. 3.158x. 7 entries.
+#
+# Layered guards (per K-883):
+#   L1: strict-equality dispatch table on (M, N, K, dtype)
+#   L2: dtype allowlist implicit in table entries (bf16, fp16 only)
+#   L3: env killswitch read every call (TRITONBLAS_DISABLE_HBL_ROUTE=1)
+#   L4: LDS-budget knob lineage — N/A for route-out (kernel never runs)
+#   L5: composability guard — defer when caller asks for streamk/work-stealing
+#   L6: routing-trace counters
+
+_HBL_ROUTE_DISABLE_ENV = "TRITONBLAS_DISABLE_HBL_ROUTE"
+
+# K-930 base: long-K small-square LDS-bound cohort (6 entries, bf16+fp16).
+_HBL_ROUTE_TABLE = frozenset({
+    (1024, 1024, 16384, "torch.bfloat16"),
+    (1024, 1024, 16384, "torch.float16"),
+    ( 512,  512, 16384, "torch.bfloat16"),
+    ( 512,  512, 16384, "torch.float16"),
+    (1024, 1024,  8192, "torch.bfloat16"),
+    (1024, 1024,  8192, "torch.float16"),
+    # ----------------------------------------------------------------------
+    # K-984: K-931 'always-uncovered' bf16 cells where (a) hipBLASLt >=1.15x
+    # faster than tritonblas (paired n=105/cell), (b) outside any K-919
+    # successful-override corpus, (c) K-944 has no viable in-kernel lever.
+    # 8 cells, geomean 1.587x, 5.989% of production GEMM dispatches.
+    ( 2304,  2048,  4800, "torch.bfloat16"),  # S04 hbl/tb=1.203x — DEFER NOT_LDSBOUND
+    (  512,   192,  2048, "torch.bfloat16"),  # S10 hbl/tb=1.204x — DEFER NOT_LDSBOUND
+    (  768,  1792,  5972, "torch.bfloat16"),  # S17 hbl/tb=2.048x — NOT_IN_K944
+    ( 5972,  1792,   768, "torch.bfloat16"),  # S18 hbl/tb=1.301x — NOT_IN_K944
+    (   30, 786432,  200, "torch.bfloat16"),  # S36 hbl/tb=3.811x — QUARANTINE HBM crossover
+    (10112,  2048,  1024, "torch.bfloat16"),  # S27 hbl/tb=1.535x — DEFER NOT_LDSBOUND
+    (12160,  2048,  1024, "torch.bfloat16"),  # S28 hbl/tb=1.403x — DEFER NOT_LDSBOUND
+    ( 6016,  2048,  1024, "torch.bfloat16"),  # S25 hbl/tb=1.270x — NOT_IN_K944
+    # ----------------------------------------------------------------------
+    # K-999: K-944-slate cells REJECTED by K-973 override_eligibility filter
+    # (Rule 4 aspect-bucket mismatch — R-936/R-951). K-944 originally tagged
+    # these as SHIP / SHIP_VERIFY / SHIP_WATCH for the C1A kpack=2 lever, but
+    # the K-961/K-965/K-979 synthesis (which postdates K-944) shows the
+    # square-cohort (K-866) kpack=2 lever does not transfer to skinny / mid-
+    # rect (aspect >= 2, min(M,N) <= 1024) buckets — same NO-LAND mode that
+    # falsified K-915/K-923/K-927/K-935/K-937/K-940/K-949. Route OUT instead
+    # of trying the doomed in-kernel lever. 7 cells, geomean 1.513x (paired
+    # n=105/cell, K-931 PMC), range 1.202x .. 3.158x.
+    # PMC bottleneck per cell: LDS_BANK_CONFLICT (lds_bc >= 0.7 cyc/inst);
+    # kpack=2 lever falsified by aspect-bucket mismatch + K-979 P5 predicate.
+    ( 1024,   2048,  1240, "torch.bfloat16"),  # S40 hbl/tb=3.158x — SHIP_VERIFY
+    (  256,   1792,  2048, "torch.bfloat16"),  # S05 hbl/tb=1.424x — SHIP
+    ( 1024,   2048,  6016, "torch.bfloat16"),  # S22 hbl/tb=1.388x — SHIP
+    ( 1024,   2048,  8064, "torch.bfloat16"),  # S23 hbl/tb=1.365x — SHIP
+    (  768,   3072,  4480, "torch.bfloat16"),  # S21 hbl/tb=1.365x — SHIP
+    (  736,   1792,   736, "torch.bfloat16"),  # S06 hbl/tb=1.301x — SHIP
+    (  256, 409600,   384, "torch.bfloat16"),  # S20 hbl/tb=1.202x — SHIP_WATCH
+})
+
+# L6: routing-trace counters (per K-883 L6).
+HBL_ROUTE_FIRED_COUNT = 0
+HBL_ROUTE_DECLINED_STREAMK_COUNT = 0
+HBL_ROUTE_KILLSWITCH_COUNT = 0
+
+
+def _should_route_to_hbl(M: int, N: int, K: int, a_dtype, b_dtype,
+                         enable_streamk: bool, work_stealing: bool) -> bool:
+    """Return True iff this dispatch should be routed to torch.matmul (hipBLASLt).
+
+    Guarded-override per K-883 Variant A:
+      L1+L2: strict-equality (M, N, K, dtype) table lookup.
+      L3:    env killswitch read every call.
+      L5:    defer when caller explicitly requested streamk / work-stealing.
+    """
+    global HBL_ROUTE_KILLSWITCH_COUNT, HBL_ROUTE_DECLINED_STREAMK_COUNT
+    # L3: hard killswitch always wins.
+    if os.environ.get(_HBL_ROUTE_DISABLE_ENV) == "1":
+        HBL_ROUTE_KILLSWITCH_COUNT += 1
+        return False
+    # L5: composability — caller knows best when they ask for streamk paths.
+    if enable_streamk or work_stealing:
+        HBL_ROUTE_DECLINED_STREAMK_COUNT += 1
+        return False
+    # L1+L2: strict equality on shape and dtype (same dtype on both operands).
+    if a_dtype is not b_dtype:
+        return False
+    return (M, N, K, str(a_dtype)) in _HBL_ROUTE_TABLE
 
 
 def _maybe_wrap(fn, probe_tensor):
@@ -480,6 +600,22 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # K-930 / K-984 / K-999: hipBLASLt route-out for shapes where Triton's
+    # codegen pays a fundamental gap (LDS bank conflict, aspect-bucket-mismatch
+    # kpack lever, HBM-pressure structural). Strict-equality dispatch table —
+    # OOT shapes fall through unchanged. See module-top comment for taxonomy.
+    if a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]:
+        _M, _K = a.shape
+        _, _N = b.shape
+        if _should_route_to_hbl(_M, _N, _K, a.dtype, b.dtype,
+                                bool(enable_streamk), bool(work_stealing)):
+            global HBL_ROUTE_FIRED_COUNT
+            HBL_ROUTE_FIRED_COUNT += 1
+            if out is None:
+                return torch.matmul(a, b)
+            torch.matmul(a, b, out=out)
+            return out
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

@@ -218,7 +218,14 @@ class GemmContext:
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
         if self.quantized:
-            acc += tl.dot(a, b, out_dtype=tl.int32)
+            # K-605 fix: out_dtype was hard-coded to tl.int32 here, which
+            # mismatches the float32 accumulator the persistent kernel
+            # correctly initializes for FP8 inputs (acc_dtype is int32 only for
+            # INT8). The mismatch made MLIR abort during constant folding inside
+            # the loop pipeliner for any FP8 e4m3fnuz / e5m2fnuz dispatch.
+            # Using self.acc_dtype is bit-identical for INT8 (acc_dtype is
+            # already tl.int32) and unblocks FP8 on the persistent_matmul_lt path.
+            acc += tl.dot(a, b, out_dtype=self.acc_dtype)
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
         

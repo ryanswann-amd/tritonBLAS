@@ -36,6 +36,47 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# K-657 ablation finding (HIP-graph kernel-only A/B, 5 trials, 50-op chain x 3
+# replays/cell on MI300X / gfx942 / ROCm 7.2). On the K-625 large-K square FP16/
+# BF16 cohort (M=N in {1024,2048,4096} x K in {4096,8192,16384}), kpack=2 is the
+# only K-657 variant that compiles cohort-wide (V1 num_stages+1 and V3 combined
+# both LDS-overflow at 131072 > 65536 on every shape). kpack=2 splits cleanly by
+# M-dimension:
+#   M=N=1024: REGRESSES +1.7% to +4.5%   -> stay on kpack=1
+#   M=N=2048: NON-REGRESSING; -1.29% to +0.7% per cell, mean delta ~-0.74%
+#            (4/6 cells statistically significant improvement at |t|>=3.7,
+#            BF16 cells consistently improve)                  -> use kpack=2
+#   M=N=4096: REGRESSES +8.85% to +11.56% at |t| up to +195.5  -> stay on kpack=1
+# We therefore narrow K-667's proposed gate to the M=N=2048 sub-cohort where
+# the empirical delta is strictly non-regressing within K-657 noise. This honours
+# the ">=2 percent geomean" guard on the cohort it targets without violating it
+# on the M=N=1024 / M=N=4096 rows (which would be net +5% to +10% kernel-time
+# regressions). Mechanism: at BLOCK_K=64 BLOCK_M=BLOCK_N=128 (Origami's pick
+# for M=N=2048), kpack=2 packs two K=8 mfma rows into one ds_read_b128, halving
+# LDS-read traffic; the M=4096 tile (BLOCK_M=BLOCK_N=256) already saturates
+# VGPR pressure so the extra packed regs spill, and the M=1024 tile is too
+# bandwidth-bound to amortise the swizzle. Tied to rocprofv3 LDS-bank-conflict
+# / VALU-busy counters in K-625.
+_K657_KPACK2_M = 2048
+_K657_KPACK2_K_VALUES = (4096, 8192, 16384)
+_K657_KPACK2_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _k657_kpack_override(M: int, N: int, K: int, dtype) -> int:
+    """Return the kpack value for the K-657 large-K square FP16/BF16 cohort.
+
+    Returns 2 only for the empirically non-regressing slice
+    (M==N==2048, K in {4096,8192,16384}, dtype in {fp16,bf16}); otherwise 1.
+    """
+    if dtype not in _K657_KPACK2_DTYPES:
+        return 1
+    if M != N or M != _K657_KPACK2_M:
+        return 1
+    if K not in _K657_KPACK2_K_VALUES:
+        return 1
+    return 2
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -98,7 +139,9 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-667 narrow gate: kpack=2 only on the empirically non-regressing slice
+    # of the K-657 cohort (see _k657_kpack_override docstring above).
+    kpack = _k657_kpack_override(M, N, K, a.dtype)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +287,9 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-667 narrow gate: kpack=2 only on the empirically non-regressing slice
+    # of the K-657 cohort (see _k657_kpack_override docstring above).
+    kpack = _k657_kpack_override(M, N, K, a.dtype)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

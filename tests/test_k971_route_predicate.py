@@ -88,6 +88,32 @@ K950_LAND_CELLS = [
     ("L09", 1024, 1024, 16384, torch.float16,  "C9-cohortA-longK-HBLroute"),
 ]
 
+# K-950 LAND cells whose route-OUT verdict was OVERRIDDEN by a later
+# PMC-driven productionisation that out-measured the original K-950 audit.
+# These cells DO route-out today (correctly, per the newer audit) but the
+# `test_full_dispatch_only_routes_known_anchors` allowlist mechanism lives
+# in this test file and was authored before P12/P24 existed.  Per K-1717
+# Testing-Zealot (RETRY) directive: prefer a tracked xfail with explicit
+# reference over silently green-washing the failures or weakening the
+# test.  Each entry: cid -> (owner_ticket, owner_predicate, audit_url).
+#
+#   L05 (4096,4096,4096 bf16) -> K-1361 P12 `square_mid` route-OUT
+#       Audit: K-913 §3 dtype-invariance + K-1361 PMC-driven 4-cell
+#       square_mid frozenset (commit b56a3f8, productionised 2025-12).
+#   L08 (4096,4096,8192 bf16) -> K-1566 P24 `skinny_N4096` route-OUT
+#       Audit: K-1551 N=4096 K-COMPLEMENT paired n=30 PMC sweep
+#       (commit 788412b, productionised 2026-02).
+#
+# Both predicates are checked-in well before K-1717 — confirmed via
+# `git log -- include/tritonblas/_route_predicate.py | head -40` shows
+# the introducing commits.  The K-950 LAND-vs-route conflict here is a
+# documented stewardship gap in the K-950 allowlist and is tracked for
+# fold-up in a future minor refactor of this fixture.
+K950_LAND_OVERRIDDEN_BY_LATER_AUDIT = {
+    "L05": "K-1361 P12 (square_mid 4096^3 bf16, commit b56a3f8)",
+    "L08": "K-1566 P24 (skinny_N4096 K-COMPL, commit 788412b)",
+}
+
 # Tuples where K-905 anchor table intentionally routes to hbl despite the
 # K-950 LAND verdict (K-905 measurement overrides — documented in the PR
 # description).
@@ -145,13 +171,41 @@ def test_full_dispatch_fires_on_k984_k989_union(sid, M, N, K, src):
         enable_streamk=False, work_stealing=False) is True
 
 
-@pytest.mark.parametrize("cid,M,N,K,dtype,cohort", K950_LAND_CELLS,
-                         ids=[c[0] for c in K950_LAND_CELLS])
+def _k950_land_param(c):
+    """Wrap each K-950 LAND row as a pytest.param.  Cells whose route-out
+    verdict has been OVERRIDDEN by a later PMC-driven productionisation
+    (see K950_LAND_OVERRIDDEN_BY_LATER_AUDIT) are marked xfail with an
+    explicit owner-ticket reference per K-1717 Testing-Zealot directive
+    (RETRY round 2): no silent green-washing of pre-existing failures."""
+    cid = c[0]
+    overrider = K950_LAND_OVERRIDDEN_BY_LATER_AUDIT.get(cid)
+    if overrider is not None:
+        return pytest.param(
+            *c, id=cid,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(f"K-950 {cid} routed-out by later audit: "
+                        f"{overrider}.  Verdict superseded; track in "
+                        f"future K-950 allowlist refresh."),
+            ),
+        )
+    return pytest.param(*c, id=cid)
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,dtype,cohort",
+    [_k950_land_param(c) for c in K950_LAND_CELLS],
+)
 def test_full_dispatch_only_routes_known_anchors(cid, M, N, K, dtype, cohort):
     """Full dispatch may route K-950 LAND cells ONLY if they match a known
     K-905/K-971 anchor in the strict-equality allowlist. Any other route is
     a regression (predicate widened to leak, or new entry slipped into the
-    table)."""
+    table).
+
+    Two cells (L05, L08) are xfail-marked because later PMC-driven
+    productionisations (K-1361 P12, K-1566 P24) intentionally route
+    them based on newer audit evidence.  See
+    `K950_LAND_OVERRIDDEN_BY_LATER_AUDIT` for the per-cell owner ticket."""
     routed = _k971_route_to_hbl(
         M, N, K, dtype, dtype,
         enable_streamk=False, work_stealing=False)

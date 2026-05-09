@@ -37,7 +37,8 @@ from tritonblas._route_predicate import (
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
     _K1205_EN3_ADMITS_8,
-    _K1219_E3_NFLOOR256_ADMITS_7,
+    _K1219_E3_NFLOOR256_ADMITS_6,
+    _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -687,10 +688,11 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_43_after_k1219_extension():
+def test_k1144_p8_envelope_size_is_exactly_42_after_k1302_guarded_composition():
     """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
-    E_N3 N=128 + 7 K-1219/K-1240/K-1266 E3 N=256 = 43 cells.  Any silent
-    edit changes this count and trips this canary.
+    E_N3 N=128 + 6 K-1219/K-1240/K-1266 E3 N=256 (under K-1302 GUARDED
+    composition) = 42 cells.  Any silent edit changes this count and
+    trips this canary.
 
     K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
     (E2_I4 single K-interior admit + 2 M-axis admits at K=1024); K-1231 /
@@ -698,25 +700,34 @@ def test_k1144_p8_envelope_size_is_exactly_43_after_k1219_extension():
     M from K-1121 anchor M-set, K in K-1144 K-set {256, 768, 1024}, bf16),
     decisively diverging from K-1161's K-axis NEGATIVE_AXIS_PIVOT (88.9%
     N-axis admit vs 16.7% K-axis admit on the same hardware/methodology);
-    K-1219/K-1240/K-1266 (this PR's stack mate) extends by 7 N-axis-
-    validated cells at N=256, K-1131-style anchor projections of K-1121
-    PMC anchors at N=256.
+    K-1219/K-1240/K-1266 (this PR's stack mate) candidate-extends by 7
+    N-axis-validated cells at N=256, K-1131-style anchor projections of
+    K-1121 PMC anchors at N=256.
 
     K-1302 (composition) verifies on rad-mi300x-1 that the K-1205 N=128
-    sub-set and the K-1219 N=256 sub-set compose ADDITIVELY: the two
-    sub-sets are disjoint by N-axis projection, and the marginal speedup
-    of the 7-cell N=256 cohort layered on top of K-1286's stacked dispatch
-    matches the K-1266 single-axis productionization within CI95.
+    sub-set and the K-1219 N=256 sub-set compose ADDITIVELY at the
+    predicate level (disjoint by N-axis projection), but paired n=30 HIP-
+    graph hot-cache measurement on the composed envelope detected one
+    interaction-time per-cell regression at the K-1142 M-floor:
+    E3_S24_N256 (M=4480, N=256, K=768) measured 0.83x CI95 [0.722, 0.935]
+    under the K-1302 composition vs K-1266's standalone parity 1.004x
+    [0.985, 1.028].  Per the K-1302 PRD fallback ("if interaction
+    regression detected, document the conflict and propose a guarded
+    composition"), E3_S24_N256 is DROPPED from the K-1302 admit set
+    (7 -> 6 cells), demoted to _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266.
 
-    See the _K1205_EN3_ADMITS_8 and _K1219_E3_NFLOOR256_ADMITS_7 docstrings
-    in _route_predicate.py for the full mechanism narrative and the
-    EN_K768_S24 (M=4480 N=128) carve-out."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43
+    See the _K1205_EN3_ADMITS_8, _K1219_E3_NFLOOR256_ADMITS_6, and
+    _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266 docstrings in
+    _route_predicate.py for the full mechanism narrative and the
+    EN_K768_S24 (M=4480 N=128) plus E3_S24_N256 (M=4480 N=256) M-floor
+    carve-outs."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 42
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
-    assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
+    assert len(_K1219_E3_NFLOOR256_ADMITS_6) == 6
+    assert len(_K1302_COMPOSITION_CARVE_OUTS_FROM_K1266) == 1
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1435,18 +1446,27 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
 
 # ---------------------------------------------------------------------------
 # K-1219 / K-1240 / K-1266 / K-1302 E3 N=256 P8 envelope extension pin tests
-# (7 admit cells at N=256, layered on K-1286's stacked dispatch chain).
-# K-1302 composition: K-1286 (P8=36 with K-1205 N=128 admits + E1 stacked)
-# + K-1266 (7 K-1219 N=256 admits) -> K-1302 (P8=43 with both N=128 and
-# N=256 sub-sets, E1 stacked).  The two N-axis sub-sets are disjoint by
-# construction (N=128 vs N=256), so the composition is additive.
+# (6 admit cells at N=256 under the K-1302 GUARDED composition, layered on
+# K-1286's stacked dispatch chain).  K-1302 composition: K-1286 (P8=36 with
+# K-1205 N=128 admits + E1 stacked) + K-1266 (7 K-1219 N=256 admits) ->
+# K-1302 (P8=42 with both N=128 and N=256 sub-sets, E1 stacked, with
+# E3_S24_N256 demoted to the composition carve-out manifest after the
+# composed-envelope measurement detected a >5% per-cell regression at the
+# K-1142 M-floor).  The two N-axis sub-sets are disjoint by construction
+# (N=128 vs N=256), so the composition is additive at the predicate level;
+# the M-floor interaction at E3_S24_N256 is a measurement-time finding
+# guarded out per the K-1302 PRD fallback.
 # ---------------------------------------------------------------------------
 
 
-K1219_E3_NFLOOR256_ADMITS_7_LIST = [
+# Source-of-truth fixture for the GUARDED K-1302 admit set (6 cells; the
+# K-1266 candidate cell E3_S24_N256 is demoted at compose time).  Per-cell
+# tb/hbl medians are the K-1219 single-axis MI300X measurements (used for
+# manifest provenance pin -- the K-1302-composed values are recorded in
+# output/k1302_summary.json on the K-1302 branch).
+K1219_E3_NFLOOR256_ADMITS_6_LIST = [
     # (cid, M, N, K, hbl_tb_med (rad-mi300x-1 K-1219), CI95_lo)
     ("E3_S18_N256",   5972, 256,  768, 1.227, 1.226),
-    ("E3_S24_N256",   4480, 256,  768, 1.149, 1.140),
     ("E3_S25_N256",   6016, 256, 1024, 1.215, 1.206),
     ("E3_S30_N256",  16256, 256, 1024, 2.274, 2.260),
     ("E3_S37_N256",  25600, 256,  256, 1.144, 1.140),
@@ -1455,28 +1475,40 @@ K1219_E3_NFLOOR256_ADMITS_7_LIST = [
 ]
 
 
-def test_k1219_e3_nfloor256_admits_size_is_exactly_7():
-    """The K-1219 / K-1240 / K-1266 N=256 anchor-projected sub-set must
-    contain exactly 7 cells (K-1131-style anchor projections of K-1121
-    PMC anchors {S18, S24, S25, S30, S37, S39} + K-1175 E2_M1 admit)."""
-    assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
+def test_k1219_e3_nfloor256_admits_size_is_exactly_6_under_k1302_guard():
+    """The K-1302 GUARDED admit set must contain exactly 6 cells (the
+    K-1266 candidate set of 7 minus E3_S24_N256, demoted at compose time
+    per the >5% per-cell regression gate)."""
+    assert len(_K1219_E3_NFLOOR256_ADMITS_6) == 6
     expected = {
         ( 5972, 256,  768, "torch.bfloat16"),
-        ( 4480, 256,  768, "torch.bfloat16"),
         ( 6016, 256, 1024, "torch.bfloat16"),
         (16256, 256, 1024, "torch.bfloat16"),
         (25600, 256,  256, "torch.bfloat16"),
         (49152, 256,  256, "torch.bfloat16"),
         (10112, 256, 1024, "torch.bfloat16"),
     }
-    assert set(_K1219_E3_NFLOOR256_ADMITS_7) == expected
+    assert set(_K1219_E3_NFLOOR256_ADMITS_6) == expected
+
+
+def test_k1302_composition_carveout_demotes_e3_s24_n256_only():
+    """K-1302 composition carve-out manifest must contain exactly the
+    one K-1266 candidate cell that failed the >5% per-cell gate under
+    the composed envelope: E3_S24_N256 (M=4480, N=256, K=768, bf16).
+    K-1266 standalone measured this cell at parity (1.004x); under
+    K-1302 composition (with K-1216 E1 stacking and 8 K-1205 N=128
+    admits already shipped), paired n=30 on rad-mi300x-1 measured 0.83x
+    CI95 [0.722, 0.935] -- a true >5% per-cell regression."""
+    assert len(_K1302_COMPOSITION_CARVE_OUTS_FROM_K1266) == 1
+    assert (4480, 256, 768, "torch.bfloat16") in (
+        _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266)
 
 
 def test_k1219_e3_admits_all_have_n_256():
     """The K-1219 N=256 sub-set is purely an N-axis projection; every
     cell must have N=256 (anchor for the disjointness vs the K-1205
     N=128 sub-set)."""
-    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_7:
+    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_6:
         assert N == 256, (
             f"K-1219 E3 admit ({M}, {N}, {K}) does not have N=256; the "
             "N-floor relaxation tier defines this sub-set.")
@@ -1485,8 +1517,11 @@ def test_k1219_e3_admits_all_have_n_256():
 def test_k1219_e3_admits_all_have_m_at_least_4480():
     """K-1142 carve-out: every K-1219 N=256 admit must have M >= 4480
     (the K-1121 anchor S24 M-floor); cells below this floor sit in the
-    small-M Triton-favoured tail per K-1161 / K-1205."""
-    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_7:
+    small-M Triton-favoured tail per K-1161 / K-1205.  Note: under the
+    K-1302 guarded composition the M-floor cell E3_S24_N256 (M=4480) is
+    demoted, but the gate itself is M >= 4480 (not M > 4480) since the
+    K-1142 carve-out is a >= condition."""
+    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_6:
         assert M >= 4480, (
             f"K-1219 E3 admit ({M}, {N}, {K}) violates the K-1142 "
             "M-floor (M >= 4480).")
@@ -1496,18 +1531,19 @@ def test_k1219_e3_admits_dtype_is_bf16_only():
     """K-1219 / K-1240 / K-1266 measurement scope is bf16 only; the
     strict-equality predicate must reject any non-bf16 query for these
     cells (consistent with the rest of the P8 envelope)."""
-    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_7:
+    for (M, N, K, dtype) in _K1219_E3_NFLOOR256_ADMITS_6:
         assert dtype == "torch.bfloat16"
 
 
 @pytest.mark.parametrize("cid,M,N,K,hbl_tb_med,ci95_lo",
-                         K1219_E3_NFLOOR256_ADMITS_7_LIST)
+                         K1219_E3_NFLOOR256_ADMITS_6_LIST)
 def test_k1219_e3_admit_cell_routes_to_hbl(cid, M, N, K, hbl_tb_med, ci95_lo):
-    """Each K-1219 N=256 admit cell must route to hipBLASLt via the
-    P8 strict-equality predicate.  K-1240 + K-1266 cross-arch
-    confirmation pins the manifest provenance.  K-1302 verifies the
-    composition is additive on rad-mi300x-1 (no interaction with the
-    K-1205 N=128 sub-set or with K-1216's E1 stacking)."""
+    """Each K-1219 N=256 admit cell (post-K-1302 guard) must route to
+    hipBLASLt via the P8 strict-equality predicate.  K-1240 + K-1266
+    cross-arch confirmation pins the manifest provenance.  K-1302 verifies
+    the composition is additive at the predicate level on rad-mi300x-1
+    for these 6 cells (the 7th K-1266 candidate, E3_S24_N256, is demoted
+    at compose time per the K-1302 guarded-composition fallback)."""
     decision = _k971_route_to_hbl(
         M, N, K,
         a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
@@ -1518,14 +1554,31 @@ def test_k1219_e3_admit_cell_routes_to_hbl(cid, M, N, K, hbl_tb_med, ci95_lo):
         f"{ci95_lo:.3f}.")
 
 
+def test_k1302_composition_carveout_cell_does_not_route_to_hbl():
+    """The K-1302 composition-time carve-out cell E3_S24_N256 (M=4480,
+    N=256, K=768, bf16) must NOT route to hipBLASLt under the K-1302
+    composed envelope.  This is the no-leak pin for the guarded
+    composition: the demoted cell falls through P8 strict-equality, then
+    falls through E1 (E1 N-set {1792, 2048, 3072} excludes N=256), then
+    falls through to in-kernel tritonblas dispatch."""
+    decision = _k971_route_to_hbl(
+        4480, 256, 768,
+        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert decision is False, (
+        "K-1302 composition carve-out cell E3_S24_N256 (4480x256x768) "
+        "leaked into the P8 admit set; the K-1302 guarded-composition "
+        "demotion requires this cell stay OUT.")
+
+
 def test_k1219_e3_p8_e1_stack_no_double_route_for_n256_admits():
     """K-1216 stacked-dispatch invariant preserved: every K-1219 E3
-    admit fires P8 (strict equality), and -- because all 7 admits have
+    admit fires P8 (strict equality), and -- because all admits have
     N=256 which is OUTSIDE the K-1216 E1 envelope's N-set
     {1792, 2048, 3072} -- E1 must NOT fire on these cells (E1 is a
     no-op for N=256 by design).  Confirms K-1216's E1 stacking is
     untouched by the K-1219 P8 extension."""
-    for (M, N, K, _dtype) in _K1219_E3_NFLOOR256_ADMITS_7:
+    for (M, N, K, _dtype) in _K1219_E3_NFLOOR256_ADMITS_6:
         p8_says = _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
         e1_says = R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16)
         assert p8_says is True, (
@@ -1540,15 +1593,19 @@ def test_k1302_composition_additive_n128_n256_subsets_disjoint():
     """K-1302 composition invariant: the K-1205 N=128 sub-set and the
     K-1219 N=256 sub-set are disjoint by N-axis construction.  This is
     the foundation of the additive-composition claim
-    (R-1302.N-AXIS-COMPOSITION-IS-ADDITIVE-WHEN-SUB-SETS-ARE-DISJOINT-BY-N).
+    (R-1302.N-AXIS-COMPOSITION-IS-ADDITIVE-WHEN-SUB-SETS-ARE-DISJOINT-BY-N)
+    at the PREDICATE level.  The measurement-time M-floor interaction at
+    E3_S24_N256 is guarded out separately via
+    _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266; that guard is independent
+    of (and consistent with) this disjointness invariant.
     """
-    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_6), (
         "K-1302 composition violation: K-1205 N=128 sub-set overlaps "
         "K-1219 N=256 sub-set; the two sub-sets must live on disjoint "
         "N tiers.")
     # The two sub-sets must occupy disjoint N tiers.
     n128 = {n for (_m, n, _k, _d) in _K1205_EN3_ADMITS_8}
-    n256 = {n for (_m, n, _k, _d) in _K1219_E3_NFLOOR256_ADMITS_7}
+    n256 = {n for (_m, n, _k, _d) in _K1219_E3_NFLOOR256_ADMITS_6}
     assert n128 == {128}
     assert n256 == {256}
 
@@ -1556,10 +1613,11 @@ def test_k1302_composition_additive_n128_n256_subsets_disjoint():
 def test_k1302_does_not_disturb_existing_p8_36_cell_envelope():
     """K-1286 -> K-1302 invariance check: the K-1286 36-cell P8 envelope
     (13 K-1121 + 12 K-1131 + 3 K-1161 E2 + 8 K-1205 N=128) is preserved
-    exactly -- K-1219 strict-equality union ADDS 7 cells without
-    re-measuring or modifying any existing cell.  This is R-1184.STRICT-
-    EQUALITY-UNION-PROVES-EXISTING-CELL-INVARIANCE-WITHOUT-RE-MEASUREMENT
-    in test form, applied to the K-1302 composition."""
+    exactly -- K-1219 strict-equality union ADDS 6 cells (under the
+    K-1302 guarded composition) without re-measuring or modifying any
+    existing cell.  This is R-1184.STRICT-EQUALITY-UNION-PROVES-EXISTING-
+    CELL-INVARIANCE-WITHOUT-RE-MEASUREMENT in test form, applied to the
+    K-1302 composition."""
     pre_k1219 = (
         _K1121_P8_ANCHORS_13
         | _K1131_P8_NEIGHBORS_12
@@ -1570,9 +1628,10 @@ def test_k1302_does_not_disturb_existing_p8_36_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1286 P8 cell {cell} dropped from K-1302 envelope; "
             "K-1219 must be strict-equality union only.")
-    # Symmetric: every new cell added by K-1219 must be in E3 N=256 set.
+    # Symmetric: every new cell added by K-1219 must be in the K-1302
+    # guarded admit set (E3 N=256, 6 cells under the guard).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1219
-    assert delta == _K1219_E3_NFLOOR256_ADMITS_7, (
+    assert delta == _K1219_E3_NFLOOR256_ADMITS_6, (
         "Cells added to P8 envelope past K-1286 do not match "
-        "_K1219_E3_NFLOOR256_ADMITS_7 exactly; an unattributed cell "
+        "_K1219_E3_NFLOOR256_ADMITS_6 exactly; an unattributed cell "
         "crept in.")

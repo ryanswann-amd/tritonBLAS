@@ -507,11 +507,11 @@ _K1205_EN3_ADMITS_8 = frozenset({
     # in tests/test_k971_route_predicate.py for the no-leak pin.
 })
 
-# K-1219 / K-1240 / K-1266 — E3 N-floor=256 anchor-projected admits (7
-# cells).  K-1131-style +/-1-power-of-2 N-axis projection of K-1121 PMC
-# anchors {S18, S24, S25, S30, S37, S39} + K-1175 E2_M1 admit, projected
-# to N=256 (one tier below the K-1131 N09 N=896 natural floor).  Per
-# K-1142 carve-out, M >= 4480 on every cell.
+# K-1219 / K-1240 / K-1266 / K-1302 — E3 N-floor=256 anchor-projected
+# admits (6 cells, GUARDED composition).  K-1131-style +/-1-power-of-2
+# N-axis projection of K-1121 PMC anchors {S18, S25, S30, S37, S39} +
+# K-1175 E2_M1 admit, projected to N=256 (one tier below the K-1131 N09
+# N=896 natural floor).  Per K-1142 carve-out, M >= 4480 on every cell.
 #
 # Cross-arch verification (K-1219 + K-1240 paired n=30 HIP-graph
 # hot-cache, B=10000 percentile-CI95 bootstrap on tb_time/hbl_time):
@@ -529,14 +529,29 @@ _K1205_EN3_ADMITS_8 = frozenset({
 # K-1266 (single-axis productionisation) verified PASS on rad-mi300x-1
 # at paired n=30 (cohort geomean tb/hbl 1.255x; 5 carve-out negative
 # controls all pass the no-leak check).  K-1302 (this composition)
-# layers these 7 cells on top of K-1286's stacked dispatch (E1 +
-# K-1175 + 8 K-1205 N=128 admits) -- the N=128 and N=256 sub-sets are
-# disjoint by N-axis construction (R-1302.N-AXIS-COMPOSITION-IS-ADDITIVE-
-# WHEN-SUB-SETS-ARE-DISJOINT-BY-N).
-_K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
+# layers these cells on top of K-1286's stacked dispatch (E1 + K-1175 +
+# 8 K-1205 N=128 admits) -- the N=128 and N=256 sub-sets are disjoint
+# by N-axis construction (R-1302.N-AXIS-COMPOSITION-IS-ADDITIVE-WHEN-
+# SUB-SETS-ARE-DISJOINT-BY-N).
+#
+# K-1302 GUARDED COMPOSITION (R-1302.M-FLOOR-INTERACTION-WITH-STACKED-
+# ENVELOPE-DEMOTES-S24-AT-COMPOSITION-TIME):  the K-1219 candidate cell
+# E3_S24_N256 (M=4480, N=256, K=768) is DROPPED from the K-1302 admit
+# set.  Standalone K-1266 measured this cell at parity (1.004x CI95
+# [0.985, 1.028]); under the K-1302 composition (with K-1216 E1 stacking
+# and the 8 K-1205 N=128 admits already shipped), paired n=30 on rad-
+# mi300x-1 measured 0.83x CI95 [0.722, 0.935] -- a true >5% per-cell
+# regression on what should otherwise have been a parity cell.  Per the
+# K-1302 PRD fallback ("if interaction regression detected, document the
+# conflict and propose a guarded composition"), we admit the 6 cells
+# that pass the >=0.95x per-cell gate under composition and demote
+# E3_S24_N256 to the carve-out manifest as a documented composition-time
+# regression at the K-1142 M-floor.  The cell remains a K-1266 single-
+# axis admit on the K-1219 measurement; only the K-1302 composed envelope
+# excludes it.
+_K1219_E3_NFLOOR256_ADMITS_6 = frozenset({
     # ----- E3 N=256 anchor-projected admits (M >= 4480 per K-1142) -----
     ( 5972,  256,  768, "torch.bfloat16"),  # E3_S18_N256
-    ( 4480,  256,  768, "torch.bfloat16"),  # E3_S24_N256
     ( 6016,  256, 1024, "torch.bfloat16"),  # E3_S25_N256  MI300X tb/hbl 1.215 CI95=[1.206,1.224] / MI325X 1.249 / MI355X 1.281
     (16256,  256, 1024, "torch.bfloat16"),  # E3_S30_N256  MI300X tb/hbl 2.274 CI95=[2.260,2.291] / MI325X 2.570 / MI355X 2.419
     (25600,  256,  256, "torch.bfloat16"),  # E3_S37_N256
@@ -544,27 +559,44 @@ _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942] / MI325X 3.526 / MI355X 2.771
 })
 
-# Composed 43-cell P8 envelope.  Five named provenance frozensets
+# K-1302 documented composition-time carve-out: cells admitted by K-1266
+# standalone but DEMOTED under the K-1302 composition due to >5% per-cell
+# regression under the stacked envelope.  Tracked here so reviewers can
+# audit which K-1266 cells were guarded out at compose time.
+_K1302_COMPOSITION_CARVE_OUTS_FROM_K1266 = frozenset({
+    ( 4480,  256,  768, "torch.bfloat16"),  # E3_S24_N256: K-1266 standalone 1.004x; K-1302 composed 0.83x [0.722,0.935]
+})
+
+# Composed 42-cell P8 envelope.  Five named provenance frozensets
 # (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits, K-1231/
-# K-1205 E_N3 N=128 admits, K-1219/K-1240/K-1266 E3 N=256 admits) --
-# the dispatch path consults the union.  Per R-1144.DUAL-FROZENSET-
-# PROVENANCE and its K-1175 / K-1205 / K-1219 extensions, source-ticket
-# lineage is load-bearing for future reviewers (precedence-inversion
-# debugging, PMC re-classifier work, ADR audits) so each measurement
-# campaign keeps its own named set with a runtime size + pairwise-
-# disjointness check.
+# K-1205 E_N3 N=128 admits, K-1219/K-1240/K-1266/K-1302 E3 N=256 admits
+# under the GUARDED composition) -- the dispatch path consults the union.
+# Per R-1144.DUAL-FROZENSET-PROVENANCE and its K-1175 / K-1205 / K-1219 /
+# K-1302 extensions, source-ticket lineage is load-bearing for future
+# reviewers (precedence-inversion debugging, PMC re-classifier work, ADR
+# audits) so each measurement campaign keeps its own named set with a
+# runtime size + pairwise-disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
-    | _K1219_E3_NFLOOR256_ADMITS_7
+    | _K1219_E3_NFLOOR256_ADMITS_6
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
-    "K-1302 P8 envelope must be exactly 43 cells (13 K-1121 anchors + "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 42, (
+    "K-1302 P8 envelope must be exactly 42 cells (13 K-1121 anchors + "
     "12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 N=128 "
-    "admits + 7 K-1219/K-1240/K-1266 E3 N=256 admits); a duplicate or "
-    "stray entry has crept in.")
+    "admits + 6 K-1219/K-1240/K-1266 E3 N=256 admits under the K-1302 "
+    "guarded composition; E3_S24_N256 demoted to "
+    "_K1302_COMPOSITION_CARVE_OUTS_FROM_K1266); a duplicate or stray "
+    "entry has crept in.")
+# Composition-time carve-out must be DISJOINT from the active admit set
+# (the carve-out cell must NOT route to hipBLASLt under K-1302).
+assert _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266.isdisjoint(
+        _P8_MFMA_ISSUE_STALL_ROUTEOUT), (
+    "K-1302 composition-time carve-out cell leaked into the active P8 "
+    "admit set; the guarded composition requires the demoted cell stay "
+    "OUT of _P8_MFMA_ISSUE_STALL_ROUTEOUT (no double-admit).")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -590,16 +622,16 @@ assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
 assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates "
     "have N=128 by construction and no K-1161 E2 admit has N=128.")
-assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1121_P8_ANCHORS_13), (
+assert _K1219_E3_NFLOOR256_ADMITS_6.isdisjoint(_K1121_P8_ANCHORS_13), (
     "K-1219 E3 N=256 admits overlap a K-1121 anchor; the K-1131-style "
     "anchor projection excluded all K-1121 anchors by construction.")
-assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+assert _K1219_E3_NFLOOR256_ADMITS_6.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1219 E3 N=256 admits overlap a K-1131 neighbor; the K-1131 "
     "perturbation set's smallest N is 896, well above the N=256 tier.")
-assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1161_E2_ADMITS_3), (
+assert _K1219_E3_NFLOOR256_ADMITS_6.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1219 E3 N=256 admits overlap a K-1161 E2 admit; the K-1161 K-axis "
     "admits all sit at N in {1792, 2048}, not N=256.")
-assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8), (
+assert _K1219_E3_NFLOOR256_ADMITS_6.isdisjoint(_K1205_EN3_ADMITS_8), (
     "K-1302 K-1219 E3 N=256 admits overlap a K-1205 E_N3 N=128 admit; "
     "the two extensions live on disjoint N tiers (256 vs 128) by "
     "construction -- this assertion guards the additive composition "
@@ -643,12 +675,14 @@ def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219-K-1240-K-1266) —
-    direct hipBLASLt route-OUT for the quintuply-validated MFMA-issue-stall
-    cohort (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits +
-    K-1231/K-1205 E_N3 N=128 admits + K-1219/K-1240/K-1266 E3 N=256 admits).
+    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219-K-1240-K-1266 /
+    K-1302) — direct hipBLASLt route-OUT for the quintuply-validated
+    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors + K-1175/K-1161
+    E2 admits + K-1231/K-1205 E_N3 N=128 admits + K-1219/K-1240/K-1266 E3
+    N=256 admits, GUARDED at compose time by K-1302 with E3_S24_N256
+    demoted to the composition carve-out manifest).
 
-    Returns True iff (M, N, K, dtype) matches one of the 43 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 42 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).
@@ -696,14 +730,16 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
-    # K-1144 + K-1175 + K-1231/K-1205 + K-1219/K-1240/K-1266: P8 43-cell
+    # K-1144 + K-1175 + K-1231/K-1205 + K-1219/K-1240/K-1266/K-1302: P8 42-cell
     # strict-equality (13 K-1121 anchors + 12 K-1131 neighbors + 3 K-1161
-    # E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219 E3 N=256 admits)
-    # takes precedence over P6 admit so K-1121's paired n=30 evidence
-    # overrides K-1089 envelope admit for the S24/S29/N11 overlap.
-    # Both K-1205's N=128 and K-1219's N=256 N-axis additions are disjoint
-    # from K-1089 P6 envelope (P6 has no N<896 cells), so the precedence-
-    # inversion question is unchanged.
+    # E2 admits + 8 K-1205 E_N3 N=128 admits + 6 K-1219 E3 N=256 admits
+    # under the K-1302 guarded composition; E3_S24_N256 demoted at compose
+    # time per the >5% per-cell regression gate -- see
+    # _K1302_COMPOSITION_CARVE_OUTS_FROM_K1266) takes precedence over P6
+    # admit so K-1121's paired n=30 evidence overrides K-1089 envelope
+    # admit for the S24/S29/N11 overlap.  Both K-1205's N=128 and K-1219's
+    # N=256 N-axis additions are disjoint from K-1089 P6 envelope (P6 has
+    # no N<896 cells), so the precedence-inversion question is unchanged.
     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
         return True
     # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth

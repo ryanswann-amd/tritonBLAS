@@ -86,6 +86,9 @@ from ._route_predicate import (
     # prior frozenset carries an N=8192 cell with M ∈ {2048, 4096, 8192});
     # all 30 cells are NEW route-OUT.
     _k1567_p25_skinny_n8192_routeout as _R_K1567_P25_skinny_n8192_routeout,
+    # K-1604 P26: skinny_N1024 K-COMPLEMENT alias-stack (ALIAS to P16 ⨄ P5).
+    _k1604_p26_skinny_n1024_kcompl_aliasstack_routeout
+        as _R_K1604_P26_skinny_n1024_kcompl_aliasstack_routeout,
 )
 
 
@@ -276,6 +279,9 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # the R-1478 #1 N-axis attenuation chain anchor at the previously-
     # empty N=8192 rung (full chain 1.451 → 1.234 → 1.159 → 1.174 → 1.118).
     if _R_K1567_P25_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1604 P26 (18th-position): skinny_N1024 K-COMPLEMENT alias-stack
+    # 30-cell.  ALIAS to P16 ⨄ P5; unreachable while both are enabled.
+    if _R_K1604_P26_skinny_n1024_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

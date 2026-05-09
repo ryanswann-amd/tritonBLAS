@@ -2244,6 +2244,8 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
          previously-empty N=8192 anchor (full chain 1.451 → 1.234 →
          1.159 → 1.174 → 1.118 across N ∈ {2048, 4096, 8192, 16384,
          32768}).
+     18. P26 skinny_N1024 K-COMPLEMENT alias-stack 30-cell -> hipBLASLt
+         (ALIAS to P16 ⨄ P5; K-1592-verified envelope handle).
     """
     if disable_env_set:
         return False
@@ -2403,6 +2405,11 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # N-axis attenuation chain anchor at N=8192: full chain 1.451 → 1.234
     # → 1.159 → 1.174 → 1.118 across N ∈ {2048, 4096, 8192, 16384, 32768}.
     if _k1567_p25_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1604 P26 (18th-position): skinny_N1024 K-COMPLEMENT alias-stack
+    # 30-cell.  ALIAS to P16 ⨄ P5 — unreachable while both are enabled;
+    # load-bearing only if an upstream layer is ablated.
+    if _k1604_p26_skinny_n1024_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False
 
@@ -2737,3 +2744,30 @@ def _k1567_p25_skinny_n8192_routeout(M: int, N: int, K: int, dtype) -> bool:
         (int(M), int(N), int(K), str(dtype))
         in _K1567_P25_SKINNY_N8192_KCOMPL_ROUTEOUT_30
     )
+
+
+# K-1604 P26 — `skinny_N1024` K-COMPLEMENT 30-cell alias-stack route-OUT
+# (18th-position).  ALIAS to P16 ⨄ P5; freezes the K-1592 envelope under a
+# single audit handle.  Mechanism + cohort speedup table: see test fixture
+# `tests/test_k1614_p26_skinny_n1024_alias_stack.py` (K-1429 P16 covers
+# 29/30 cells at cohort geomean 2.23×; R_K979_P5 covers the remaining
+# (2048,1024,4096,bf16) at r≈1.015).
+_K1604_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30 = frozenset(
+    (M, 1024, K, dt)
+    for M in (2048, 4096, 8192)
+    for K in (2048, 4096, 8192, 16384, 32768)
+    for dt in ("torch.bfloat16", "torch.float16")
+)
+# ALIAS-STACK invariant — every cell MUST be in P16 ⨄ R_K979_P5; otherwise
+# the slot has silently become a new admit and needs an audit.
+for _c in _K1604_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30:
+    assert (
+        _c in _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29
+        or R_K979_P5_route_to_hbl(_c[0], _c[1], _c[2], _c[3])
+    ), f"P26 alias-stack cell {_c} not covered by P16 ⨄ P5"
+del _c
+
+
+def _k1604_p26_skinny_n1024_kcompl_aliasstack_routeout(M, N, K, dtype) -> bool:
+    """P26 alias-stack route-OUT (ALIAS to P16 ⨄ P5).  See module comment."""
+    return (int(M), int(N), int(K), str(dtype)) in _K1604_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30

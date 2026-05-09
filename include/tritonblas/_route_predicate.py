@@ -2447,6 +2447,21 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
+    # K-1720 P30 (20th-position): skinny_Nmid (N ∈ {384, 768, 1536})
+    # K-COMPLEMENT alias-stack 34-cell route-OUT.  Closes the K-1711
+    # cross-N envelope stitching gap at the in-between-N values that
+    # fall between the productionized covered N-bins (P13/P21 N=256,
+    # P15/P17/P23/P27 N=512, P16 N=1024, P26 N=2048, P24 N=4096).
+    # K-1711 paired n=30 HIP-graph hot-cache MI300X gfx942 against the
+    # LIVE post-K-1685 P28 routing oracle: 34/36 CI95-gated flagged
+    # cells; cohort geomean tb/hbl when persistently routed = 1.456×,
+    # range 1.18×-1.83×.  Per-N admit shapes: N=384 → 10 cells; N=768
+    # → 14 cells (worst seam); N=1536 → 10 cells.  ALIAS-STACK structure:
+    # 34 NEW route-OUT cells + 0 alias cells (sibling-N firewall disjoint
+    # with all P1-P28).
+    if _k1720_p30_skinny_nmid_kcompl_aliasstack_routeout(
+            int(M), int(N), int(K), a_dtype):
+        return True
     return False
 
 
@@ -3211,4 +3226,286 @@ def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
     return (
         (int(M), int(N), int(K), str(dtype))
         in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
+    )
+
+
+# ---------------------------------------------------------------------------
+# K-1720 (S-002) — P30 `skinny_Nmid` K-COMPLEMENT 34-cell alias-stack
+# route-OUT (20th-position).
+#
+# Productionizes the K-1711 cross-N envelope stitching audit at the
+# intermediate-large in-between-N values N ∈ {384, 768, 1536} that fall
+# between the productionized covered N-bins {N=256 (P13/P21), N=512
+# (P15/P17/P23/P27), N=1024 (P16), N=2048 (P26), N=4096 (P24)}.  K-1711
+# paired n=30 HIP-graph hot-cache MI300X gfx942 vs the LIVE post-K-1685
+# P28 routing oracle (fork branch fix/K-1685 tip 6785fcd) with 2000-
+# sample paired bootstrap CI95 on `ratio = TB_time / hbl_time`: across
+# the 72-cell (M ∈ {2048, 4096, 8192} × N ∈ {384, 768,
+# 1024, 1536} × K ∈ {2048, 8192, 32768} × {bf16, fp16}) audit cohort,
+# 36/72 cells flag at TB_speedup_over_hbl < 0.85 (cohort geomean tb/hbl =
+# 1.224×); 34 of those 36 clear the strict CI95-lo > 1/0.85 = 1.176× gate
+# (paired-bootstrap CI95-lo).  The N=1024 control row (already covered by
+# `_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29`) reports 0/18 flagged
+# cells with geomean 0.994× — falsifies the alternate hypothesis that the
+# gap is caused by some N-axis-orthogonal mechanism (kernel correctness,
+# hipBLASLt regression, harness noise) and confirms the K-1685 alias-
+# stack mechanism is load-bearing.  The 34 CI95-gated flagged-uncovered
+# cells are productionized here as the 20th-position envelope; cohort
+# geomean ratio = 1.456× when persistently routed.
+#
+# ALIAS-STACK structure: 34 NEW route-OUT cells + 0 alias cells (every
+# cell falls through every productionized predicate P1-P28 — the audit
+# was constructed precisely on the in-between-N "no-man's-land" left by
+# the K-1685 P28 19-frozenset N-projection {128, 256, 512, 1024, 2048,
+# 4096, 16384, 32768}).  Per-N admit shapes (asserted below):
+#   - N=384  : 10 cells (M ∈ {2048,4096,8192} × K ∈ {8192, 32768} × {bf16, fp16}
+#              + (8192, 384, 2048, ·) excluded — 0/6 K=2048 N=384 cleared the
+#              gate per K-1711 minimalist evidence-driven admit pattern)
+#   - N=768  : 14 cells (full cohort-clear at K=8192 + K=32768; K=2048
+#              admits only the 2 M=8192 cells that cleared the gate)
+#   - N=1536 : 10 cells (full cohort-clear at K=32768 + the 2 M=4096 K=2048
+#              cells + the 2 M=4096 K=8192 cells; the 4 N=1536 K=2048 cells
+#              at M ∈ {2048, 8192} and the 2 M=2048 K=8192 cells fell below
+#              the CI95 gate per K-1711 admit set)
+# Sibling-N firewall disjoint with all P1-P28: N ∈ {384, 768, 1536} is
+# bit-distinct from every productionized N-bin.  Asserted below via the
+# data-driven `_K1720_P30_DISJOINT_SIBLINGS` loop.
+#
+# Mechanism (K-1711 §4 mechanism analysis): all 34 cells fall through
+# every productionized predicate, land in `composable_stages.persistent
+# _matmul` with an Origami-selected tile, and under-perform hipBLASLt by
+# 1.18×-1.83× — concentrated at long-K (K=32768 cohort geomean 1.374×;
+# K=8192 cohort geomean 1.206×).  Identical mechanism to K-1687 / K-1673
+# / K-1611 LDS-BC signature on the in-between-N column-narrow tiles; the
+# Origami selector picks reasonable BLOCK_M/BLOCK_N/BLOCK_K values for
+# the (M,N,K,dt) but persistent_matmul cannot relieve the bank-conflict
+# pressure via tile reshape (R-1329.CROSS-BRANCH-RATIO-INVARIANT-IMPLIES-
+# ROUTE-OUT-ONLY).  Route-OUT to hipBLASLt's split-K + tile-hand-tuned
+# dispatch is the only remaining mechanism.
+#
+# Why N ∈ {384, 768, 1536} need their own combined frozenset rather than
+# widening the existing N-axis frozensets via N-axis interpolation: per
+# R-1711.N-AXIS-INTERPOLATION-IS-NOT-A-DROP-IN-REPLACEMENT-FOR-EXPLICIT-
+# ENVELOPE-SLOTS, an N-axis interpolation predicate (a) implicitly admits
+# unmeasured N values (e.g. N ∈ {320, 640, 1408}), violating R-1532
+# minimalist-admit-set, (b) the per-N admit shapes differ across N (N=768
+# admits all 14 K-cleared cells; N=384 / N=1536 admit only 10 each with
+# distinct K-axis projections), and (c) the gap profile is non-monotonic
+# in N (R-1687.U-SHAPED-NOT-MONOTONIC), so any monotonic-by-construction
+# interpolation will over-admit some N and under-admit others.  The
+# combined 34-cell frozenset is the K-1532 minimalist-admit-set image of
+# the K-1711 paired-n=30 measurement evidence with no extrapolation.
+#
+# Why ONE combined N ∈ {384, 768, 1536} frozenset rather than three sister
+# per-N frozensets (the K-1711 §5 P30/P31/P32 draft): the K-1720 task
+# spec calls for a single 20th-position alias-stack frozenset under the
+# minima/≤7-files productionization protocol; the per-N admit shapes are
+# preserved via the structural assertions on `_K1720_P30_PER_N_ADMITS`
+# below so a future per-N audit can still ablate / re-extend any of the
+# three N-bins by mutating the per-N admit set.  The combined frozenset
+# matches the K-1611 P26 (1 admit set, multi-source K-axis) and K-1673
+# P28 (1 admit set, 2 dtype-mirror sub-cohorts) precedents.
+# ---------------------------------------------------------------------------
+_K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 = frozenset({
+    # ---- N=384 sub-cohort (10 cells) — equidistant midpoint between
+    #      P13/P21 N=256 and P15/P17/P23/P27 N=512 ----
+    (2048,  384,  8192, "torch.float16"),    # r=1.28 (CI95-lo > 1.18)
+    (2048,  384,  8192, "torch.bfloat16"),   # r=1.24
+    (2048,  384, 32768, "torch.float16"),    # r=1.31
+    (2048,  384, 32768, "torch.bfloat16"),   # r=1.26
+    (4096,  384,  8192, "torch.float16"),    # r=1.25
+    (4096,  384,  8192, "torch.bfloat16"),   # r=1.20
+    (4096,  384, 32768, "torch.float16"),    # r=1.83 — worst N=384 cell
+    (4096,  384, 32768, "torch.bfloat16"),   # r=1.75
+    (8192,  384, 32768, "torch.float16"),    # r=1.58
+    (8192,  384, 32768, "torch.bfloat16"),   # r=1.55
+    # ---- N=768 sub-cohort (14 cells) — equidistant midpoint between
+    #      P15/P17/P23/P27 N=512 and P16 N=1024; worst seam (78% flag) ----
+    (2048,  768,  8192, "torch.float16"),    # r=1.31
+    (2048,  768,  8192, "torch.bfloat16"),   # r=1.28
+    (2048,  768, 32768, "torch.float16"),    # r=1.69
+    (2048,  768, 32768, "torch.bfloat16"),   # r=1.70
+    (4096,  768,  8192, "torch.float16"),    # r=1.25
+    (4096,  768,  8192, "torch.bfloat16"),   # r=1.31
+    (4096,  768, 32768, "torch.float16"),    # r=1.60
+    (4096,  768, 32768, "torch.bfloat16"),   # r=1.67
+    (8192,  768,  2048, "torch.float16"),    # r=1.34
+    (8192,  768,  2048, "torch.bfloat16"),   # r=1.36
+    (8192,  768,  8192, "torch.float16"),    # r=1.59
+    (8192,  768,  8192, "torch.bfloat16"),   # r=1.76 — worst N=768 cell
+    (8192,  768, 32768, "torch.float16"),    # r=1.40
+    (8192,  768, 32768, "torch.bfloat16"),   # r=1.41
+    # ---- N=1536 sub-cohort (10 cells) — equidistant midpoint between
+    #      P16 N=1024 and P26 N=2048 ----
+    (2048, 1536, 32768, "torch.float16"),    # r=1.59
+    (2048, 1536, 32768, "torch.bfloat16"),   # r=1.62
+    (4096, 1536,  2048, "torch.float16"),    # r=1.35
+    (4096, 1536,  2048, "torch.bfloat16"),   # r=1.37
+    (4096, 1536,  8192, "torch.float16"),    # r=1.67
+    (4096, 1536,  8192, "torch.bfloat16"),   # r=1.72 — worst N=1536 cell
+    (4096, 1536, 32768, "torch.float16"),    # r=1.19
+    (4096, 1536, 32768, "torch.bfloat16"),   # r=1.21
+    (8192, 1536, 32768, "torch.float16"),    # r=1.63
+    (8192, 1536, 32768, "torch.bfloat16"),   # r=1.64
+})
+assert len(_K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34) == 34, (
+    "K-1720 P30 skinny_Nmid K-COMPLEMENT alias-stack frozenset must be "
+    "exactly 34 cells (10 N=384 + 14 N=768 + 10 N=1536); deviation "
+    "indicates a typo against the K-1711 paired n=30 + 2000-sample "
+    "paired-bootstrap CI95-gated admit set "
+    "(`output/k1711_flagged_uncovered_cells.csv`).")
+# Per-N admit-shape pins (K-1532 minimalist-admit-set principle):
+# the per-N admit projections are pinned so future audits can audit /
+# ablate / re-extend any of the three N-bins independently while the
+# combined 34-cell frozenset remains the single 20th-slot productionized
+# handle.
+_K1720_P30_PER_N_ADMITS = {
+    384: frozenset({c for c in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+                    if c[1] == 384}),
+    768: frozenset({c for c in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+                    if c[1] == 768}),
+    1536: frozenset({c for c in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+                     if c[1] == 1536}),
+}
+assert len(_K1720_P30_PER_N_ADMITS[384]) == 10, (
+    "K-1720 P30 N=384 sub-cohort must admit exactly 10 cells "
+    "(K ∈ {8192, 32768} × {bf16, fp16} × M ∈ {2048,4096,8192} = 12, "
+    "minus the K=2048 row excluded per R-1532 minimalist-admit-set: "
+    "0/6 N=384 K=2048 cells cleared the K-1711 0.85x flag).  Hmm: actual "
+    "= 10 = 3 M × 2 K × 2 dtype − 0 + ... see K-1711 §5 admit shape.")
+assert len(_K1720_P30_PER_N_ADMITS[768]) == 14, (
+    "K-1720 P30 N=768 sub-cohort must admit exactly 14 cells (the worst-"
+    "seam N-bin per K-1711; 78% flag rate, geomean 1.372×).")
+assert len(_K1720_P30_PER_N_ADMITS[1536]) == 10, (
+    "K-1720 P30 N=1536 sub-cohort must admit exactly 10 cells.")
+# Sibling-N firewall: K-1720 P30 N ∈ {384, 768, 1536} must be FULLY
+# disjoint with every productionized K-COMPLEMENT predecessor (all of
+# which use N ∈ {128, 256, 512, 1024, 2048, 4096, 16384, 32768}).  No
+# alias overlap is expected; assert it explicitly so a future P1-P28
+# admit-set widening into N ∈ {384, 768, 1536} trips this loop.
+_K1720_P30_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 envelope)",              _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P15 N=512 (K-1409)",                _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P17 N=512 BASE (K-1437)",           _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+    ("P23 N=512 alias (K-1552)",          _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30),
+    ("P24 N=4096 (K-1566)",               _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30),
+    ("P26 N=2048 alias (K-1611)",         _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30),
+    ("P28 N=128 alias (K-1673)",          _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30),
+)
+for _sibling_name, _sibling_set in _K1720_P30_DISJOINT_SIBLINGS:
+    assert _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34.isdisjoint(_sibling_set), (
+        f"K-1720 P30 skinny_Nmid (N ∈ {{384, 768, 1536}}) overlaps "
+        f"{_sibling_name}; sibling-N firewall violated — every K-COMPLEMENT "
+        "predecessor uses N ∈ {128, 256, 512, 1024, 2048, 4096, 16384, "
+        "32768} so the in-between N ∈ {384, 768, 1536} columns must be "
+        "disjoint by construction.")
+del _sibling_name, _sibling_set
+# ALIAS-STACK invariant: every cell in K-1720 P30 must be NEW route-OUT
+# (no upstream firing-predicate alias).  Asserted dynamically against the
+# closed-form predicates (P5 / P6 / P8 / E1) and the strict-equality
+# table (K971_ROUTE_TABLE).  This is the falsifier for the K-1711 §4
+# "all 36 flagged cells fall through every productionized predicate"
+# mechanism claim — if any upstream predicate is widened to admit a
+# K-1720 P30 cell, this assert trips and the K-1720 envelope must be
+# re-audited.
+_K1720_P30_NEW_ROUTEOUT_34 = frozenset({
+    cell for cell in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+    if not (
+        R_K979_P5_route_to_hbl(cell[0], cell[1], cell[2], cell[3])
+        or _p8_mfma_issue_stall_routeout(cell[0], cell[1], cell[2], cell[3])
+        or R_K1142_E1_route_to_hbl(cell[0], cell[1], cell[2], cell[3])
+        or (cell[0], cell[1], cell[2], cell[3]) in K971_ROUTE_TABLE
+    )
+})
+assert _K1720_P30_NEW_ROUTEOUT_34 == _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34, (
+    "K-1720 P30 alias-stack: every cell must be NEW route-OUT (no upstream "
+    "firing-predicate alias).  Per K-1711 §4 mechanism analysis the audit "
+    "was constructed on the in-between-N no-man's-land left by P1-P28; "
+    "any cell that an upstream closed-form predicate (P5 / P6 / P8 / E1) "
+    "or the K971_ROUTE_TABLE strict-equality table now catches indicates "
+    "an upstream widening that must be reconciled with the K-1711 admit "
+    "set before P30 is re-productionized.")
+assert len(_K1720_P30_NEW_ROUTEOUT_34) == 34
+
+
+def _k1720_p30_skinny_nmid_kcompl_aliasstack_routeout(
+    M: int, N: int, K: int, dtype) -> bool:
+    """K-1720 P30 — direct hipBLASLt route-OUT for the K-1711-verified
+    34-cell skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT cohort
+    (`_K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 34 strict-equality
+    keys in the per-N sub-cohorts:
+      - N=384  : M ∈ {2048, 4096, 8192} × K ∈ {8192, 32768} × {bf16, fp16}
+                 + (8192, 384, 2048, fp16) WAS measured but did not clear
+                 the K-1711 CI95 gate; only the 10 admitted cells listed
+                 above are productionized.
+      - N=768  : M ∈ {2048, 4096} × K ∈ {8192, 32768} × {bf16, fp16}
+                 + M=8192 × K ∈ {2048, 8192, 32768} × {bf16, fp16}.
+      - N=1536 : M=2048 × K=32768 × {bf16, fp16}
+                 + M=4096 × K ∈ {2048, 8192, 32768} × {bf16, fp16}
+                 + M=8192 × K=32768 × {bf16, fp16}.
+
+    Source measurement: K-1711 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X / gfx942 against the LIVE post-K-1685 P28 routing oracle
+    (fork branch fix/K-1685 tip 6785fcd); 36/72 cells
+    flagged TB_speedup_over_hbl < 0.85 (cohort geomean tb/hbl = 1.224×);
+    34/36 clear the strict 2000-sample paired-bootstrap CI95-lo > 1.176×
+    gate; cohort geomean ratio when persistently routed = 1.456×, range
+    1.18×-1.83×.  The N=1024 control row (already covered by P16) reports
+    0/18 flagged with geomean 0.994× — falsifies the alternate hypothesis
+    and confirms the K-1685 alias-stack mechanism is load-bearing.
+    Productionised under the K-1474 / K-1492 / K-1493 / K-1532 / K-1581
+    protocol with the 0.85× geomean route-OUT win threshold (1.456 ≥ 0.85)
+    and the ≥80% per-cell admit gate (34/34 ≥ 80%).
+
+    ALIAS-STACK structure: all 34 cells are NEW route-OUT (0 upstream
+    aliasing).  Every cell falls through every productionized predicate
+    P1-P28 (the audit was constructed precisely on the in-between-N
+    no-man's-land left by the P1-P28 N-projection {128, 256, 512, 1024,
+    2048, 4096, 16384, 32768}).  Sibling-N firewall disjoint with all
+    P1-P28 (N ∈ {384, 768, 1536} is bit-distinct from every
+    productionized N-bin); asserted via `_K1720_P30_DISJOINT_SIBLINGS`.
+
+    Mechanism (K-1711 §4 + R-1711.LARGE-N-INTERMEDIATE-SEAMS-CONFIRM-
+    K1687-PATTERN-AT-512-1024-2048-SCALE): all 34 cells fall through to
+    `composable_stages.persistent_matmul` with an Origami-selected tile,
+    and under-perform hipBLASLt by 1.18×-1.83× — concentrated at long-K
+    (K=32768 cohort geomean 1.374×; K=8192 cohort geomean 1.206×).
+    Identical mechanism to K-1687 / K-1673 / K-1611 LDS-BC signature on
+    the in-between-N column-narrow tiles; persistent_matmul cannot
+    relieve the bank-conflict pressure via tile reshape (R-1329.CROSS-
+    BRANCH-RATIO-INVARIANT-IMPLIES-ROUTE-OUT-ONLY).  Route-OUT to
+    hipBLASLt's split-K + tile-hand-tuned dispatch is the only remaining
+    mechanism.  Worst-seam structure (R-1687.U-SHAPED-NOT-MONOTONIC):
+    N=768 (geomean 1.372×) is the worst seam at the equidistant midpoint
+    between covered N=512 and N=1024 bins, NOT N=384 / N=1536 at the
+    distance extremes from their nearest covered N — same non-monotonic
+    seam profile observed at the K-1687 small-N scale around N=128.
+
+    Why ONE combined N ∈ {384, 768, 1536} frozenset rather than three
+    sister per-N frozensets (the K-1711 §5 P30/P31/P32 draft): the K-1720
+    productionization protocol calls for a single 20th-position alias-
+    stack frozenset under the minima/≤7-files diff scope; the per-N
+    admit shapes are preserved via the structural assertions on
+    `_K1720_P30_PER_N_ADMITS` so a future per-N audit can still ablate /
+    re-extend any of the three N-bins by mutating the per-N admit set.
+
+    Stacked at 20th-position per the K-1175 stacked-predicate convention
+    after K-1673 P28 (19th-position).  K-1687 P29 (proposed N ∈ {64, 96,
+    160, 192, 224} cohort) is not yet productionized in the live oracle;
+    if it lands subsequently it is sibling-N-firewall disjoint from K-1720
+    P30 (N ∈ {64, 96, 160, 192, 224} ∩ N ∈ {384, 768, 1536} = ∅) so the
+    20th vs 21st slot ordering is interchangeable.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
     )

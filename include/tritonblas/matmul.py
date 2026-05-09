@@ -106,6 +106,21 @@ from ._route_predicate import (
     # chain.
     _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # K-1720 (S-002): P30 skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT
+    # alias-stack 34-cell route-OUT (20th-position, load-bearing).  Closes
+    # the cross-N envelope stitching gap at the in-between-N values that
+    # fall between the productionized covered N-bins (P13/P21 N=256,
+    # P15/P17/P23/P27 N=512, P16 N=1024, P26 N=2048, P24 N=4096) per the
+    # K-1711 paired n=30 HIP-graph hot-cache MI300X gfx942 audit (cohort
+    # geomean tb/hbl = 1.456× across 34 CI95-gated flagged cells; N=1024
+    # control row = 0/18 flagged falsifies N-axis-orthogonal mechanism).
+    # ALIAS-STACK structure: 34 NEW route-OUT cells + 0 alias cells (every
+    # cell falls through every productionized predicate P1-P28 — by
+    # construction the audit was on the in-between-N no-man's-land left
+    # by P1-P28's N-projection {128, 256, 512, 1024, 2048, 4096, 16384,
+    # 32768}).  Sibling-N firewall disjoint with all P1-P28.
+    _k1720_p30_skinny_nmid_kcompl_aliasstack_routeout
+        as _R_K1720_P30_skinny_nmid_kcompl_aliasstack_routeout,
 )
 
 
@@ -357,6 +372,46 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
     # handles per the K-1175 stacked-predicate convention.
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1720 P30 (20th-position): skinny_Nmid (N ∈ {384, 768, 1536})
+    # K-COMPLEMENT alias-stack 34-cell route-OUT.  Stacks AFTER P28 per
+    # the K-1175 stacked-predicate convention; closes the cross-N
+    # envelope stitching gap at the in-between-N values that fall
+    # between the productionized covered N-bins (P13/P21 N=256,
+    # P15/P17/P23/P27 N=512, P16 N=1024, P26 N=2048, P24 N=4096).
+    # K-1711 paired n=30 HIP-graph hot-cache + 2000-sample paired
+    # bootstrap CI95 on MI300X gfx942 vs the LIVE post-K-1685 P28
+    # routing oracle (fork branch fix/K-1685 tip 6785fcd):
+    # 36/72 cells flagged TB_speedup_over_hbl < 0.85 (cohort geomean
+    # tb/hbl = 1.224×); 34/36 clear the strict CI95-lo > 1/0.85 = 1.176×
+    # gate; cohort geomean ratio when persistently routed = 1.456×,
+    # range 1.18×-1.83×.  Per-N admit shapes: N=384 → 10 cells (K=2048
+    # row excluded per R-1532 minimalist-admit-set, 0/6 K=2048 N=384
+    # cleared the K-1711 gate); N=768 → 14 cells (worst seam: 78% flag
+    # rate, geomean 1.372× — equidistant midpoint between P15/P17/P23/P27
+    # N=512 and P16 N=1024); N=1536 → 10 cells (K-axis projection differs
+    # from N=384 / N=768 — sub-cohort includes M=4096 K=2048 cells but
+    # excludes M ∈ {2048, 8192} K=2048 cells per K-1711 admit set).
+    # ALIAS-STACK structure: 34 NEW route-OUT cells + 0 alias cells; every
+    # cell falls through every productionized predicate P1-P28 by
+    # construction (the audit was on the in-between-N no-man's-land left
+    # by P1-P28's N-projection {128, 256, 512, 1024, 2048, 4096, 16384,
+    # 32768}).  Sibling-N firewall disjoint with all P1-P28; asserted via
+    # `_K1720_P30_DISJOINT_SIBLINGS` data-driven loop.  Mechanism (K-1711
+    # §4 + R-1711.LARGE-N-INTERMEDIATE-SEAMS-CONFIRM-K1687-PATTERN-AT-512-
+    # 1024-2048-SCALE): identical K-913 LDS-bank-conflict signature to
+    # K-1611 / K-1673 / K-1687 on the in-between-N column-narrow tiles;
+    # persistent_matmul cannot relieve the bank-conflict pressure via
+    # tile reshape, route-OUT to hipBLASLt is the only mechanism (R-1329).
+    # The N=1024 control row in the K-1711 audit (already covered by P16)
+    # reports 0/18 flagged with geomean 0.994× — falsifies the alternate
+    # hypothesis (kernel correctness, hipBLASLt regression, harness
+    # noise) and confirms the K-1685 alias-stack mechanism is load-
+    # bearing.  Why ONE combined frozenset rather than three sister
+    # per-N (the K-1711 §5 P30/P31/P32 draft): K-1720 productionization
+    # protocol calls for a single 20th-position alias-stack frozenset
+    # under the minima/≤7-files diff scope; per-N admit shapes preserved
+    # via `_K1720_P30_PER_N_ADMITS`.
+    if _R_K1720_P30_skinny_nmid_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

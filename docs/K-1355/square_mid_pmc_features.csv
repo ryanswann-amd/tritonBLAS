@@ -1,0 +1,4 @@
+cell,M,N,K,dtype,k1295_tb_over_hbl,hbl_speedup,tb_LDS_BC_per_inst,hbl_LDS_BC_per_inst,tb_MFMA_pct,hbl_MFMA_pct,MFMA_pct_gap,tb_waves_per_CU,hbl_waves_per_CU,waves_per_CU_ratio,tb_VALU_per_MFMA,hbl_VALU_per_MFMA,VALU_per_MFMA_ratio,quality,source
+2048cube_bf16,2048,2048,2048,torch.bfloat16,0.258,3.87,0.889,0.000,3.34,4.59,1.25,6.74,3.37,2.00,30.0,22.0,1.36,MEASURED-PMC,K-877 S1b
+4096cube_bf16,4096,4096,4096,torch.bfloat16,0.550,1.82,0.000,0.000,5.6,7.8,2.2,13.5,7.8,1.85,2.5,1.4,1.79,MEASURED-VIA-TRIANGULATION,K-1345 5-anchor (K-655+K-818+K-837+K-877+K-879)
+8192cube_bf16,8192,8192,8192,torch.bfloat16,0.794,1.26,0.000,0.000,8.20,10.51,2.31,26.95,15.58,1.73,1.96,1.20,1.63,MEASURED-PMC,K-879 N2a

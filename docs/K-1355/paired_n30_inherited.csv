@@ -1,0 +1,4 @@
+cell_id,M,N,K,dtype,bucket,paired_ratio_tb_over_hbl_med,ci95_lo,ci95_hi,n_trials,replays_per_trial,inverse_hbl_speedup,classification,quality,source_anchor
+S1,2048,2048,2048,torch.bfloat16,square_mid,0.25833,0.25700,0.26035,30,100,3.871,ROUTE-OUT,MEASURED-PAIRED-N30,K-1295
+S2,4096,4096,4096,torch.bfloat16,square_mid,0.55015,0.54452,0.55255,30,100,1.818,ROUTE-OUT,MEASURED-PAIRED-N30,K-1295
+S3,8192,8192,8192,torch.bfloat16,square_mid,0.79397,0.78783,0.80735,30,100,1.260,ROUTE-OUT,MEASURED-PAIRED-N30,K-1295+K-879

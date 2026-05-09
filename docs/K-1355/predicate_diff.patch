@@ -1,0 +1,141 @@
+From: ryanswann-amd <ryan.swann@amd.com>
+Subject: [PATCH] K-1355: square_mid route-OUT predicate (63 -> 66 cells)
+
+Adds an 8th provenance frozenset to the unified P8 envelope: the K-1345
+square_mid sub-cohort identified by the K-1308 residual attribution as the
+#1 predicate-addressable bucket after K-1335 P11 closed longK_smallSquare.
+
+Discriminating PMC feature: waves_per_CU ratio (TB/HBL) >= 1.7
+  - 2048^3 bf16:  2.00 (K-877 S1b MEASURED-PMC)
+  - 4096^3 bf16:  1.85 +/- 0.15 (K-1345 5-anchor TRIANGULATION)
+  - 8192^3 bf16:  1.73 (K-879 N2a MEASURED-PMC)
+
+Secondary PMC mechanisms (per-cell):
+  - 2048^3: SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889 cyc/inst (TB) vs
+            0.000 (HBL); same K-913 LDS-bound mechanism as K-1335 P11.
+  - 4096^3: VALU/MFMA ratio (TB/HBL) ~= 1.5-2.0 (codegen density).
+  - 8192^3: SQ_WAIT_ANY/cyc 17.06 (TB) vs 1.98 (HBL) = 8.61x (scheduler-
+            issue-stall, not in-kernel-addressable but routing still
+            yields HBL speedup 1.26x).
+
+Strict-equality only per R-1131 anti-overshoot doctrine. Per-cell paired
+n=30 hbl_speedup floor (from K-1295 single-shot, n=30 verification PENDING-
+CLUSTER): 2048^3=3.87x, 4096^3=1.82x, 8192^3=1.26x. Cohort geomean 2.06x,
+clears 0.85x floor by 2.4x margin.
+
+Disjointness with the prior 7 sub-frozensets: trivial — all 3 cells have
+M=N=K (square) AND K=M (mid-K, ratio K/M=1.0), structurally disjoint from
+the longK envelope (K-1326: K>=2*M) and from every K-1121/K-1131/K-1161/
+K-1205/K-1219/K-1283 cell (none has M=N).
+
+---
+ include/tritonblas/_route_predicate.py            | 50 ++++++++++++++++++++++++
+ tests/test_k971_route_predicate.py                | 25 ++++++++++++
+ 2 files changed, 75 insertions(+)
+
+diff --git a/include/tritonblas/_route_predicate.py b/include/tritonblas/_route_predicate.py
+index e27a7e1..a1b2c3d 100644
+--- a/include/tritonblas/_route_predicate.py
++++ b/include/tritonblas/_route_predicate.py
+@@ -738,6 +738,49 @@ assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1283_A1_PERTURBATIONS_8),
+         "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1283_A1_PERTURBATIONS_8; "
+         "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+         "which no prior provenance frozenset satisfies.")
+
++# ---------------------------------------------------------------------------
++# K-1355 / K-1345 (S-002): _SQUARE_MID_ADMIT — 8th provenance frozenset of the
++# unified P8 envelope.  Targets the square_mid residual bucket identified by
++# K-1345 as the #1 predicate-addressable bucket after K-1335 P11 closed
++# longK_smallSquare (3 cells, aggregate gap 1.398, per-cell residuals
++# 0.742 / 0.450 / 0.206).  Mechanism: dispatch-over-launch — TB persistent
++# kernel emits ~2x the wavefront count of HBL Tensile on M=N=K square shapes
++# (waves_per_CU ratio TB/HBL ~ 1.73x-2.00x across the 3 cells).  Secondary
++# mechanisms vary per cell: K-877 S1b measured LDS_BC=0.889 cyc/inst at
++# 2048^3 (same K-913 mechanism as K-1335 P11); K-1345 5-anchor triangulation
++# (K-655 + K-818 C2 + K-837 N1a/b + K-877 + K-879) MEASURED-VIA-TRIANGULATION
++# 4096^3 bf16 at LDS_BC=0.0 + VALU/MFMA ratio ~1.5-2.0; K-879 N2a measured
++# 8192^3 at SQ_WAIT_ANY/cyc 8.61x ratio (scheduler-stall).
++#
++# bf16-only — square cells of K-877 / K-1295 / K-879 measurement scope are
++# bf16 only; fp16 parity will be tracked separately on the K-1093 / K-1125
++# line (mirror of K-1339's bf16+fp16 handling) when fp16 paired n=30 lands.
++#
++# Strict-equality only (R-1131 anti-overshoot) — no parametric envelope.
++#
++# Disjoint from all 7 prior provenance frozensets BY CONSTRUCTION:
++#   * vs K-1121/K-1131/K-1161/K-1205/K-1219/K-1283: those all have M != N
++#   * vs K-1326 LONGK_SMALLSQUARE: K=M (mid-K, K/M=1.0) outside K>=2*M envelope
++# ---------------------------------------------------------------------------
++
++_K1345_SQUARE_MID_ADMIT_3 = frozenset({
++    (2048, 2048, 2048, "torch.bfloat16"),  # K-877 S1b: tb/hbl=0.258 -> HBL 3.87x
++    (4096, 4096, 4096, "torch.bfloat16"),  # K-1295: tb/hbl=0.550 -> HBL 1.82x (5-anchor PMC TRIANGULATION)
++    (8192, 8192, 8192, "torch.bfloat16"),  # K-879 N2a: tb/hbl=0.794 -> HBL 1.26x (HBM-bound; admit-by-strict-equality)
++})
++
++# Disjointness assertions (asserted at module load).
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1121_P8_ANCHORS_13)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1131_P8_NEIGHBORS_12)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1161_E2_ADMITS_3)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1205_EN3_ADMITS_8)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1283_A1_PERTURBATIONS_8)
++assert _K1345_SQUARE_MID_ADMIT_3.isdisjoint(_K1326_LONGK_SMALLSQUARE_ADMIT_12), (
++    "K-1355 SQUARE_MID admit cell overlaps K-1326 LONGK_SMALLSQUARE; K-1355 "
++    "cells have K=M (K/M=1.0, mid-K) outside K-1326's K>=2*M long-K envelope.")
++
+ def _longk_smallsquare_admit_routeout(M, N, K, dtype):
+     """K-1339 / K-1326: LDS-bound longK_smallSquare route-OUT.
+
+@@ -854,6 +897,13 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
+     if _longk_smallsquare_admit_routeout(int(M), int(N), int(K), a_dtype):
+         return True
++    # K-1355 / K-1345: square_mid (M=N=K, mid-K) admit — 3 cells, bf16,
++    # discriminator waves_per_CU ratio (TB/HBL) >= 1.7. Checked AFTER
++    # K-1339 longK_smallSquare so the K=M mid-K boundary is unambiguous;
++    # checked BEFORE the bf16-only K-1322 P8 frozenset because it shares
++    # the same dispatch outcome (route to HBL) and can short-circuit.
++    if (int(M), int(N), int(K), str(a_dtype)) in _K1345_SQUARE_MID_ADMIT_3:
++        return True
+     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
+         return True
+
+diff --git a/tests/test_k971_route_predicate.py b/tests/test_k971_route_predicate.py
+index 1234567..89abcde 100644
+--- a/tests/test_k971_route_predicate.py
++++ b/tests/test_k971_route_predicate.py
+@@ -PIN_LOCATION_K1339_END +PIN_LOCATION_K1339_END,25 @@
++
++# ---------------------------------------------------------------------------
++# K-1355 SQUARE_MID admit pins.  Each pin records the K-1295 single-shot
++# tb/hbl ratio + K-1345 PMC mechanism summary.  These are LOAD-BEARING
++# regression traps: a silent re-classification of any cell off route-OUT
++# fails CI loudly and forces re-derivation against the K-1345 anchor matrix.
++# ---------------------------------------------------------------------------
++_K1345_SQUARE_MID_PINS = [
++    # (M, N, K, dtype_str, k1295_ratio, hbl_speedup, mechanism)
++    (2048, 2048, 2048, "torch.bfloat16", 0.258, 3.87,
++     "LDS_BC=0.889 cyc/inst (K-877 S1b) + waves_per_CU 2.00x"),
++    (4096, 4096, 4096, "torch.bfloat16", 0.550, 1.82,
++     "VALU/MFMA 1.5-2.0x + waves_per_CU 1.85x (K-1345 5-anchor TRIANGULATION)"),
++    (8192, 8192, 8192, "torch.bfloat16", 0.794, 1.26,
++     "SQ_WAIT_ANY/cyc 8.61x ratio (K-879 N2a; HBM-bound; admit-by-strict-equality)"),
++]
++
++@pytest.mark.parametrize("M,N,K,dt,r,speedup,mech", _K1345_SQUARE_MID_PINS)
++def test_k1355_square_mid_admit_routes_to_hbl(M, N, K, dt, r, speedup, mech):
++    """K-1355: 3 square_mid cells must route OUT to hipBLASLt."""
++    assert k971_route_decision(M, N, K, dt, dt,
++                               enable_streamk=False, work_stealing=False), (
++        f"square_mid cell ({M},{N},{K},{dt}) MUST route to hipBLASLt: "
++        f"K-1295 tb/hbl={r}, HBL is {speedup}x faster, mechanism={mech}")
++
++
++def test_k1355_square_mid_envelope_size():
++    """K-1355 grows the unified envelope from 63 to 66 cells."""
++    from tritonblas._route_predicate import _K1345_SQUARE_MID_ADMIT_3
++    assert len(_K1345_SQUARE_MID_ADMIT_3) == 3, (
++        "K-1355 SQUARE_MID admit must be exactly 3 cells (one per "
++        "M=N=K in {2048, 4096, 8192}, all bf16).")
+--
+2.34.1

@@ -125,6 +125,12 @@ from ._route_predicate import (
     # dtype rows load-bearing — no upstream alias overlap (N=224 is the first
     # N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192).
     _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
+    # P34 (25th-slot): N=96 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=96 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
+    # K-1818's N=96 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).  Both
+    # dtype rows load-bearing — no upstream alias overlap (N=96 is the first
+    # wave-misaligned rung below the N=128 cliff per K-1818 PMC RCA).
+    _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -407,6 +413,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # bearing, closes the wave-misaligned N=224 dtype-mirror (BLOCK_N=128 packs
     # N=224 into one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint).
     if (int(M), int(N), int(K), str(a_dtype)) in _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18: return True
+    # P34 (25th-slot): N=96 K-COMPLEMENT verified-winner subset — 18 cells from
+    # K-1818's N=96 sub-cohort (M ∈ {2048,4096,8192} × N=96 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}).  K-1818 PMC RCA paired n=30 HIP-graph hot-cache 3-engine sweep
+    # on MI300X / gfx942: bf16 N=96 unrouted 0/9 and fp16 N=96 unrouted 0/9 in the
+    # pre-stack measurement (no upstream alias coverage at the wave-misaligned N=96
+    # rung BELOW the N=128 cliff).  All 18 cells admitted as route-OUT — both dtype
+    # rows load-bearing, closes the wave-misaligned N=96 dtype-mirror (BLOCK_N=128
+    # packs N=96 into a single wave-misaligned K-block column with PARTIAL coverage
+    # → K-913 §3 LDS-BC fingerprint dominates AND wave-misalignment MFMA-tail
+    # inefficiency per R-1811.WAVE-MISALIGNMENT-IS-ROOT-MECHANISM).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

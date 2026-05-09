@@ -311,21 +311,28 @@ def test_p29_dispatch_helper_routes_canonical_n64_fp16_cell():
 
 
 @pytest.mark.parametrize(
-    "cell", sorted(_K1700_P29_NEW_ROUTEOUT_15)
+    "cell", sorted(_K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_30)
 )
-def test_p29_dispatch_helper_routes_every_new_fp16_cell(cell):
-    # Every NEW fp16 cell (the load-bearing 15) must route via
-    # `_k971_route_to_hbl` — not just `k971_route_decision`.  Any
-    # False here means the production dispatch never fires for the
+def test_p29_dispatch_helper_routes_every_admit_cell(cell):
+    # Every cell in the 30-cell P29 alias-stack envelope must route
+    # via `_k971_route_to_hbl` — not just `k971_route_decision`.  The
+    # 15 NEW fp16 cells route via the 20th-slot P29 predicate; the 15
+    # bf16 alias cells route via the 4th-slot P5 closed-form
+    # (alias-stack invariant).  Either path must produce a True
+    # verdict, otherwise the production dispatch never fires for the
     # cell even though the audit-handle predicate says it should.
+    # Parametrizing over the FULL 30-cell envelope (not just the 15
+    # NEW fp16 cells) catches dtype-asymmetric regressions in the
+    # P5+P29 alias-stack composition that an fp16-only test would miss.
     M, N, K, dtype_str = cell
     dtype = torch.float16 if dtype_str == "torch.float16" else torch.bfloat16
     assert _k971_route_to_hbl(
         M, N, K, dtype, dtype,
         enable_streamk=False, work_stealing=False,
     ) is True, (
-        f"P29 NEW fp16 cell {cell} not routed by _k971_route_to_hbl; "
-        "the 20th-position dispatch wiring in matmul.py is broken.")
+        f"P29 alias-stack cell {cell} not routed by _k971_route_to_hbl; "
+        "either the 20th-position P29 dispatch wiring (fp16) or the "
+        "4th-position P5 alias coverage (bf16) is broken.")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(),
@@ -345,3 +352,28 @@ def test_p29_public_matmul_runs_and_matches_torch_on_n64_fp16_cell():
     out_ref = torch.matmul(a, b)
     # hipBLASLt fp16 GEMM at K=8192 accumulator drift tolerance.
     torch.testing.assert_close(out_tb, out_ref, atol=5e-1, rtol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="end-to-end matmul needs a CUDA device")
+def test_p29_public_matmul_runs_and_matches_torch_on_n64_bf16_cell():
+    """Public `tritonblas.matmul` must complete without error on a P29
+    bf16 ALIAS admit cell and match `torch.matmul` to within bf16
+    tolerance.  Although the bf16 cells route via the upstream P5
+    closed-form (4th-slot, alias-stack invariant) rather than via the
+    20th-slot P29 predicate, the user-facing contract is identical:
+    every cell in the 30-cell P29 envelope must produce a numerically-
+    correct result through `tritonblas.matmul`.  This test catches a
+    dtype-asymmetric integration failure that the fp16-only e2e test
+    above would miss (e.g. a P5 contraction that silently leaks bf16
+    cells back into `persistent_matmul` with a dtype-specific bug)."""
+    import tritonblas
+    torch.manual_seed(0)
+    M, N, K = 4096, 64, 8192  # bf16 alias of the canonical NEW fp16 admit
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
+    out_tb = tritonblas.matmul(a, b)
+    out_ref = torch.matmul(a, b)
+    # bf16 has wider exponent / narrower mantissa than fp16, so the
+    # absolute tolerance scales up correspondingly at K=8192.
+    torch.testing.assert_close(out_tb, out_ref, atol=8e0, rtol=2e-2)

@@ -3446,6 +3446,27 @@ def _k1700_p29_skinny_n64_kcompl_aliasstack_routeout(
     bf16 alias cells are documentation; the 15 NEW fp16 cells are the
     load-bearing portion.
 
+    WHY THE 15 BF16 ALIAS CELLS ARE PRESERVED IN THE FROZENSET (rather
+    than trimmed to the 15 fp16 NEW cells): the alias-stack convention
+    (K-1493 / K-1538 / K-1611 P26 / K-1685 P28) bundles the FULL
+    audited envelope under a single named symbol so that
+    `_K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_30` can be referenced as
+    a 30-cell audit handle in test harnesses, regression sweeps, and
+    PMC envelope-coverage proofs without re-deriving the 15 fp16 NEW
+    cells from a P5-aware difference at every call site.  Module-load
+    asserts (`_K1700_P29_VS_P5_BF16_ALIAS` enumeration calling
+    `R_K979_P5_route_to_hbl` on each bf16 cell) GUARANTEE that any
+    silent contraction of P5 will trip CI before the alias decomposition
+    becomes stale.  Runtime impact is exactly zero: the 15 bf16 cells
+    short-circuit at P5 (4th-slot) and never reach the 20th-slot P29
+    membership check, which is how the K-1611 P26 30-cell alias-stack
+    (22 NEW + 8 alias) and K-1685 P28 30-cell alias-stack are also
+    structured.  Empirical proof of this no-op behaviour at runtime is
+    in `output/sweep_n64.csv`: the 15 bf16 cells show
+    `speedup_post_over_pre ∈ [0.997, 1.010]` (CI95 includes 1.0)
+    because ablating P29 leaves P5 to handle them — exactly the
+    behaviour predicted by the alias-stack invariant.
+
     Mechanism: PMC RCA (K-1700 follow-up to K-1673 / K-1687) reproduces
     the LDS-bank-conflict fingerprint bit-identically across dtypes.
     At N=64 the Origami selector picks BLOCK_N=16 (sub-wave-quantized

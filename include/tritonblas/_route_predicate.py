@@ -456,21 +456,54 @@ _K1161_E2_ADMITS_3 = frozenset({
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x CI95=[1.496, 1.504]
 })
 
-# Composed 28-cell P8 envelope.  Anchors, neighbors, and K-1175/K-1161 E2
-# admits are deliberately kept as separate constants so reviewers (and
-# the manifest auditors) can see provenance at a glance; the dispatch
-# path consults the union.
+# K-1219 / K-1240 — E3 N-floor=256 anchor-projected admits (7 cells).
+# K-1131-style +/-1-power-of-2 N-axis projection of K-1121 PMC anchors
+# {S18, S24, S25, S30, S37, S39} + K-1175 E2_M1 admit, projected to
+# N=256 (one tier below the K-1131 N09 N=896 natural floor).  Per K-1142
+# carve-out, M >= 4480 on every cell.
+#
+# Cross-arch verification (K-1219 + K-1240 paired n=30 HIP-graph
+# hot-cache, B=10000 percentile-CI95 bootstrap on tb_time/hbl_time):
+#   * MI300X (gfx942, rad-mi300x-1):     candidate-cohort geomean tb/hbl 1.368x
+#   * MI325X (gfx942 HBM3e, rad-mi325x-1): candidate-cohort geomean tb/hbl 1.607x
+#   * MI355X (gfx950, mi355x-thor-3):    candidate-cohort geomean tb/hbl 1.652x
+# Per K-1219 R-1219.N-FLOOR-RELAXATION-IS-PORTABLE-WHEN-MFMA-ISSUE-STALL-
+# MECHANISM-IS-SHAPE-LIMITED, the MFMA-issue-stall predicate fires
+# identically at N=256 and N=512 for the same (M, K) shape (PMC evidence
+# from K-1211); lowering the N-floor 512 -> 256 is therefore safe.
+# K-1240 confirmed cross-arch portability across the gfx942/gfx950
+# family (R-1244.STACKED-PREDICATE-CROSS-ARCH-VERDICT-COMPOSES-WITHOUT-
+# INTERACTION).
+_K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
+    # ----- E3 N=256 anchor-projected admits (M >= 4480 per K-1142) -----
+    ( 5972,  256,  768, "torch.bfloat16"),  # E3_S18_N256
+    ( 4480,  256,  768, "torch.bfloat16"),  # E3_S24_N256
+    ( 6016,  256, 1024, "torch.bfloat16"),  # E3_S25_N256  MI300X tb/hbl 1.215 CI95=[1.206,1.224] / MI325X 1.249 / MI355X 1.281
+    (16256,  256, 1024, "torch.bfloat16"),  # E3_S30_N256  MI300X tb/hbl 2.274 CI95=[2.260,2.291] / MI325X 2.570 / MI355X 2.419
+    (25600,  256,  256, "torch.bfloat16"),  # E3_S37_N256
+    (49152,  256,  256, "torch.bfloat16"),  # E3_S39_N256
+    (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942] / MI325X 3.526 / MI355X 2.771
+})
+
+# Composed 35-cell P8 envelope.  Anchors, neighbors, K-1175/K-1161 E2
+# admits, and K-1219/K-1240 E3 N=256 admits are deliberately kept as
+# separate constants so reviewers (and the manifest auditors) can see
+# provenance at a glance; the dispatch path consults the union.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
-    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_E2_ADMITS_3
+    _K1121_P8_ANCHORS_13
+    | _K1131_P8_NEIGHBORS_12
+    | _K1161_E2_ADMITS_3
+    | _K1219_E3_NFLOOR256_ADMITS_7
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
-    "K-1175 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate or stray "
-    "entry has crept in.")
-# Cross-check: the three sub-sets must be disjoint by construction.
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 35, (
+    "K-1219 P8 envelope must be exactly 35 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits + 7 K-1219/K-1240 E3 "
+    "N=256 admits); a duplicate or stray entry has crept in.")
+# Cross-check: the four sub-sets must be disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
-# K-1121 anchors and minus all K-1131 neighbors.
+# K-1121 anchors and minus all K-1131 neighbors; K-1219 E3 N=256 admits
+# are anchor projections to N=256, well below the K-1131 N09 N=896 floor.
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
     "rules require strict disjointness from the 13 K-1121 anchors.")
@@ -480,6 +513,15 @@ assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
 assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1131 neighbors; the K-1161 "
     "candidate generator excluded all K-1131 neighbors by construction.")
+assert _K1121_P8_ANCHORS_13.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1219 N=256 admit overlaps a K-1121 anchor; the K-1131-style "
+    "anchor projection excluded all K-1121 anchors by construction.")
+assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1219 N=256 admit overlaps a K-1131 neighbor; the K-1131 "
+    "perturbation set's smallest N is 896, well above the N=256 tier.")
+assert _K1161_E2_ADMITS_3.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1219 N=256 admit overlaps a K-1161 E2 admit; the K-1161 K-axis "
+    "admits all sit at N in {1792, 2048}, not N=256.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:

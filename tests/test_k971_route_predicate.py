@@ -36,6 +36,7 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1219_E3_NFLOOR256_ADMITS_7,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -680,18 +681,22 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
-    Any silent edit changes this count and trips this canary.
+def test_k1144_p8_envelope_size_is_exactly_35_after_k1219_extension():
+    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 7 K-1219/
+    K-1240 E3 N=256 admits = 35 cells.  Any silent edit changes this count
+    and trips this canary.
 
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
-    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
-    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+    K-1144 originally pinned 25; K-1175 extended by 3 K-1161-validated cells
+    (E2_I4 K-interior admit + 2 M-axis admits at K=1024) -> 28; K-1219
+    extends by 7 K-1131-style anchor-projected N=256 cells (E3 N-floor
+    relaxation 512 -> 256) -> 35.  K-1240 cross-arch backtest on MI325X
+    (gfx942 HBM3e) and MI355X (gfx950) confirmed portability of the entire
+    7-cell cohort across the gfx942/gfx950 family."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 35
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
+    assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -767,6 +772,44 @@ def test_k1144_p8_string_dtype_compat_with_route_table():
     semantics."""
     assert _p8_mfma_issue_stall_routeout(4480, 3072, 768, "torch.bfloat16") is True
     assert _p8_mfma_issue_stall_routeout(4480, 3072, 768, "torch.float16") is False
+
+
+# K-1219 / K-1240 — E3 N-floor=256 anchor-projected admits (7 cells).
+# Pinned here for fixture-level traceability matching the K-1219 candidate
+# manifest and the K-1240 cross-arch backtest.
+K1219_E3_NFLOOR256_ADMITS_7_LIST = [
+    # (cid, M, N, K)
+    ("E3_S18_N256",   5972,  256,  768),
+    ("E3_S24_N256",   4480,  256,  768),
+    ("E3_S25_N256",   6016,  256, 1024),
+    ("E3_S30_N256",  16256,  256, 1024),
+    ("E3_S37_N256",  25600,  256,  256),
+    ("E3_S39_N256",  49152,  256,  256),
+    ("E3_E2M1_N256", 10112,  256, 1024),
+]
+
+
+def test_k1219_p8_envelope_contents_are_pinned_to_k1219_manifest():
+    """Pin the K-1219 7-cell N=256 admit set to source-of-truth (the K-1219
+    candidate manifest, validated cross-arch by K-1240 on MI300X + MI325X
+    + MI355X).  A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16")
+        for _cid, M, N, K in K1219_E3_NFLOOR256_ADMITS_7_LIST)
+    assert _K1219_E3_NFLOOR256_ADMITS_7 == expected
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1219_E3_NFLOOR256_ADMITS_7_LIST,
+                         ids=[c[0] for c in K1219_E3_NFLOOR256_ADMITS_7_LIST])
+def test_k1219_p8_admits_all_7_n256_cells(cid, M, N, K):
+    """Every K-1219 N=256 anchor-projected admit must fire the P8 strict-
+    equality match.  These 7 cells were paired n=30 HIP-graph hot-cache
+    measured cross-arch (MI300X + MI325X + MI355X) and confirmed safe by
+    K-1240 (no regression on any tested arch).  Lowering the N-floor
+    512 -> 256 is justified by R-1219.N-FLOOR-RELAXATION-IS-PORTABLE-WHEN-
+    MFMA-ISSUE-STALL-MECHANISM-IS-SHAPE-LIMITED (PMC evidence in K-1211)."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1219 N=256 admit {cid} ({M},{N},{K}) missed P8 envelope")
 
 
 @pytest.mark.parametrize("cid,M,N,K", P6_POSITIVES, ids=[c[0] for c in P6_POSITIVES])

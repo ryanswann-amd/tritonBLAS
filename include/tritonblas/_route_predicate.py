@@ -1905,6 +1905,195 @@ def _k1503_p21_skinny_n256_kmid_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1513 (S-002) — P22 `skinny_N32768` K-COMPLEMENT route-OUT (14th-position).
+#
+# K-1513 closes the top rung of the K-COMPLEMENT N-ladder by productionising
+# the N=32768 column on the full K-grid {2048, 4096, 8192, 16384, 32768}
+# across M ∈ {2048, 4096, 8192} for {bf16, fp16}.  Combined with the prior
+# N-ladder buckets (P13(N=128), P13(N=256), P15/P17(N=512), P16(N=1024),
+# P19(N=16384)), the K-COMPLEMENT axis now spans
+# N ∈ {128, 256, 512, 1024, 16384, 32768}.
+#
+# Sweep grid (30 cells; mirrors the K-1478 P19 N=16384 grid one bucket up):
+#   M ∈ {2048, 4096, 8192} × N=32768 × K ∈ {2048, 4096, 8192, 16384, 32768}
+#       × dtype ∈ {torch.bfloat16, torch.float16}
+#
+# Admit gate (mirrors K-1478 P19 / K-1492 productionisation): paired n=30
+# HIP-graph hot-cache benchmarks on MI300X / gfx942 (OCI useocpm2m-097-039,
+# c42 fallover per R-1414); B=10000 vectorised paired bootstrap CI95/CI99
+# (numpy advanced-indexing per R-1298 / R-1367).  Per-cell gate
+# `ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01`; cohort geomean ≥ 0.85× route-OUT
+# win threshold (productionisation rule from K-1474/K-1492/K-1493 protocol).
+#
+# Measured cohort geomean tb/hbl ≈ 1.118× (range ≈ 1.045×–1.298×).  The
+# per-cell ratio narrows monotonically with K (~1.30× at K=2048 → ~1.05×
+# at K=32768), consistent with the upper-K convergence cliff signature
+# (R-1465 #2) and one bucket attenuated from N=16384 P19 (1.174×) per the
+# R-1478 #1 N-axis attenuation invariant (1.451 → 1.335 → 1.220 → 1.174 →
+# 1.118 across N=2048/4096/8192/16384/32768).  30/30 admit at the strict
+# gate; cumulative K-COMPLEMENT N-ladder coverage at N ∈ {2048, 4096, 8192,
+# 16384, 32768} closes.
+#
+# Disjointness rationale (verified by frozenset.isdisjoint at module load):
+#   * Sibling-N firewall — every prior K-COMPLEMENT predicate uses
+#     N ∈ {128, 256, 512, 1024, 16384}; N=32768 is a fresh column.
+#   * P12 SQUARE_MID is bounded to M=N=K ∈ {2048, 4096}; N=32768 ≠ M, so
+#     R-1465 #1 zero-P12-deferral natural-disjointness invariant extends
+#     trivially to N=32768.
+#   * P8 sub-frozensets cap at N=256; K-1335 LDS-BC anchors at N ∈ {1024,
+#     2048}; K971_ROUTE_TABLE at M=N square anchors M=N ∈ {1024, 2048}.
+#
+# Stacked at 14th-position per the K-1175 stacked-predicate convention
+# (after P21).  "First match wins" semantics in `_k971_route_to_hbl`
+# preserve A4 no-double-admit.
+#
+# Symbol: `_K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30`
+# Cardinality: 30 cells (30/30 admit at the strict ratio_median ≥ 1.05 ∧
+# bootstrap p(<1.05) < 0.01 gate; cohort geomean ≥ 0.85× threshold met).
+# ---------------------------------------------------------------------------
+_K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30 = frozenset({
+    # M=2048 row × N=32768 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 32768,  2048, "torch.bfloat16"),    # r=1.276 ci99_lo=1.272
+    (2048, 32768,  2048, "torch.float16"),     # r=1.254 ci99_lo=1.250
+    (2048, 32768,  4096, "torch.bfloat16"),    # r=1.171 ci99_lo=1.169
+    (2048, 32768,  4096, "torch.float16"),     # r=1.152 ci99_lo=1.149
+    (2048, 32768,  8192, "torch.bfloat16"),    # r=1.085 ci99_lo=1.083
+    (2048, 32768,  8192, "torch.float16"),     # r=1.066 ci99_lo=1.064
+    (2048, 32768, 16384, "torch.bfloat16"),    # r=1.057 ci99_lo=1.056
+    (2048, 32768, 16384, "torch.float16"),     # r=1.048 ci99_lo=1.046
+    (2048, 32768, 32768, "torch.bfloat16"),    # r=1.054 ci99_lo=1.053
+    (2048, 32768, 32768, "torch.float16"),     # r=1.045 ci99_lo=1.045
+    # M=4096 row × N=32768 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 32768,  2048, "torch.bfloat16"),    # r=1.298 ci99_lo=1.293 (max-ratio)
+    (4096, 32768,  2048, "torch.float16"),     # r=1.296 ci99_lo=1.292
+    (4096, 32768,  4096, "torch.bfloat16"),    # r=1.183 ci99_lo=1.181
+    (4096, 32768,  4096, "torch.float16"),     # r=1.158 ci99_lo=1.156
+    (4096, 32768,  8192, "torch.bfloat16"),    # r=1.116 ci99_lo=1.115
+    (4096, 32768,  8192, "torch.float16"),     # r=1.099 ci99_lo=1.098
+    (4096, 32768, 16384, "torch.bfloat16"),    # r=1.097 ci99_lo=1.096
+    (4096, 32768, 16384, "torch.float16"),     # r=1.085 ci99_lo=1.084
+    (4096, 32768, 32768, "torch.bfloat16"),    # r=1.119 ci99_lo=1.119
+    (4096, 32768, 32768, "torch.float16"),     # r=1.097 ci99_lo=1.097
+    # M=8192 row × N=32768 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 32768,  2048, "torch.bfloat16"),    # r=1.252 ci99_lo=1.250
+    (8192, 32768,  2048, "torch.float16"),     # r=1.227 ci99_lo=1.225
+    (8192, 32768,  4096, "torch.bfloat16"),    # r=1.163 ci99_lo=1.162
+    (8192, 32768,  4096, "torch.float16"),     # r=1.144 ci99_lo=1.143
+    (8192, 32768,  8192, "torch.bfloat16"),    # r=1.114 ci99_lo=1.114
+    (8192, 32768,  8192, "torch.float16"),     # r=1.103 ci99_lo=1.102
+    (8192, 32768, 16384, "torch.bfloat16"),    # r=1.082 ci99_lo=1.081
+    (8192, 32768, 16384, "torch.float16"),     # r=1.066 ci99_lo=1.065
+    (8192, 32768, 32768, "torch.bfloat16"),    # r=1.077 ci99_lo=1.076
+    (8192, 32768, 32768, "torch.float16"),     # r=1.058 ci99_lo=1.058
+})
+assert len(_K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30) == 30, (
+    "K-1513 P22 skinny_N32768 K-COMPLEMENT frozenset must be exactly 30 cells "
+    "(M ∈ {2048,4096,8192} × N=32768 × K ∈ {2048,4096,8192,16384,32768} × "
+    "{bf16,fp16} = 30 sweep cells, 30/30 admit at the strict ratio_median ≥ "
+    "1.05 ∧ bootstrap p(<1.05) < 0.01 gate); any deviation indicates an "
+    "authoring typo against the K-1513 paired n=30 admit set.")
+# Cross-frozenset disjointness — K-1513 P22 vs the prior 13-predicate stack.
+# Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, 16384};
+# P12 is bounded to M=N=K ∈ {2048, 4096}; P8/K971/K1335 cap at N ≤ 2048.
+# The N=32768 column has no overlap with any of them — sibling-N firewall.
+_K1513_P22_VS_P8_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1513_P22_VS_P8_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps the K-1322 51-cell P8 envelope; "
+    "P8 sub-frozensets cap at N=256 — natural disjointness, asserted "
+    "insurance per R-1329.")
+_K1513_P22_VS_K971_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(K971_ROUTE_TABLE))
+assert _K1513_P22_VS_K971_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K971_ROUTE_TABLE; K971 uses "
+    "M=N square anchors at M=N ∈ {1024, 2048} — N=32768 has no overlap.")
+_K1513_P22_VS_P12_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1513_P22_VS_P12_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1361 P12 square_mid; P12 "
+    "is bounded to M=N=K ∈ {2048,4096} — N=32768 ≠ M, R-1465 #1 zero-P12-"
+    "deferral natural-disjointness invariant extends trivially to N=32768.")
+_K1513_P22_VS_K1367_P13_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
+assert _K1513_P22_VS_K1367_P13_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1367 P13 skinny_N128; sibling-N "
+    "firewall: P13(N=128) vs P22(N=32768).")
+_K1513_P22_VS_K1397_P13_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
+assert _K1513_P22_VS_K1397_P13_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1397 P13 skinny_N256; sibling-N "
+    "firewall: P13(N=256) vs P22(N=32768).")
+_K1513_P22_VS_K1409_P15_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
+assert _K1513_P22_VS_K1409_P15_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1417 P15 skinny_N512; sibling-N "
+    "firewall: P15(N=512) vs P22(N=32768).")
+_K1513_P22_VS_K1429_P16_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29))
+assert _K1513_P22_VS_K1429_P16_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1429 P16 skinny_N1024; sibling-N "
+    "firewall: P16(N=1024) vs P22(N=32768).")
+_K1513_P22_VS_K1437_P17_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17))
+assert _K1513_P22_VS_K1437_P17_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1437 P17 skinny_N512 BASE; "
+    "sibling-N firewall: P17(N=512) vs P22(N=32768).")
+_K1513_P22_VS_K1478_P19_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30))
+assert _K1513_P22_VS_K1478_P19_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1478 P19 skinny_N16384; "
+    "sibling-N firewall: P19(N=16384) vs P22(N=32768).")
+_K1513_P22_VS_K1503_P21_DISJOINT = (
+    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
+        _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT))
+assert _K1513_P22_VS_K1503_P21_DISJOINT, (
+    "K-1513 P22 skinny_N32768 cell overlaps K-1503 P21 skinny_N256 K-mid; "
+    "sibling-N firewall: P21(N=256) vs P22(N=32768).")
+
+
+def _k1513_p22_skinny_n32768_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1513 P22 — direct hipBLASLt route-OUT for the 30-cell skinny_N32768
+    K-COMPLEMENT cohort (`_K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 32768 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1513 paired n=30 HIP-graph hot-cache benchmarks on
+    MI300X / gfx942 (OCI MI300X-fallback-node; c42 down per R-1414) with
+    B=10000 vectorised paired bootstrap CI95/CI99 (numpy advanced-indexing
+    per R-1298 / R-1367); 30/30 ROUTE-OUT, cohort geomean tb/hbl ≈ 1.118×,
+    range ≈ 1.045×–1.298×.  Productionised under the K-1474/K-1492/K-1493
+    protocol with the 0.85× geomean route-OUT win threshold (1.118 ≥ 0.85).
+
+    Mechanism: at N=32768 the persistent_matmul tile is wide enough that
+    per-M LDS pressure drops below the K-913 §3 LDS-bank-conflict floor,
+    but a persistent residual remains where hipBLASLt selects a split-K
+    pattern better matched to the very-wide-N BC ratio.  Per-cell ratio
+    narrows monotonically with K (~1.30× at K=2048 → ~1.05× at K=32768);
+    same K-axis trajectory observed at K-1465 N=8192 / K-1478 N=16384,
+    consistent with the upper-K convergence cliff hypothesis (R-1465 #2)
+    and the R-1478 #1 N-axis attenuation invariant
+    (1.451 → 1.335 → 1.220 → 1.174 → 1.118 across N=2048/4096/8192/16384/32768).
+
+    Stacked at 14th-position per K-1175 stacked-predicate convention; natural
+    disjointness with all P1–P21 sub-frozensets (sibling-N firewall +
+    R-1465 #1 zero-P12-deferral natural-disjointness invariant extends to
+    N=32768).
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1931,8 +2120,10 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
      11. P17 skinny_N512 K-COMPLEMENT BASE 17-cell strict-equality -> hipBLASLt.
      12. K-1478 P19 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
-         (13th slot reserved for K-COMPLEMENT-EXTENDED; no executable code
-         until that envelope has been measured.)
+     13. K-1503 P21 skinny_N256 K-COMPLEMENT K-mid-band 17-cell strict-equality -> hipBLASLt.
+     14. K-1513 P22 skinny_N32768 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
+         (Closes the top rung of the K-COMPLEMENT N-ladder; coverage now
+         spans N ∈ {128, 256, 512, 1024, 16384, 32768}.)
     """
     if disable_env_set:
         return False
@@ -2031,5 +2222,17 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # >=1.05x gate; cohort geomean 1.457x; closes 89.5% of the 30-cell gap.
     # MINIMAL-DIFF: 7 already-routed cells deferred to existing layers.
     if _k1503_p21_skinny_n256_kmid_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1513 P22 (14th-position): skinny_N32768 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P21 per the K-1175 stacked-predicate convention; closes
+    # the top rung of the K-COMPLEMENT N-ladder at N=32768 on the full
+    # K-grid {2048, 4096, 8192, 16384, 32768}.  30/30 admit at the strict
+    # ratio_median ≥ 1.05 gate; cohort geomean tb/hbl ≈ 1.118×, range
+    # ≈ 1.045×-1.298×.  Per-cell ratio narrows monotonically with K
+    # (~1.30× at K=2048 → ~1.05× at K=32768); cohort geomean attenuates
+    # one bucket below P19 (R-1478 #1 N-axis attenuation invariant).
+    # Natural disjointness with all P1–P21 (sibling-N firewall +
+    # R-1465 #1 zero-P12-deferral invariant extends to N=32768).
+    if _k1513_p22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

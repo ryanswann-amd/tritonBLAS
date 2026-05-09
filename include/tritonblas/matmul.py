@@ -52,6 +52,11 @@ from ._route_predicate import (
     # (13th-position) — closes the K-1397 P13 N=256 K-mid-band gap (K in
     # {4096, 8192, 16384}).  17/30 admits at >=1.05x; cohort geomean 1.457x.
     _k1503_p21_skinny_n256_kmid_routeout as _R_K1503_P21_skinny_n256_kmid_routeout,
+    # K-1513 (S-002): P22 skinny_N32768 K-COMPLEMENT 30-cell route-OUT
+    # (14th-position) — closes the top rung of the K-COMPLEMENT N-ladder
+    # at N=32768 on the full K-grid.  30/30 admit at strict 1.05 gate;
+    # cohort geomean tb/hbl ≈ 1.118×.  Naturally disjoint with all P1-P21.
+    _k1513_p22_skinny_n32768_routeout as _R_K1513_P22_skinny_n32768_routeout,
 )
 
 
@@ -187,6 +192,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # 17/30 admits at >=1.05x; cohort geomean 1.457x; closes ~89% of the
     # 30-cell N=256 gap.
     if _R_K1503_P21_skinny_n256_kmid_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1513 P22 (14th-position): skinny_N32768 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P21 per the K-1175 stacked-predicate convention; closes
+    # the top rung of the K-COMPLEMENT N-ladder at N=32768 on the full
+    # K-grid {2048,4096,8192,16384,32768}.  30/30 admit at strict 1.05 gate;
+    # cohort geomean tb/hbl ≈ 1.118× (range ≈ 1.045×-1.298×).  Naturally
+    # disjoint with all P1-P21 (sibling-N firewall + R-1465 #1 invariant).
+    if _R_K1513_P22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

@@ -38,6 +38,7 @@ from tritonblas._route_predicate import (
     _K1161_E2_ADMITS_3,
     _K1205_EN3_ADMITS_8,
     _K1219_E3_NFLOOR256_ADMITS_7,
+    _K1332_P9_LONGK_SMALLSQ_ADMITS_10,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -88,9 +89,9 @@ K950_LAND_CELLS = [
 # K-950 LAND verdict (K-905 measurement overrides — documented in the PR
 # description).
 K950_ANCHOR_COLLISIONS = frozenset({
-    (1024, 1024, 16384, "torch.bfloat16"),  # L07
-    (1024, 1024, 16384, "torch.float16"),   # L09
-    (2048, 2048, 16384, "torch.float16"),   # L06
+    (1024, 1024, 16384, "torch.bfloat16"),  # L07 (K-905 anchor; K-1332 P9 confirms)
+    (1024, 1024, 16384, "torch.float16"),   # L09 (K-905 anchor; K-1332 P9 confirms)
+    (2048, 2048, 16384, "torch.float16"),   # L06 (K-905 anchor)
 })
 
 
@@ -687,36 +688,55 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1303_p8_envelope_size_is_exactly_43_after_k1219_extension():
-    """K-1303 unified composition: 13 K-1121 anchors + 12 K-1131 neighbors
+def test_k1332_p8_envelope_size_is_exactly_53_after_k1332_extension():
+    """K-1332 unified composition: 13 K-1121 anchors + 12 K-1131 neighbors
     + 3 K-1175/K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219
-    E3 N=256 admits = 43 cells.  Any silent edit changes this count and
-    trips this canary.
+    E3 N=256 admits + 10 K-1332 P9 longK_smallSquare admits = 53 cells.
+    Any silent edit changes this count and trips this canary.
 
     Provenance chain:
       * K-1144 originally pinned 25.
-      * K-1175 extended by 3 K-1161-validated cells (E2_I4 K-interior
-        admit + 2 M-axis admits at K=1024) -> 28.
+      * K-1175 extended by 3 K-1161-validated cells -> 28.
       * K-1216 stacked E1 envelope after P8 (no envelope-size change).
-      * K-1231 / K-1205 extended by 8 N=128 cells (E_N3 cohort) -> 36
-        (productionised in K-1275 on top of K-1216 stacked dispatch).
-      * K-1219 / K-1240 extended by 7 N=256 cells (E3 cohort,
-        K-1131-style anchor projection at N-floor=256), validated
-        independently on commit f110d64 (fix/K-1219-n256).  +7 -> 43.
-      * K-1303 composes K-1227 + K-1219 onto the K-1216 stacked baseline
-        (K-1275 already lands K-1227 at 36; this extension adds K-1219).
-        The two extensions sit on disjoint N axes (128 vs 256), so the
-        union is pairwise-disjoint with the prior three sets and with
-        each other (asserted in _route_predicate.py at module load and
-        again here)."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43
+      * K-1231 / K-1205 extended by 8 N=128 cells (E_N3) -> 36.
+      * K-1219 / K-1240 extended by 7 N=256 cells (E3) -> 43 (K-1303 unified).
+      * K-1326 ranked the longK_smallSquare bucket (M==N small-square,
+        K>=2*M long-K) as the largest predicate-addressable residual;
+        K-1332 ran a fresh PMC sweep on MI300X (rocprofv1, 100-dispatch
+        hot-cache) showing TB persistent_matmul has SQ_LDS_BANK_CONFLICT/
+        SQ_INSTS_LDS = 0.36-1.78 cyc/inst on M=N in {256,512,1024}, K in
+        {8192,16384}, vs HBL = 0.0; SQ_WAIT_INST_LDS/SQ_WAVES ratio
+        TB/HBL > 7x on every cell.  Paired n=30 HIP-graph hot-cache on
+        the 90-cell K-1247 ∪ P9 cohort (B=10000 percentile CI95) shows
+        all 8 NEW marginal cells with CI95-lo > 1.0 (1.48x-4.06x speedup),
+        cohort geomean v K-1303 = 1.069x CI95 [1.025,1.126], 0/76
+        regressions on existing K-1247 admits.  +10 -> 53."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 53
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
     assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
+    assert len(_K1332_P9_LONGK_SMALLSQ_ADMITS_10) == 10
     # K-1303 cross-band disjointness pin: K-1227 (N=128) vs K-1219 (N=256).
     assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8)
+    # K-1332 cross-disjointness pin (M-axis projection at N=256).
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(
+        _K1219_E3_NFLOOR256_ADMITS_7)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1205_EN3_ADMITS_8)
+
+
+def test_k1303_p8_envelope_size_is_exactly_43_after_k1219_extension():
+    """K-1303 invariance pin (kept verbatim by K-1332): every cell in the
+    pre-K-1332 43-cell envelope is still admitted, no silent drop."""
+    pre_k1332 = (
+        _K1121_P8_ANCHORS_13
+        | _K1131_P8_NEIGHBORS_12
+        | _K1161_E2_ADMITS_3
+        | _K1205_EN3_ADMITS_8
+        | _K1219_E3_NFLOOR256_ADMITS_7)
+    assert len(pre_k1332) == 43, "pre-K-1332 envelope size drift"
+    assert pre_k1332.issubset(_P8_MFMA_ISSUE_STALL_ROUTEOUT)
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -887,10 +907,21 @@ def test_k1144_p8_overrides_k1109_allowlist_when_env_set(monkeypatch):
 def test_k1144_p8_does_not_overlap_k950_land_set():
     """K-950 9-cell LAND set must remain non-routed by P8 (the LAND set
     is the K-912/K-883 NO-LAND-for-guarded-overrides cohort).  P8 strict-
-    equality must NOT match any K-950 LAND cell; this preserves the
-    zero-leakage property the K-1003 P5 verification contract guarantees."""
-    for cid, M, N, K, dtype, _cohort in K950_LAND_CELLS:
-        assert _p8_mfma_issue_stall_routeout(M, N, K, dtype) is False, (
+    equality must NOT match any K-950 LAND cell EXCEPT the documented
+    K950_ANCHOR_COLLISIONS overrides (which K-905 / K-1332 P9 anchor-table
+    measurements explicitly contradict the LAND verdict for, with paired
+    n=30 evidence; see PR descriptions for K-905 and K-1332).  This
+    preserves the zero-leakage property the K-1003 P5 verification
+    contract guarantees for the non-overridden subset."""
+    for cid, M, N, K, dtype in [(c[0], c[1], c[2], c[3], c[4]) for c in K950_LAND_CELLS]:
+        admit = _p8_mfma_issue_stall_routeout(M, N, K, dtype)
+        key = (M, N, K, str(dtype))
+        if key in K950_ANCHOR_COLLISIONS:
+            # Documented K-905 / K-1332 anchor-table override -- LAND verdict
+            # was falsified by paired n=30 measurement; P8 may legitimately
+            # admit these cells.
+            continue
+        assert admit is False, (
             f"P8 leaked into K-950 LAND set on {cid} ({M},{N},{K},{dtype})")
 
 
@@ -1427,13 +1458,17 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1175 P8 cell {cell} dropped from K-1231 envelope; "
             "K-1205 must be strict-equality union only.")
-    # Symmetric (post K-1303): every cell beyond the original 28-cell
-    # baseline must come from K-1205 (8 N=128) or K-1219 (7 N=256).
+    # Symmetric (post K-1332): every cell beyond the original 28-cell
+    # baseline must come from K-1205 (8 N=128), K-1219 (7 N=256), or
+    # K-1332 P9 (10 longK_smallSquare admits at M=N in {256,512,1024}).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1205
-    assert delta == (_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7), (
+    expected = (_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7
+                | _K1332_P9_LONGK_SMALLSQ_ADMITS_10)
+    assert delta == expected, (
         "Cells added to P8 envelope past K-1175 do not match "
-        "_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7 exactly; "
-        "an unattributed cell crept in.")
+        "_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7 "
+        "| _K1332_P9_LONGK_SMALLSQ_ADMITS_10 exactly; an unattributed "
+        "cell crept in.")
 
 
 # ---------------------------------------------------------------------------
@@ -1575,12 +1610,12 @@ def test_k1219_p8_e1_stack_no_double_route_for_e3_admits():
 
 
 def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
-    """K-1275 -> K-1303 invariance check: the K-1275 36-cell P8 envelope
-    (28 baseline + 8 K-1205 E_N3) is preserved exactly -- K-1219 strict-
-    equality union ADDS 7 cells without re-measuring or modifying any
-    existing K-1144/K-1175/K-1205 cell.  This is R-1184.STRICT-EQUALITY-
-    UNION-PROVES-EXISTING-CELL-INVARIANCE-WITHOUT-RE-MEASUREMENT in test
-    form (extended to K-1219)."""
+    """K-1275 -> K-1303 -> K-1332 invariance check: the K-1275 36-cell
+    P8 envelope (28 baseline + 8 K-1205 E_N3) is preserved exactly --
+    successive strict-equality unions ADD cells without re-measuring or
+    modifying any existing K-1144/K-1175/K-1205 cell.  This is
+    R-1184.STRICT-EQUALITY-UNION-PROVES-EXISTING-CELL-INVARIANCE-
+    WITHOUT-RE-MEASUREMENT in test form (extended through K-1332)."""
     pre_k1219 = (
         _K1121_P8_ANCHORS_13
         | _K1131_P8_NEIGHBORS_12
@@ -1589,11 +1624,179 @@ def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
     assert len(pre_k1219) == 36
     for cell in pre_k1219:
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
-            f"K-1275 P8 cell {cell} dropped from K-1303 envelope; "
-            "K-1219 must be strict-equality union only.")
-    # Symmetric: every new cell added by K-1219 must be in E3.
+            f"K-1275 P8 cell {cell} dropped from K-1332 envelope; "
+            "successive unions must be strict-equality only.")
+    # Symmetric: every new cell added past K-1275 must come from
+    # K-1219 (7 N=256 admits) or K-1332 P9 (10 longK_smallSquare admits).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1219
-    assert delta == _K1219_E3_NFLOOR256_ADMITS_7, (
+    expected = _K1219_E3_NFLOOR256_ADMITS_7 | _K1332_P9_LONGK_SMALLSQ_ADMITS_10
+    assert delta == expected, (
         "Cells added to P8 envelope past K-1275 do not match "
-        "_K1219_E3_NFLOOR256_ADMITS_7 exactly; an unattributed "
+        "(_K1219_E3_NFLOOR256_ADMITS_7 | _K1332_P9_LONGK_SMALLSQ_ADMITS_10)"
+        " exactly; an unattributed cell crept in.")
+
+
+
+# ---------------------------------------------------------------------------
+# K-1332 (S-002) -- P9 longK_smallSquare LDS-bank-conflict route-OUT pins.
+# 10 admits (6 bf16 + 4 fp16) at M=N in {256, 512, 1024}, K in {8192, 16384}.
+# K-1326 ranked this as the largest predicate-addressable residual after
+# K-1303's 43-cell stack; K-1332 captured fresh rocprofv1 PMC on MI300X
+# (rad-mi300x-1 fallback for c42 SSH outage) confirming TB persistent_matmul
+# is LDS-bank-conflict-bound (1.45-1.78 cyc/inst at M>=512; 0.36 at M=256)
+# while HBL Cijk_Ailk_Bljk has SQ_LDS_BANK_CONFLICT = 0.  Paired n=30
+# HIP-graph hot-cache (B=10000) -- all 8 marginal cells CI95-lo > 1.0,
+# cohort geomean 1.069x v K-1303, 0/76 K-1247 regressions.
+# ---------------------------------------------------------------------------
+K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST = [
+    # (cid, M, N, K, dtype, hbl_tb_med, ci95_lo) -- from K-1332 paired n=30
+    ("P9_M256_K8K_bf16",   256,  256,  8192, "torch.bfloat16", 2.272, 2.226),
+    ("P9_M256_K16K_bf16",  256,  256, 16384, "torch.bfloat16", 4.060, 4.037),
+    ("P9_M512_K8K_bf16",   512,  512,  8192, "torch.bfloat16", 1.850, 1.840),
+    ("P9_M512_K16K_bf16",  512,  512, 16384, "torch.bfloat16", 2.486, 2.472),
+    ("P9_M1K_K8K_bf16",   1024, 1024,  8192, "torch.bfloat16", 1.504, 1.496),
+    ("P9_M1K_K16K_bf16",  1024, 1024, 16384, "torch.bfloat16", 1.715, 1.706),  # also in K971
+    ("P9_M512_K8K_fp16",   512,  512,  8192, "torch.float16",  1.793, 1.783),
+    ("P9_M512_K16K_fp16",  512,  512, 16384, "torch.float16",  2.397, 2.381),
+    ("P9_M1K_K8K_fp16",   1024, 1024,  8192, "torch.float16",  1.476, 1.469),
+    ("P9_M1K_K16K_fp16",  1024, 1024, 16384, "torch.float16",  1.673, 1.663),  # also in K971
+]
+
+
+def test_k1332_p9_admits_envelope_size_is_exactly_10():
+    """Pin K-1332 P9 sub-frozenset cardinality.  Any silent edit trips
+    this canary."""
+    assert len(_K1332_P9_LONGK_SMALLSQ_ADMITS_10) == 10
+
+
+def test_k1332_p9_admits_envelope_contents_pinned_to_k1332_manifest():
+    """Pin the K-1332 10-admit envelope to source-of-truth (the K-1332
+    paired n=30 dataset summarised in K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST).
+    A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, dt)
+        for _cid, M, N, K, dt, _hbl_tb, _ci_lo in K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10 == expected
+
+
+def test_k1332_p9_admits_all_have_M_equals_N_small_square():
+    """Structural shape-discipline invariant: K-1332 staged the longK_
+    smallSquare bucket = M==N && M in {256, 512, 1024} per K-1326's
+    PMC-confirmed cluster definition.  Any drift trips here."""
+    for (M, N, K, _dt) in _K1332_P9_LONGK_SMALLSQ_ADMITS_10:
+        assert M == N, (
+            f"K-1332 P9 cell {(M, N, K)!r} is not square; "
+            "longK_smallSquare bucket is M==N by definition.")
+        assert M in {256, 512, 1024}, (
+            f"K-1332 P9 cell {(M, N, K)!r} has M={M} outside "
+            "the K-1326-confirmed {256, 512, 1024} small-square set.")
+
+
+def test_k1332_p9_admits_all_have_K_long_relative_to_M():
+    """Structural K-floor invariant: the longK_smallSquare bucket requires
+    K >= 8192 (per task brief K-1332) and K in {8192, 16384} per the
+    measured grid.  Any drift trips here."""
+    for (M, N, K, _dt) in _K1332_P9_LONGK_SMALLSQ_ADMITS_10:
+        assert K in {8192, 16384}, (
+            f"K-1332 P9 cell {(M, N, K)!r} has K={K} outside "
+            "the {8192, 16384} long-K set.")
+        assert K >= 2 * M, (
+            f"K-1332 P9 cell {(M, N, K)!r} has K/M={K/M} < 2; "
+            "longK_smallSquare requires K/min(M,N) >= 2 (PMC threshold "
+            "for LDS bank-conflict tax accumulation per K-913 anchor).")
+
+
+def test_k1332_p9_admits_dtype_in_bf16_or_fp16():
+    """Structural dtype invariant: K-1332 P9 covers bf16 + fp16 (the K-913
+    PMC anchor and the 4-cell bench mirror confirmed dtype-symmetric
+    LDS-bank-conflict mechanism on persistent_matmul).  Any other dtype
+    indicates a covert envelope leak."""
+    for (M, N, K, dt) in _K1332_P9_LONGK_SMALLSQ_ADMITS_10:
+        assert dt in ("torch.bfloat16", "torch.float16"), (
+            f"K-1332 P9 cell {(M, N, K, dt)!r} has dtype {dt!r}; "
+            "K-1332 P9 covers only bf16 + fp16.")
+
+
+def test_k1332_p9_admits_pairwise_disjoint_with_prior_five_subsets():
+    """K-1332 P9 cells (M=N in {256,512,1024}, N <= 1024) have no overlap
+    with K-1121/K-1131/K-1161 anchors (N >= 896 with M-anchor mismatch),
+    K-1205 N=128, or K-1219 N=256 (which all sit at M >= 4480).  This
+    structural disjointness is what the runtime asserts in
+    _route_predicate.py rely on."""
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1205_EN3_ADMITS_8)
+    assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,dtype,hbl_tb_med,ci95_lo", K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST,
+    ids=[c[0] for c in K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST])
+def test_k1332_p9_admits_all_10_cells_fire_p8(cid, M, N, K, dtype, hbl_tb_med,
+                                               ci95_lo):
+    """Every K-1332 P9 admit cell must fire the P8 strict-equality match."""
+    dt = torch.bfloat16 if dtype == "torch.bfloat16" else torch.float16
+    assert _p8_mfma_issue_stall_routeout(M, N, K, dt) is True, (
+        f"K-1332 P9 admit {cid} ({M},{N},{K},{dtype}) missed P8 envelope")
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,dtype,hbl_tb_med,ci95_lo", K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST,
+    ids=[c[0] for c in K1332_P9_LONGK_SMALLSQ_ADMITS_10_LIST])
+def test_k1332_p9_dispatch_routes_all_10_cells_out_to_hbl(
+        cid, M, N, K, dtype, hbl_tb_med, ci95_lo):
+    """End-to-end dispatch check: with default carve-outs disabled,
+    _k971_route_to_hbl must return True for every K-1332 P9 admit so
+    the cell is routed to hipBLASLt."""
+    dt = torch.bfloat16 if dtype == "torch.bfloat16" else torch.float16
+    decision = _k971_route_to_hbl(
+        M, N, K, a_dtype=dt, b_dtype=dt,
+        enable_streamk=False, work_stealing=False)
+    assert decision is True, (
+        f"{cid} (M={M} N={N} K={K} dt={dtype}) was not routed to hipBLASLt; "
+        f"expected True per K-1332 paired n=30 hbl/tb_med={hbl_tb_med:.3f}x")
+
+
+def test_k1332_p9_refute_cells_are_not_admitted():
+    """K-1332 also probed 4 boundary cells that should NOT be admitted by
+    P9 (to demonstrate the predicate is conservative, not an open-ended
+    bf16-square route-OUT).  These cells either fall outside the task brief
+    (K < 8192 OR M > 1024) or have an LDS-bank-conflict signature that does
+    not yield a HBL win on the bench (square_mid territory).  Per the
+    K-1332 paired n=30 measurement, P9 must reject all four."""
+    refute = [
+        (1024, 1024, 1024, "torch.bfloat16"),  # K=M square_mid; TB wins (1.14x)
+        (1024, 1024, 4096, "torch.bfloat16"),  # K=4M but K<8192 -- below brief
+        (2048, 2048, 8192, "torch.bfloat16"),  # M=2048 -- outside brief M<=1024
+        (4096, 4096, 8192, "torch.bfloat16"),  # M=4096 -- LDS amortizes
+    ]
+    for (M, N, K, dt) in refute:
+        dtype = torch.bfloat16 if dt == "torch.bfloat16" else torch.float16
+        admit = _p8_mfma_issue_stall_routeout(M, N, K, dtype)
+        assert admit is False, (
+            f"K-1332 P9 leaked an admit on refute cell {(M, N, K, dt)!r}; "
+            "this cell is outside the strict-equality envelope by design.")
+
+
+def test_k1332_p9_does_not_disturb_k1303_43_cell_envelope():
+    """K-1303 -> K-1332 invariance check (R-1184): the K-1303 43-cell
+    P8 envelope is preserved exactly -- K-1332 P9 union ADDS 10 cells
+    without re-measuring or modifying any existing K-1144/K-1175/K-1205/
+    K-1219 cell."""
+    pre_k1332 = (
+        _K1121_P8_ANCHORS_13
+        | _K1131_P8_NEIGHBORS_12
+        | _K1161_E2_ADMITS_3
+        | _K1205_EN3_ADMITS_8
+        | _K1219_E3_NFLOOR256_ADMITS_7)
+    assert len(pre_k1332) == 43
+    for cell in pre_k1332:
+        assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1303 P8 cell {cell} dropped from K-1332 envelope; "
+            "K-1332 must be strict-equality union only.")
+    delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1332
+    assert delta == _K1332_P9_LONGK_SMALLSQ_ADMITS_10, (
+        "Cells added to P8 envelope past K-1303 do not match "
+        "_K1332_P9_LONGK_SMALLSQ_ADMITS_10 exactly; an unattributed "
         "cell crept in.")

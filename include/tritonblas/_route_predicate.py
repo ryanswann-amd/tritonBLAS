@@ -535,6 +535,64 @@ _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942]
 })
 
+# ---------------------------------------------------------------------------
+# K-1332 (S-002) -- P9 longK_smallSquare LDS-bank-conflict route-OUT
+# (10 cells, bf16 + fp16).  K-1326 ranked the longK_smallSquare bucket
+# (M==N small-square, K>=2*M long-K) as the largest predicate-addressable
+# residual after K-1303's 4-predicate stack (P8 43-cell + E1 + K-1175 +
+# K-1219).  K-1332 ran a fresh PMC sweep on c42 MI300X (failed over to
+# rad-mi300x-1 on c42 SSH refusal) for the M,N<=1024 K>=8192 sub-region:
+#
+#   PMC discriminator (rocprofv1 100-dispatch hot-cache):
+#     SQ_LDS_BANK_CONFLICT / SQ_INSTS_LDS  (cyc/inst)
+#                  TB persistent_matmul    HBL Cijk_Ailk_Bljk
+#       1024^2/8K           1.778                 0.000
+#       1024^2/16K          1.778                 0.000
+#        512^2/8K           1.455                 0.000
+#        512^2/16K          1.455                 0.000
+#        256^2/8K           0.364                 0.000
+#        256^2/16K          0.364                 0.000
+#     SQ_WAIT_INST_LDS / SQ_WAVES (cyc/wave) ratio TB/HBL > 7x on every
+#     cell.  The mechanism is byte-identical to K-913 P-cell.
+#
+#   Paired n=30 HIP-graph hot-cache verdict (B=10000 percentile CI95):
+#                       hbl_us / tb_us (median)   k1332-route-OUT speedup
+#       (1024,1024,8192)   bf16   0.664           1.504x  CI95 [1.496,1.514]
+#       (1024,1024,16384)  bf16   0.583           (already routed by K971)
+#       ( 512, 512, 8192)  bf16   0.539           1.850x  CI95 [1.840,1.859]
+#       ( 512, 512,16384)  bf16   0.402           2.486x  CI95 [2.472,2.499]
+#       ( 256, 256, 8192)  bf16   0.434           2.272x  CI95 [2.226,2.319]
+#       ( 256, 256,16384)  bf16   0.245           4.060x  CI95 [4.037,4.082]
+#       ( 512, 512, 8192)  fp16   0.557           1.793x  CI95 [1.783,1.803]
+#       ( 512, 512,16384)  fp16   0.414           2.397x  CI95 [2.381,2.413]
+#       (1024,1024, 8192)  fp16   0.680           1.476x  CI95 [1.469,1.484]
+#       (1024,1024,16384)  fp16   0.598           (already routed by K971)
+#
+# All 8 NEW marginal cells have CI95-lo > 1.0; cohort geomean v K-1303
+# 1.069x CI95 [1.025,1.126] over the 90-cell K-1247 union ∪ P9 cohort,
+# with 0/76 regressions on existing K-1247 admits (R-1184 invariance).
+#
+# Disjointness with prior P8 sub-frozensets is by construction:
+#   * K-1121/K-1131/K-1161 anchors+neighbors all have N>=896
+#   * K-1205 N=128 cells: our N in {256,512,1024} -- disjoint
+#   * K-1219 N=256 cells: our N=256 cells have M=256, K-1219 has M>=4480
+# (asserted at module load and pinned in tests/test_k971_route_predicate.py).
+# ---------------------------------------------------------------------------
+_K1332_P9_LONGK_SMALLSQ_ADMITS_10 = frozenset({
+    # ----- bf16 -- 6 cells covering M=N in {256, 512, 1024}, K in {8192, 16384}
+    ( 256,  256,  8192, "torch.bfloat16"),  # P9 hbl/tb 0.434  PMC LDSBC/inst=0.364
+    ( 256,  256, 16384, "torch.bfloat16"),  # P9 hbl/tb 0.245
+    ( 512,  512,  8192, "torch.bfloat16"),  # P9 hbl/tb 0.539  PMC LDSBC/inst=1.455
+    ( 512,  512, 16384, "torch.bfloat16"),  # P9 hbl/tb 0.402
+    (1024, 1024,  8192, "torch.bfloat16"),  # P9 hbl/tb 0.664  PMC LDSBC/inst=1.778; K-913 anchor
+    (1024, 1024, 16384, "torch.bfloat16"),  # P9 hbl/tb 0.583  K-913 P-cell + already in K971
+    # ----- fp16 -- 4 cells (M=N in {512, 1024}, K in {8192, 16384})
+    ( 512,  512,  8192, "torch.float16"),
+    ( 512,  512, 16384, "torch.float16"),
+    (1024, 1024,  8192, "torch.float16"),
+    (1024, 1024, 16384, "torch.float16"),   # also in K971
+})
+
 # Composed 43-cell P8 envelope (K-1303 unified).  Five named provenance
 # frozensets (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits,
 # K-1231/K-1205 E_N3 N=128 admits, K-1219 E3 N=256 admits) -- the
@@ -549,12 +607,13 @@ _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
     | _K1219_E3_NFLOOR256_ADMITS_7
+    | _K1332_P9_LONGK_SMALLSQ_ADMITS_10
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
-    "K-1303 unified P8 envelope must be exactly 43 cells (13 K-1121 "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 53, (
+    "K-1332 unified P8 envelope must be exactly 53 cells (13 K-1121 "
     "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
-    "N=128 admits + 7 K-1219 E3 N=256 admits); a duplicate or stray "
-    "entry has crept in.")
+    "N=128 admits + 7 K-1219 E3 N=256 admits + 10 K-1332 P9 longK "
+    "small-square admits); a duplicate or stray entry has crept in.")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -596,6 +655,28 @@ assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8), (
     "N=128 admits.  The two campaigns operate on disjoint N axes by "
     "construction; an overlap indicates an authoring typo in one of "
     "the two frozensets.")
+# K-1332 P9 longK-smallSquare disjointness with the prior 43-cell envelope.
+# The 10 P9 cells (M=N in {256,512,1024}, K in {8192,16384}, bf16+fp16)
+# have N <= 1024 by construction; K-1121/K-1131/K-1161 all sit at
+# N >= 896 with M-anchor mismatch, K-1205 lives at N=128, and K-1219
+# N=256 cells all have M >= 4480 (none equal M=256).  The union is
+# pairwise-disjoint with all five prior provenance frozensets.
+assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1332 P9 admit overlaps a K-1121 anchor; the K-1121 13-cell PMC-"
+    "anchor set has min N = 1792, well above the K-1332 P9 N <= 1024 tier.")
+assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1332 P9 admit overlaps a K-1131 neighbor; the only K-1131 cell "
+    "with N <= 1024 is (20352, 1024, 1024) and K-1332 P9 cells have "
+    "M in {256, 512, 1024} -- M=20352 is excluded.")
+assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1332 P9 admit overlaps a K-1161 E2 admit; K-1161 cells sit at "
+    "N in {1792, 2048}, not N <= 1024.")
+assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1205_EN3_ADMITS_8), (
+    "K-1332 P9 admit overlaps a K-1205 E_N3 N=128 admit; K-1332 P9 cells "
+    "all have N in {256, 512, 1024} -- disjoint from N=128 by construction.")
+assert _K1332_P9_LONGK_SMALLSQ_ADMITS_10.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1332 P9 admit overlaps a K-1219 E3 N=256 admit; K-1332 P9 N=256 "
+    "cells have M=256 by construction, K-1219 N=256 cells have M >= 4480.")
 
 
 # ---------------------------------------------------------------------------
@@ -634,16 +715,17 @@ def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219 -- unified
-    in K-1303) — direct hipBLASLt route-OUT for the quintuply-validated
-    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors +
-    K-1175/K-1161 E2 admits + K-1231/K-1205 E_N3 N=128 admits +
-    K-1219 E3 N=256 admits).
+    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219 / K-1332
+    -- unified in K-1332) — direct hipBLASLt route-OUT for the
+    sextuply-validated route-OUT cohort (K-1121 anchors + K-1131
+    neighbors + K-1175/K-1161 E2 admits + K-1231/K-1205 E_N3 N=128 admits +
+    K-1219 E3 N=256 admits + K-1332 P9 longK_smallSquare admits).
 
-    Returns True iff (M, N, K, dtype) matches one of the 43 strict-equality
-    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
-    (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
-    parity is tracked separately on the K-1093 / K-1125 line).
+    Returns True iff (M, N, K, dtype) matches one of the 53 strict-equality
+    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16+fp16 (K-1144 / K-1131 /
+    K-1219 lineage is bf16-only; K-1332 P9 longK_smallSquare added 4 fp16
+    cells in addition to 6 bf16 cells -- all PMC-validated as LDS-bank-
+    conflict-bound on persistent_matmul).
 
     This predicate is consulted **before** the K-1089 P6 admit-back-to-
     kernel check inside ``_k971_route_to_hbl`` so K-1121's measurement
@@ -662,7 +744,13 @@ def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     measurement campaign rather than P5's structural pathology heuristic.
     """
     if not _dtype_is_bf16(dtype):
-        return False
+        # K-1332 P9 longK_smallSquare extends to fp16 (4 fp16 admits in the
+        # _K1332_P9_LONGK_SMALLSQ_ADMITS_10 sub-frozenset).  All other
+        # sub-frozensets (K-1121/K-1131/K-1161/K-1205/K-1219) are bf16-only
+        # by source-measurement scope, so non-bf16 lookups consult only the
+        # K-1332 P9 set to preserve the bf16-only invariant for the rest of
+        # the envelope.
+        return (int(M), int(N), int(K), str(dtype)) in _K1332_P9_LONGK_SMALLSQ_ADMITS_10
     return (int(M), int(N), int(K), str(dtype)) in _P8_MFMA_ISSUE_STALL_ROUTEOUT
 
 
@@ -688,10 +776,11 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
-    # K-1144 + K-1175 + K-1231/K-1205 + K-1219 (K-1303 unified): P8
-    # 43-cell strict-equality (13 K-1121 anchors + 12 K-1131 neighbors +
+    # K-1144 + K-1175 + K-1231/K-1205 + K-1219 + K-1332 (K-1332 unified):
+    # P8 53-cell strict-equality (13 K-1121 anchors + 12 K-1131 neighbors +
     # 3 K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219 E3
-    # N=256 admits) takes precedence over P6 admit so K-1121's paired
+    # N=256 admits + 10 K-1332 P9 longK_smallSquare admits) takes
+    # precedence over P6 admit so K-1121's paired
     # n=30 evidence overrides K-1089 envelope admit for the S24/S29/N11
     # overlap.  K-1205's 8 N=128 and K-1219's 7 N=256 additions are
     # disjoint from K-1089 P6 envelope (P6 has no N<896 cells), so the

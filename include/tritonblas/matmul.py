@@ -98,12 +98,8 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-1652: rocprofv2 on MI300X (gfx942) confirms kpack=1 emits ZERO
-    # SQ_LDS_BANK_CONFLICT for the M=N=4096 cohort -- the Triton AMD backend
-    # already picks an XOR-permuted LDS layout. kpack=2 *introduces* ~89% LDS
-    # bank-conflict ratio and 28 B/work-item of extra scratch, regressing the
-    # cohort by ~9%. Do not change without re-running the K-1652 PMC sweep
-    # (see tests/test_lds_swizzle_policy.py).
+    # K-1652: kpack=1 is PMC-verified bank-conflict-free on the M=N=4096
+    # cohort (MI300X/gfx942); kpack=2 regresses ~9%. See tests/test_lds_swizzle_policy.py.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -250,8 +246,7 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-1652: kpack=1 is bank-conflict-free on this kernel; see the matching
-    # comment in persistent_matmul_lt above and tests/test_lds_swizzle_policy.py.
+    # K-1652: kpack=1 is PMC-verified bank-conflict-free; see persistent_matmul_lt.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

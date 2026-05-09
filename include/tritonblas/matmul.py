@@ -31,7 +31,7 @@ from ._route_predicate import (
     # K-1361 (S-002): P12 square_mid PMC-driven 4-cell route-OUT (6th-position).
     _k1361_p12_square_mid_routeout as _R_K1361_P12_square_mid_routeout,
     # K-1367 (S-002): P13 skinny_N128 K-COMPLEMENT 18-cell route-OUT (7th-position).
-    _k1367_p13_skinny_n128_kcomplement_routeout as _R_K1367_P13_skinny_n128_kcomplement_routeout,
+    _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
 )
 
 
@@ -96,7 +96,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-913 §3 LDS-bank-conflict discriminator on the persistent_matmul N=128
     # column-narrow LDS layout). Disjoint by construction with all P1–P12
     # sub-frozensets via cross-frozenset asserts at module load.
-    if _R_K1367_P13_skinny_n128_kcomplement_routeout(int(M), int(N), int(K), a_dtype): return True
+    if _R_K1367_P13_skinny_n128_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

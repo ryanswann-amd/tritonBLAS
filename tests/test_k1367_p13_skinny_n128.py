@@ -1,7 +1,7 @@
 """K-1367 P13 + K-1361 P12 pin tests — torch-free.
 
 Validates the K-1379 productionisation of the K-1367 RETRY-winning 18-cell
-`_K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18` frozenset stacked as the
+`_K1367_P13_SKINNY_N128_ROUTEOUT_18` frozenset stacked as the
 7th-position envelope on top of the K-1361 P12 55-cell baseline.
 
 These tests pin:
@@ -26,10 +26,10 @@ import pytest
 from tritonblas._route_predicate import (
     K971_ROUTE_TABLE,
     _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4,
-    _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18,
+    _K1367_P13_SKINNY_N128_ROUTEOUT_18,
     _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _k1361_p12_square_mid_routeout,
-    _k1367_p13_skinny_n128_kcomplement_routeout,
+    _k1367_p13_skinny_n128_routeout,
     k971_route_decision,
 )
 
@@ -43,7 +43,7 @@ def test_p12_square_mid_cardinality_4():
 
 
 def test_p13_skinny_n128_kcomplement_cardinality_18():
-    assert len(_K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18) == 18
+    assert len(_K1367_P13_SKINNY_N128_ROUTEOUT_18) == 18
 
 
 def test_envelope_total_post_p13_is_73():
@@ -57,7 +57,7 @@ def test_envelope_total_post_p13_is_73():
     total = (
         len(_P8_MFMA_ISSUE_STALL_ROUTEOUT)
         + len(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
-        + len(_K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18)
+        + len(_K1367_P13_SKINNY_N128_ROUTEOUT_18)
     )
     assert total == 73, (
         f"Expected 51 + 4 + 18 = 73 strict-equality cells across P8/P12/P13; "
@@ -89,11 +89,11 @@ def _expected_p12_4_cells():
 
 def test_p13_membership_exactly_18_kcomplement_cells():
     expected = _expected_p13_18_cells()
-    assert _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18 == expected, (
+    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18 == expected, (
         "K-1367 P13 frozenset diverges from the K-COMPLEMENT bucket rule: "
         "M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16,fp16}.\n"
-        f"  missing : {sorted(expected - _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18)}\n"
-        f"  unknown : {sorted(_K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18 - expected)}")
+        f"  missing : {sorted(expected - _K1367_P13_SKINNY_N128_ROUTEOUT_18)}\n"
+        f"  unknown : {sorted(_K1367_P13_SKINNY_N128_ROUTEOUT_18 - expected)}")
 
 
 def test_p12_membership_exactly_4_diagonal_cells():
@@ -110,17 +110,17 @@ def test_p12_membership_exactly_4_diagonal_cells():
 # R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.
 # ---------------------------------------------------------------------------
 def test_p13_disjoint_from_p8():
-    assert _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
         _P8_MFMA_ISSUE_STALL_ROUTEOUT)
 
 
 def test_p13_disjoint_from_k971_route_table():
-    assert _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
         K971_ROUTE_TABLE)
 
 
 def test_p13_disjoint_from_p12():
-    assert _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
         _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
 
 
@@ -138,7 +138,7 @@ def test_p12_disjoint_from_k971_route_table():
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("M,N,K,dtype", sorted(_expected_p13_18_cells()))
 def test_p13_predicate_admits_every_kcomplement_cell(M, N, K, dtype):
-    assert _k1367_p13_skinny_n128_kcomplement_routeout(M, N, K, dtype) is True
+    assert _k1367_p13_skinny_n128_routeout(M, N, K, dtype) is True
 
 
 @pytest.mark.parametrize("M,N,K,dtype", sorted(_expected_p12_4_cells()))
@@ -168,7 +168,7 @@ def test_p12_predicate_admits_every_diagonal_cell(M, N, K, dtype):
     (2048, 128, 4096, "torch.float32"),
 ])
 def test_p13_predicate_rejects_axis_perturbations(M, N, K, dtype):
-    assert _k1367_p13_skinny_n128_kcomplement_routeout(M, N, K, dtype) is False
+    assert _k1367_p13_skinny_n128_routeout(M, N, K, dtype) is False
 
 
 @pytest.mark.parametrize("M,N,K,dtype", [
@@ -215,7 +215,7 @@ def test_p13_admit_cell_carveout_short_circuits(enable_streamk, work_stealing, b
     # Pick a known P13 admit cell.
     a_dtype = "torch.bfloat16"
     M, N, K = 4096, 128, 8192
-    assert (M, N, K, a_dtype) in _K1367_P13_SKINNY_N128_KCOMPLEMENT_ROUTEOUT_18
+    assert (M, N, K, a_dtype) in _K1367_P13_SKINNY_N128_ROUTEOUT_18
     routed = k971_route_decision(M, N, K, a_dtype, b_dtype,
                                  enable_streamk, work_stealing)
     assert routed is False, (

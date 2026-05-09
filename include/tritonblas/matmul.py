@@ -138,6 +138,13 @@ from ._route_predicate import (
     # off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).  K-1832 cohort
     # geomean TB/HBL = 4.290× — the largest uplift in the alias-stack to date.
     _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
+    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells
+    # (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
+    # cells, MINUS (2048,320,4096,bf16) which is already routed by an upstream
+    # alias-stack slot per K-1843 paired-n30 measurement; ratio_TB/HBL=1.0001,
+    # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
+    # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
+    _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
 )
 
 
@@ -445,6 +452,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # per K-1832 PMC delta ranking with SQ_LDS_BANK_CONFLICT ≈ 869× and
     # SQ_WAIT_INST_LDS ≈ 12.5× at the top of the discriminator list).
     if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
+    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells from
+    # K-1843's N=320 sub-cohort (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}) MINUS (2048,320,4096,bf16) which is already upstream-routed
+    # per the K-1843 paired-n30 measurement (ratio 1.0001, p=0.293, classified
+    # WITHIN_0p95X_PARITY_BAND).  K-1843 paired n=30 HIP-graph hot-cache + 3-pass
+    # rocprofv2 PMC sweep (LDS / VALU·MFMA / VMEM·L2) on MI300X / gfx942 vs
+    # K-1837 LIVE oracle (e7dfab4 + P32–P35 stacked): 17/17 cells admitted at the
+    # strict ≥1.05× ∧ p<0.05 gate; per-cell ratios 1.326×–1.911× (median 1.583×),
+    # per-N geomean = 1.545×.  Both dtype rows load-bearing — closes the
+    # wave-misaligned N=320 dtype-mirror (BLOCK_N=128 packs N=320 into the
+    # off-by-64 wave-misaligned column-narrow layout above the N=256 P31 cliff
+    # and below the N=384 P30 rung → K-913 §3 LDS-bank-conflict + R-1811
+    # wave-misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
+    # histogram: LDS_DOMINANT 36/36 across the K-1843 N∈{320,352} cohort, with
+    # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
+    # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
     return False
 
 

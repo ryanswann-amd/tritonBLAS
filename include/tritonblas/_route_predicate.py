@@ -3359,3 +3359,67 @@ _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p35_skinny_n288_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells from
+# K-1843's N=320 sub-cohort = M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384}
+# × {bf16,fp16} = 18 cells, MINUS (2048, 320, 4096, "torch.bfloat16") which is
+# already routed by an upstream alias-stack slot (K-1843 paired-n30 measurement
+# on the LIVE oracle: ratio_TB/HBL = 1.0001, p = 0.293, classified
+# WITHIN_0p95X_PARITY_BAND — TB and HBL paths converge on the same kernel).
+# Per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST, that already-routed cell
+# is excluded from P36 to avoid duplicate routing.
+#
+# K-1843 paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep
+# (LDS / VALU·MFMA / VMEM·L2; 108 cell-engine-pass datapoints) on MI300X /
+# gfx942 (OCI MI300X fallback per INFRA-0048): bf16 N=320 unrouted 8/9 and
+# fp16 N=320 unrouted 9/9 in the pre-stack measurement against the K-1837
+# LIVE oracle (e7dfab4 + P32–P35 stacked).  All 17 admit cells gate-pass at
+# the strict ratio_TB/HBL ≥ 1.05 ∧ scipy.stats.ttest_rel p < 0.05 floor;
+# per-cell ratios span 1.326×–1.911× (median ≈ 1.583×), per-N geomean = 1.545×.
+#
+# Mechanism (K-913 §3 LDS-bank-conflict, dtype-invariant per R-K1673 +
+# R-1811 wave-misalignment): BLOCK_N=128 packs N=320 into wave-misaligned
+# K-block columns (off-by-64 N rung above N=256, two-and-a-half BLOCK_N
+# tiles per N-row); K-1843 PMC delta ranking confirms LDS_DOMINANT in 36/36
+# cells of the N∈{320,352} cohort with lds_wait_ratio_TB/HBL spanning
+# 1.96×–25.27× (median ≈ 8.5×), MFMA per-wave ratio everywhere ≤ 0.96×
+# (TB does *less* MFMA per wave; not the limiter), VMEM per-wave ratio
+# mostly ≤ 1.0 (rules out memory-bandwidth as the gap mechanism).  Same
+# SCHEDULER_LDS A4 failure mode as the K-1681 / K-1710 / K-1781 / K-1812 /
+# K-1824 / K-1832 wave-misaligned skinny-N class.  hipBLASLt's split-K
+# kernel selection clears the band by ~55% on average (geomean 1.545× over
+# pre-stack TB-native per K-1843).
+#
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536}), K-1775 P31 (N=256), K-1810 P32 (N=160),
+# K-1817 P33 (N=224), K-1831 P34 (N=96), K-1837 P35 (N=288) — now applied
+# to N=320 (the off-by-64 wave-misaligned rung between the N=256 P31 cliff
+# and the N=384 P30 rung).
+#
+# Sibling-N firewall: N=320 is disjoint from every prior slot's N-axis
+# projection (P5, P13, P21, P28-P35) — natural N-axis separator, asserted
+# at module load by tests/test_p36_skinny_n320_alias_stack.py.
+_P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset({
+    # M=2048 (excludes the (2048, 320, 4096, "torch.bfloat16") upstream alias)
+    (2048, 320,  8192, "torch.bfloat16"),  # r=1.626 p<1e-6
+    (2048, 320, 16384, "torch.bfloat16"),  # r=1.911 p<1e-6  WORST
+    (2048, 320,  4096, "torch.float16"),   # r=1.544 p<1e-6
+    (2048, 320,  8192, "torch.float16"),   # r=1.573 p<1e-6
+    (2048, 320, 16384, "torch.float16"),   # r=1.854 p<1e-6
+    # M=4096 (full bf16 + fp16 grid, no upstream alias overlap)
+    (4096, 320,  4096, "torch.bfloat16"),  # r=1.583 p<1e-6
+    (4096, 320,  8192, "torch.bfloat16"),  # r=1.723 p<1e-6
+    (4096, 320, 16384, "torch.bfloat16"),  # r=1.772 p<1e-6
+    (4096, 320,  4096, "torch.float16"),   # r=1.477 p<1e-6
+    (4096, 320,  8192, "torch.float16"),   # r=1.609 p<1e-6
+    (4096, 320, 16384, "torch.float16"),   # r=1.727 p<1e-6
+    # M=8192 (full bf16 + fp16 grid, no upstream alias overlap)
+    (8192, 320,  4096, "torch.bfloat16"),  # r=1.383 p<1e-6
+    (8192, 320,  8192, "torch.bfloat16"),  # r=1.375 p<1e-6
+    (8192, 320, 16384, "torch.bfloat16"),  # r=1.624 p<1e-6
+    (8192, 320,  4096, "torch.float16"),   # r=1.326 p<1e-6
+    (8192, 320,  8192, "torch.float16"),   # r=1.368 p<1e-6
+    (8192, 320, 16384, "torch.float16"),   # r=1.616 p<1e-6
+})
+# Cardinality (==17) gated by tests/test_p36_skinny_n320_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

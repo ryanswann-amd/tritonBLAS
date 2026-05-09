@@ -110,6 +110,23 @@ from ._route_predicate import (
     # across dtype.
     _p28_skinny_n128_kcompl_aliasstack_routeout
         as _R_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # K-1700 (S-002): P29 skinny_N64 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (20th-position, load-bearing for the 15-cell fp16
+    # ultra-skinny mirror sub-cohort).  Closes the entire fp16 sub-row
+    # at the next-lower N rung on the K-COMPLEMENT N-ladder
+    # (N=128 → N=64); the bf16 sub-row is a P5 closed-form alias
+    # (Clause-3 min(M,N) ≤ 192 ∧ K ≥ 2048).  Paired n=30 HIP-graph
+    # hot-cache vs the live post-P28 oracle pre-patch: 30/30 lose to
+    # hipBLASLt by ≥10% (cohort geomean 1.78×, worst 2.89× at
+    # (4096, 64, 8192, fp16) — the K-1687 worst-seam cell).  15 NEW
+    # fp16 cells + 15 alias bf16 cells (all alias-of-P5).  Mechanism:
+    # at N=64 the Origami selector picks BLOCK_N=16 (sub-wave-
+    # quantized tile), structural MFMA underutilization not
+    # addressable via in-kernel tuning (K-1699 falsified NS/BK/WPEU
+    # retunes on the 8192 K-large geometry; the small-N MFMA
+    # underutilization is structural).
+    _k1700_p29_skinny_n64_kcompl_aliasstack_routeout
+        as _R_K1700_P29_skinny_n64_kcompl_aliasstack_routeout,
 )
 
 
@@ -342,6 +359,38 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # stream-K kernel selection vs tritonblas persistent_matmul which
     # is L2/VMEM bound at N ≤ 256.
     if _R_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1700 P29 (20th-position): skinny_N64 K-COMPLEMENT alias-stack
+    # 30-cell route-OUT.  Stacks AFTER P26/P27/P28 per the stacked-
+    # predicate convention; closes the entire fp16 sub-row at the
+    # next-lower N rung on the K-COMPLEMENT N-ladder
+    # (N=128 → N=64).  Paired n=30 vs the live post-P28 oracle
+    # pre-patch: 30/30 lose to hipBLASLt by ≥10% (cohort geomean
+    # 1.78×, worst 2.89× at (4096, 64, 8192, fp16) — the K-1687
+    # worst-seam cell).  ALIAS-STACK structure: 15 NEW fp16 cells
+    # (the entire fp16 sub-row at N=64, none of which are addressed
+    # by any upstream predicate — P5 is bf16-only at the
+    # `_dtype_is_bf16` early return; no prior P-frozenset targets
+    # N=64) + 15 alias bf16 cells (all alias-of-P5 via Clause-3
+    # min(M,N) ≤ 192 ∧ K ≥ 2048; P5 fires at the 4th-slot, well
+    # before P29 — the 15 bf16 alias cells are documentation).
+    # Mechanism (PMC RCA, K-1700 follow-up to K-1687/K-1673): the
+    # LDS-bank-conflict fingerprint reproduces BIT-IDENTICALLY
+    # across dtypes (R-1673.K913-LDS-BC-IS-DTYPE-INVARIANT-AT-FIXED-
+    # MNK-BIT-IDENTICAL-COUNTERS), so the routing predicate must
+    # mirror across dtype.  At N=64 the Origami selector picks
+    # BLOCK_N=16 (the only K-COMPLEMENT row to drop below BN=32),
+    # pushing tile efficiency below the wave-quantization floor and
+    # inflating persistent_matmul wall time at every K.  Why
+    # hipBLASLt wins on ultra-skinny N=64: split-K / stream-K kernel
+    # selection vs tritonblas persistent_matmul which is L2/VMEM
+    # bound at N ≤ 64 with sub-wave-quantized tiles.
+    # CONFIG-FIXABLE → false: K-1699 falsified the NS=3+BK=128
+    # prototype on the 8192 K-large geometry; the small-N MFMA
+    # underutilization is structural, not addressable via in-kernel
+    # BLOCK_K / NS / WPEU / NW retunes.  Therefore route-OUT to
+    # hipBLASLt is the correct (and only) productionization for the
+    # ultra-skinny N=64 K-COMPLEMENT cohort.
+    if _R_K1700_P29_skinny_n64_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1553 17th-slot handle: no executable code — the K-1553-named alias
     # `_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30` lives in
     # _route_predicate.py as a single module-level rebinding of P24's

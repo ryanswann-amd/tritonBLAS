@@ -125,3 +125,58 @@ def test_persistent_matmul_cohort_cell_matches_torch(dtype):
     # tolerance used elsewhere in tests/test_matmul.py (atol=1, rtol=1) but
     # tightened because we know K-1652's kp1 path has rel_err ~3e-6.
     torch.testing.assert_close(c, expected, atol=2e-2, rtol=2e-2)
+
+
+# --- (3) runtime numerical correctness on the actual K-1672 cohort cell ---
+#
+# The smoke test above runs at M=N=512 / K=2048 -- it exercises the kpack=1
+# path but NOT the actual tile geometry that the policy pin is defending
+# (the K-1672 cohort is M=N=4096 with the Origami-selected 256x256x64 tile
+# at num_warps=8, num_stages=2). A regression that mis-selects a tile for
+# the 4096 cohort (e.g. a future Origami heuristic flip that picks
+# 128x128x128 for K=16384) would silently slip past the small-cell test.
+# This third test puts at least one of the actual K-1672 worst-loser cells
+# (M=N=4096, K=16384) under the pytest umbrella so the cohort tile path is
+# materially exercised. It is gated on >=64GB device memory because three
+# 4096*16384 bf16/fp16 buffers + workspace ~= 0.8 GB, and we want a clean
+# skip on smaller dev cards rather than a confusing OOM.
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_persistent_matmul_4096x4096x16384_matches_torch(dtype):
+    """K-1672 cohort cell: M=N=4096, K=16384 -- the actual worst-loser
+    geometry from the K-1641 PMC decomposition. Verifies the kpack=1 path
+    on the Origami-selected 256x256x64 tile / num_warps=8 / num_stages=2
+    config that the policy pin in include/tritonblas/matmul.py defends.
+
+    A regression in tile selection for the M=N=4096 cohort (or in the
+    persistent_matmul_lt launch wrapper) would trip this test even if the
+    smaller smoke cell at M=N=512 still passes.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("requires a CUDA/ROCm GPU")
+
+    # Skip on dev cards smaller than ~16GB to avoid confusing OOMs;
+    # ~0.8 GB peak for three 4096x16384 bf16/fp16 tensors + workspace.
+    free_bytes, total_bytes = torch.cuda.mem_get_info()
+    if total_bytes < 16 * (1 << 30):
+        pytest.skip(
+            "needs >=16GB device memory for the M=N=4096, K=16384 cohort cell"
+        )
+
+    M, N, K = 4096, 4096, 16384
+    torch.manual_seed(0)
+    # Scale inputs to keep the K=16384 fma accumulator in a numerically
+    # well-conditioned range for bf16 / fp16 (mantissa headroom is tight
+    # at K=2^14). Matches the scaling used by the bench harness.
+    a = (torch.randn(M, K, device="cuda", dtype=dtype) * 0.05).contiguous()
+    b = (torch.randn(K, N, device="cuda", dtype=dtype) * 0.05).contiguous()
+    c = torch.empty(M, N, device="cuda", dtype=dtype)
+
+    tritonblas.matmul(a, b, c)
+    expected = torch.matmul(a, b)
+
+    # Tolerance widened vs the M=N=512/K=2048 cell because the K=16384
+    # fma chain has 8x the accumulation depth; matches the tolerance used
+    # by the cohort bench harness (scripts/bench_k1672.py) for sanity-check
+    # closeness on the kpack=1 / persistent path.
+    torch.testing.assert_close(c, expected, atol=8e-2, rtol=8e-2)

@@ -99,6 +99,11 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    # K-1655: at (BM=256, BN=256, BK=64) the per-stage LDS = 64 KB hits the
+    # gfx942 hardware limit, so num_stages cannot be raised above 2 here.
+    # NS=3 / BK=32 / num_warps=4 were measured and regress wall-clock on the
+    # M=N=4096 K∈{2048,16384,32768} cohort; narrower-BN (256x192) was within
+    # noise at K=16384 bf16. See K-1655 ticket + tests/test_k1655_negative_result.py.
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

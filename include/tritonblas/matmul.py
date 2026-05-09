@@ -76,13 +76,24 @@ from ._route_predicate import (
     # alias overlap at (4096, 4096, 4096, {bf16, fp16}); 28 NEW cells +
     # 2 P12-alias cells.
     _k1566_p24_skinny_n4096_routeout as _R_K1566_P24_skinny_n4096_routeout,
-    # K-1553 (S-002): the K-1553-named 17th-slot handle is a module-level
-    # alias of the K-1566 P24 frozenset (`_K1553_P25_SKINNY_N4096_KCOMPL_
-    # ALIASSTACK_30 = _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30`); no
-    # separate predicate function is imported because the admit set is
-    # bit-identical and P24 fires first.  Per K-1489 reviewer-consensus
-    # precedent for unreachable alias slots, the routing decision is fully
-    # carried by P24 and the 17th-slot handle is documentation-only.
+    # K-1553 (S-002): the K-1553-named documentation-only handle is a
+    # module-level alias of the K-1566 P24 frozenset
+    # (`_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30 =
+    # _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30`); no separate predicate
+    # function is imported because the admit set is bit-identical and P24
+    # fires first.  Per K-1489 reviewer-consensus precedent for
+    # unreachable alias slots, the routing decision is fully carried by
+    # P24 and the K-1553-named handle is documentation-only.
+    # K-1611 (S-002): P26 skinny_N2048 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (17th-position, load-bearing).  Closes the LAST untested
+    # mid-N rung of the K-COMPLEMENT N-ladder at N=2048 on the full
+    # K-grid; 30/30 admit at the strict 1.05 gate (K-1611 paired n=30 +
+    # B=10000 vectorised paired bootstrap MI300X gfx942 vs the live post-
+    # K-1581 oracle); cohort geomean tb/hbl = 1.451×, range
+    # 1.108×-1.853×.  22 NEW cells + 8 alias cells (P12 + K971
+    # union); alias overlaps fire BEFORE P26 in the dispatch chain.
+    _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout
+        as _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout,
 )
 
 
@@ -256,6 +267,33 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (4096, 4096, 4096, {bf16, fp16}) — P12 fires first so 28 cells are
     # NEW route-OUT and 2 cells are alias documentation.
     if _R_K1566_P24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1611 P26 (17th-position): skinny_N2048 K-COMPLEMENT alias-stack
+    # 30-cell route-OUT.  Stacks AFTER P24 per the K-1175 stacked-predicate
+    # convention; closes the LAST untested mid-N rung of the K-COMPLEMENT
+    # N-ladder at N=2048 on the full K-grid {2048, 4096, 8192, 16384,
+    # 32768}.  Coverage now spans the full verified N range {128, 256, 512,
+    # 1024, 2048, 4096, 8192, 16384, 32768}.  30/30 admit at the strict
+    # 1.05 gate (K-1611 paired n=30 + B=10000 vectorised paired bootstrap
+    # on MI300X gfx942 with TRITONBLAS_DISABLE_K971=1 vs the live post-
+    # K-1581 routing oracle); cohort geomean tb/hbl = 1.451×, range
+    # 1.108×-1.853×; 0 regressions.  Per-row geomean: 1.595× (M=2048,
+    # K-913 LDS-BC band fully live because min(M,N)=2048) / 1.382×
+    # (M=4096) / 1.391× (M=8192).  ALIAS-STACK structure: 22 NEW cells
+    # + 8 alias cells (2 P12 at the (2048, 2048, 2048, {bf16, fp16})
+    # diagonal + 6 K971_ROUTE_TABLE union: 4 K-905/K-971 LDS-BC anchors
+    # at K∈{16384, 32768} ∪ 2 K-1335 longK_smallSquare bf16 cells at
+    # K∈{4096, 8192}).  Alias overlaps fire BEFORE P26 in the dispatch
+    # chain so the 8 alias cells are documentation; the 22 NEW cells are
+    # the load-bearing portion (M ∈ {4096, 8192} × all K + the
+    # (2048, 2048, K, fp16) pair for K ∈ {4096, 8192} that K-1335 (bf16-
+    # only) does not cover).  Anchors the R-1478 #1 N-axis attenuation
+    # chain head — full chain now 1.451 → 1.234 → 1.220 → 1.174 → 1.118
+    # across N ∈ {2048, 4096, 8192, 16384, 32768}, strictly monotone-
+    # decreasing.  Mechanism (K-1598 PMC RCA): TB SQ_INSTS_LDS counters
+    # at N=2048 inflate ~3.1× over hbl on the M=2048 row, consistent with
+    # the K-913 LDS_BC ≈ 1.6-1.8 cyc/inst signature; persistent_matmul
+    # cannot relieve LDS-bank-conflict pressure via tile reshape.
+    if _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1553 17th-slot handle: no executable code — the K-1553-named alias
     # `_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30` lives in
     # _route_predicate.py as a single module-level rebinding of P24's

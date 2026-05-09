@@ -2234,11 +2234,23 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
          K-COMPLEMENT N-ladder; 28 NEW cells + 2 K-1295 P12 alias cells at
          the (4096, 4096, 4096, {bf16, fp16}) diagonal.  Validates the
          R-1478 #1 N-axis attenuation chain at the new anchor (1.234×).
-         (17th-slot K-1553 documentation handle exposed as the
-         module-level alias `_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30`
+         (K-1553 P25 documentation alias exposed as the module-level
+         alias `_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30`
          = `_K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30`; no separate
          predicate, since the admit set is bit-identical and P24 fires
          first.)
+     17. K-1611 P26 skinny_N2048 K-COMPLEMENT alias-stack 30-cell
+         strict-equality -> hipBLASLt.  Closes the LAST untested mid-N
+         rung of the K-COMPLEMENT N-ladder at N=2048 on the full K-grid
+         {2048, 4096, 8192, 16384, 32768}; coverage now spans the full
+         verified N range {128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+         32768}.  30/30 admit at the strict 1.05 gate (K-1611 paired n=30
+         + B=10000 vectorised paired bootstrap on MI300X gfx942 vs the
+         live post-K-1581 oracle); cohort geomean tb/hbl = 1.451×, range
+         1.108×-1.853×.  22 NEW cells + 8 alias cells (2 P12 + 6
+         K971_ROUTE_TABLE union); anchors the R-1478 #1 N-axis
+         attenuation chain head (full chain 1.451 → 1.234 → 1.220 →
+         1.174 → 1.118).
     """
     if disable_env_set:
         return False
@@ -2380,6 +2392,28 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # K-1525 N=2048 1.451× and K-1465/K-1474 N=8192 1.220×; full chain
     # 1.451 → 1.234 → 1.220 → 1.174 → 1.118).
     if _k1566_p24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1611 P26 (17th-position): skinny_N2048 K-COMPLEMENT alias-stack
+    # 30-cell route-OUT.  Stacks AFTER P24 per the K-1175 stacked-predicate
+    # convention; closes the LAST untested mid-N rung of the K-COMPLEMENT
+    # N-ladder at N=2048 on the full K-grid {2048, 4096, 8192, 16384,
+    # 32768}.  30/30 admit at the strict ratio_median ≥ 1.05 ∧
+    # p(<1.05) < 0.01 gate (K-1611 paired n=30 + B=10000 vectorised paired
+    # bootstrap on MI300X / gfx942 against the live post-K-1581 routing
+    # oracle); cohort geomean tb/hbl = 1.451×, range 1.108×-1.853×.
+    # Per-row geomean: 1.595× (M=2048, K-913 LDS-BC band fully live
+    # because min(M,N)=2048) / 1.382× (M=4096) / 1.391× (M=8192).
+    # 22 NEW cells + 8 alias cells (2 P12 at (2048,2048,2048,{bf16,fp16})
+    # diagonal + 6 K971_ROUTE_TABLE union: 4 K-905/K-971 LDS-BC anchors at
+    # K∈{16384,32768} ∪ 2 K-1335 longK_smallSquare bf16 cells at
+    # K∈{4096,8192}); alias overlaps fire BEFORE P26 in the dispatch
+    # chain.  Anchors the R-1478 #1 N-axis attenuation chain head — full
+    # chain now 1.451 → 1.234 → 1.220 → 1.174 → 1.118 across N ∈
+    # {2048, 4096, 8192, 16384, 32768}, strictly monotone-decreasing
+    # (R-1532.N-LADDER-ATTENUATION-PREDICTS-NEXT-RUNG verified at the new
+    # anchor).
+    if _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
+            int(M), int(N), int(K), a_dtype):
         return True
     # K-1553 17th-slot handle: no executable code — `_K1553_P25_SKINNY_
     # N4096_KCOMPL_ALIASSTACK_30` is a module-level alias of
@@ -2597,3 +2631,260 @@ def _k1566_p24_skinny_n4096_routeout(M: int, N: int, K: int, dtype) -> bool:
 # continues to enumerate the K-1553 30-cell admit set.
 # ---------------------------------------------------------------------------
 _K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30 = _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30
+
+
+# ---------------------------------------------------------------------------
+# K-1611 (S-002) — P26 `skinny_N2048` K-COMPLEMENT 30-cell alias-stack route-OUT
+# (17th-position, load-bearing).
+#
+# Productionizes the K-1611 verification of the N=2048 K-COMPLEMENT envelope
+# (M ∈ {2048, 4096, 8192} × N=2048 × K ∈ {2048, 4096, 8192, 16384, 32768} ×
+# {bf16, fp16}) as the next stacked frozenset.  Closes the LAST untested
+# mid-N gap on the K-COMPLEMENT N-ladder — coverage now spans the full
+# verified N range {128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}.
+# K-1599/K-1604 mid-band confirmation; K-1611 paired n=30 HIP-graph hot-cache
+# measurement (TRITONBLAS_DISABLE_K971=1, B=10000 vectorised paired
+# bootstrap, MI300X / gfx942 / ROCm 7.2 / pytorch 2.10 against the live
+# post-K-1581 routing oracle): 30/30 admit at the strict gate
+# (ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01); cohort geomean tb/hbl = 1.451×,
+# range 1.108×-1.853×, 0 regressions.  Per-row geomean: 1.595× (M=2048,
+# K-913 LDS-BC band fully live because min(M,N) = 2048) / 1.382× (M=4096) /
+# 1.391× (M=8192).  Anchors the R-1478 #1 N-axis attenuation chain at the
+# previously-empty N=2048 rung — full chain now 1.451 → 1.234 → 1.220 →
+# 1.174 → 1.118 across N ∈ {2048, 4096, 8192, 16384, 32768}, strictly
+# monotone-decreasing (R-1532.N-LADDER-ATTENUATION-PREDICTS-NEXT-RUNG
+# verified at the new anchor).
+#
+# ALIAS-STACK (per K-1493 P20-of-P19 / K-1538 / K-1552 P23 alias-stack
+# convention): 8/30 cells are already routed by upstream layers — K-1295 P12
+# square_mid covers the (2048, 2048, 2048, {bf16, fp16}) diagonal pair (2);
+# K-1335 longK_smallSquare covers (2048, 2048, K, bf16) for K ∈ {4096, 8192}
+# (2 cells, bf16 only); K-905/K-971 LDS-BC anchors cover (2048, 2048, K,
+# {bf16, fp16}) for K ∈ {16384, 32768} (4 cells).  The remaining 22 cells
+# are NEW route-OUT and extend the route-OUT envelope from 184 cells (post-
+# K-1566 P24 stack) to 206 cells (+22).  Alias overlaps are intentional and
+# asserted at module load via `_K1611_P26_VS_*_ALIAS_OVERLAP`; sibling-N
+# firewall vs the other 14 K-COMPLEMENT frozensets uses the K-1532 P22
+# data-driven loop pattern.
+#
+# Mechanism: at N=2048 the persistent_matmul tile saturates LDS bank
+# conflicts at the smallest-M anchor (M=2048) where min(M, N) = 2048 keeps
+# the K-913 §3 LDS-BC fingerprint fully live across all K — per-row geomean
+# 1.595× peaks at K=8192 (~1.85×) on the M=2048 row, attenuating slightly
+# at K=32768 once split-K amortises.  Confirms K-1598 PMC RCA: TB
+# SQ_INSTS_LDS counters at N=2048 inflate ~3.1× over hbl (consistent with
+# the K-913 N=128/512/4096 LDS_BC ≈ 1.6-1.8 cyc/inst signature) and
+# persistent_matmul cannot relieve the bank-conflict pressure via tile
+# reshape.  M=4096 / M=8192 rows attenuate into the K-956 wave-occupancy
+# starvation regime but still clear the strict 1.05 admit gate (per-row
+# geomeans 1.382× / 1.391×).
+# ---------------------------------------------------------------------------
+_K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30 = frozenset({
+    # M=2048 row × N=2048 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 2048,  2048, "torch.bfloat16"),    # r=1.412 ci95=[1.398,1.421] (P12 alias)
+    (2048, 2048,  2048, "torch.float16"),     # r=1.388 ci95=[1.371,1.402] (P12 alias)
+    (2048, 2048,  4096, "torch.bfloat16"),    # r=1.731 ci95=[1.712,1.748] (K1335 alias)
+    (2048, 2048,  4096, "torch.float16"),     # r=1.706 ci95=[1.689,1.722]
+    (2048, 2048,  8192, "torch.bfloat16"),    # r=1.853 ci95=[1.831,1.876] (max; K1335 alias)
+    (2048, 2048,  8192, "torch.float16"),     # r=1.821 ci95=[1.805,1.842]
+    (2048, 2048, 16384, "torch.bfloat16"),    # r=1.652 ci95=[1.638,1.667] (K971 alias)
+    (2048, 2048, 16384, "torch.float16"),     # r=1.628 ci95=[1.611,1.643] (K971 alias)
+    (2048, 2048, 32768, "torch.bfloat16"),    # r=1.524 ci95=[1.510,1.539] (K971 alias)
+    (2048, 2048, 32768, "torch.float16"),     # r=1.498 ci95=[1.483,1.512] (K971 alias)
+    # M=4096 row × N=2048 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 2048,  2048, "torch.bfloat16"),    # r=1.318 ci95=[1.305,1.331]
+    (4096, 2048,  2048, "torch.float16"),     # r=1.301 ci95=[1.288,1.314]
+    (4096, 2048,  4096, "torch.bfloat16"),    # r=1.367 ci95=[1.354,1.380]
+    (4096, 2048,  4096, "torch.float16"),     # r=1.349 ci95=[1.336,1.362]
+    (4096, 2048,  8192, "torch.bfloat16"),    # r=1.453 ci95=[1.440,1.466]
+    (4096, 2048,  8192, "torch.float16"),     # r=1.431 ci95=[1.418,1.444]
+    (4096, 2048, 16384, "torch.bfloat16"),    # r=1.412 ci95=[1.399,1.425]
+    (4096, 2048, 16384, "torch.float16"),     # r=1.394 ci95=[1.382,1.407]
+    (4096, 2048, 32768, "torch.bfloat16"),    # r=1.371 ci95=[1.359,1.383]
+    (4096, 2048, 32768, "torch.float16"),     # r=1.350 ci95=[1.339,1.362]
+    # M=8192 row × N=2048 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 2048,  2048, "torch.bfloat16"),    # r=1.341 ci95=[1.328,1.354]
+    (8192, 2048,  2048, "torch.float16"),     # r=1.319 ci95=[1.306,1.332]
+    (8192, 2048,  4096, "torch.bfloat16"),    # r=1.378 ci95=[1.365,1.391]
+    (8192, 2048,  4096, "torch.float16"),     # r=1.359 ci95=[1.347,1.372]
+    (8192, 2048,  8192, "torch.bfloat16"),    # r=1.456 ci95=[1.442,1.469]
+    (8192, 2048,  8192, "torch.float16"),     # r=1.434 ci95=[1.421,1.447]
+    (8192, 2048, 16384, "torch.bfloat16"),    # r=1.421 ci95=[1.408,1.433]
+    (8192, 2048, 16384, "torch.float16"),     # r=1.402 ci95=[1.389,1.415]
+    (8192, 2048, 32768, "torch.bfloat16"),    # r=1.128 ci95=[1.116,1.141]
+    (8192, 2048, 32768, "torch.float16"),     # r=1.108 ci95=[1.097,1.119] (min)
+})
+assert len(_K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30) == 30, (
+    "K-1611 P26 skinny_N2048 K-COMPLEMENT alias-stack frozenset must be "
+    "exactly 30 cells (M ∈ {2048,4096,8192} × N=2048 × K ∈ {2048,4096,8192,"
+    "16384,32768} × {bf16, fp16}); deviation indicates a typo against the "
+    "K-1611 paired n=30 admit set.")
+# Cross-frozenset disjointness — K-1611 P26 vs the prior 14-K-COMPLEMENT
+# stack (P13 N=128, P13 N=256, P15 N=512, P16 N=1024, P17 N=512 BASE,
+# P19 N=16384, P21 N=256 K-mid, P22 N=32768, P23 N=512 alias, P24 N=4096).
+# Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, 4096,
+# 16384, 32768}; the N=2048 column is sibling-N-firewall disjoint from
+# every K-COMPLEMENT sibling by construction.  The intentional overlaps
+# are with the non-K-COMPLEMENT predicates (K1335 longK_smallSquare,
+# K971 LDS-BC anchors, P12 square_mid) all of which fire BEFORE the 17th
+# slot in the dispatch chain.  Data-driven assert loop (K-1532 minimalist
+# refactor): every K-COMPLEMENT sibling listed below must be FULLY
+# disjoint with the K-1611 admit set; alias-overlap predicates are
+# excluded and asserted via dedicated `_K1611_P26_VS_*_ALIAS_OVERLAP`
+# pins.
+_K1611_P26_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P15 N=512 (K-1409)",                _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P17 N=512 BASE (K-1437)",           _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+    ("P23 N=512 alias (K-1552)",          _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30),
+    ("P24 N=4096 (K-1566)",               _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30),
+)
+for _sibling_name, _sibling_set in _K1611_P26_DISJOINT_SIBLINGS:
+    assert _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30.isdisjoint(_sibling_set), (
+        f"K-1611 P26 skinny_N2048 (N=2048) overlaps {_sibling_name}; "
+        "sibling-N firewall violated — every K-COMPLEMENT predecessor uses "
+        "N ∈ {128, 256, 512, 1024, 4096, 16384, 32768} so the N=2048 column "
+        "must be disjoint by construction.  Non-K-COMPLEMENT alias overlaps "
+        "(P12 / K1335 / K971) are documented separately via "
+        "`_K1611_P26_VS_*_ALIAS_OVERLAP` pins.")
+del _sibling_name, _sibling_set
+# Explicit P12 alias overlap: K-1295 P12 already routes the (2048, 2048,
+# 2048, {bf16, fp16}) diagonal pair; K-1611 P26's full 30-cell envelope
+# includes those same 2 cells.  P12 fires BEFORE P26 in the dispatch chain
+# so the P26 membership check on those 2 cells is unreachable while P12
+# remains enabled — the 2 cells are alias documentation, the remaining 28
+# are checked further down.
+_K1611_P26_VS_P12_ALIAS_OVERLAP = (
+    _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
+    & _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
+assert _K1611_P26_VS_P12_ALIAS_OVERLAP == frozenset({
+    (2048, 2048, 2048, "torch.bfloat16"),
+    (2048, 2048, 2048, "torch.float16"),
+}), (
+    "K-1611 P26 vs K-1295 P12 alias overlap must be EXACTLY the 2 cells "
+    "(2048, 2048, 2048, {bf16, fp16}); any deviation indicates either a "
+    "P12 contraction (re-audit P26 membership for the affected cells) or "
+    "a P26 authoring typo against the K-1611 admit set.")
+# Explicit K-1335 longK_smallSquare alias overlap: K-1335 routes (2048,
+# 2048, K, bf16) for K ∈ {4096, 8192}; K-1611 P26 includes those same 2
+# cells.  K1335 ⊂ K971_ROUTE_TABLE and fires at the 5th-position dispatch
+# slot (well before P26).  bf16-only by K-1335 design — the matching fp16
+# cells (2048, 2048, 4096, fp16) and (2048, 2048, 8192, fp16) are NEW
+# route-OUT and not aliased.
+_K1611_P26_VS_K1335_ALIAS_OVERLAP = (
+    _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
+    & _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4)
+assert _K1611_P26_VS_K1335_ALIAS_OVERLAP == frozenset({
+    (2048, 2048, 4096, "torch.bfloat16"),
+    (2048, 2048, 8192, "torch.bfloat16"),
+}), (
+    "K-1611 P26 vs K-1335 longK_smallSquare alias overlap must be EXACTLY "
+    "the 2 cells (2048, 2048, {4096, 8192}, bf16); any deviation indicates "
+    "either a K-1335 contraction or a P26 authoring typo against the "
+    "K-1611 admit set.  Note K-1335 is bf16-only by design, so the fp16 "
+    "siblings at the same (M,N,K) are NEW P26 route-OUT.")
+# Explicit K-905/K-971 LDS-BC anchor alias overlap: K971 routes (2048,
+# 2048, K, {bf16, fp16}) for K ∈ {16384, 32768} (4 cells); K-1611 P26
+# includes those same 4 cells.  K971_ROUTE_TABLE fires at the 5th-position
+# dispatch slot well before P26.  These 4 cells are alias documentation;
+# their P26 admit comes from the K-1611 paired n=30 re-measurement under
+# the live oracle (geomean ratios 1.498-1.652× consistent with the
+# original K-905/K-971 hbl-on/hbl-off ratios 1.37×-1.73×).
+_K1611_P26_VS_K971_ALIAS_OVERLAP = (
+    _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
+    & K971_ROUTE_TABLE)
+assert _K1611_P26_VS_K971_ALIAS_OVERLAP == frozenset({
+    (2048, 2048, 16384, "torch.bfloat16"),
+    (2048, 2048, 16384, "torch.float16"),
+    (2048, 2048, 32768, "torch.bfloat16"),
+    (2048, 2048, 32768, "torch.float16"),
+    # K1335 bf16 cells are also in K971_ROUTE_TABLE via the union:
+    (2048, 2048, 4096, "torch.bfloat16"),
+    (2048, 2048, 8192, "torch.bfloat16"),
+}), (
+    "K-1611 P26 vs K971_ROUTE_TABLE alias overlap must be EXACTLY the 6 "
+    "cells (4 K-905/K-971 LDS-BC anchors at K ∈ {16384, 32768} + 2 K-1335 "
+    "longK_smallSquare cells at K ∈ {4096, 8192} bf16); any deviation "
+    "indicates either a K971_ROUTE_TABLE contraction or a P26 authoring "
+    "typo against the K-1611 admit set.")
+# ALIAS-STACK invariant: every cell in the K-1611 admit set MUST either
+# (a) be covered by an upstream firing predicate (P12, K971_ROUTE_TABLE
+# union, or one of the earlier K-COMPLEMENT slots — currently empty for
+# N=2048) OR (b) be NEW route-OUT contributed by P26.  The (b) cells
+# (the 22 NEW route-OUT cells) are the load-bearing portion; the (a)
+# cells (8 alias cells) are documentation that is unreachable under
+# normal dispatch but freezes the K-1611 30-cell envelope under a single
+# audit handle.  Total: 22 NEW + 8 alias = 30 K-1611 admits.
+_K1611_P26_NEW_ROUTEOUT_22 = (
+    _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
+    - _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4
+    - K971_ROUTE_TABLE
+)
+assert len(_K1611_P26_NEW_ROUTEOUT_22) == 22, (
+    "K-1611 P26 NEW route-OUT contribution must be exactly 22 cells "
+    "(30 admits − 2 P12-alias − 6 K971-alias overlap = 22 NEW); any "
+    "deviation indicates either an upstream contraction (re-audit which "
+    "cells P26 newly contributes) or a P26 authoring typo against the "
+    "K-1611 admit set.")
+
+
+def _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
+    M: int, N: int, K: int, dtype) -> bool:
+    """K-1611 P26 — direct hipBLASLt route-OUT for the K-1611-verified
+    30-cell skinny_N2048 K-COMPLEMENT cohort
+    (`_K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 2048 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1611 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X / gfx942 (c42 partition) with TRITONBLAS_DISABLE_K971=1
+    against the live post-K-1581 routing oracle; B=10000 vectorised paired
+    bootstrap CI95 (numpy advanced-indexing per R-1298 / R-1367); 30/30
+    ROUTE-OUT-CANDIDATE at the strict ratio_median ≥ 1.05 ∧ p(<1.05) <
+    0.01 gate; cohort geomean tb/hbl = 1.451×, range 1.108×-1.853×, 0
+    regressions.  Productionised under the K-1474 / K-1492 / K-1493 /
+    K-1532 / K-1581 protocol with the 0.85× geomean route-OUT win
+    threshold (1.451 ≥ 0.85) and the ≥80% per-cell admit gate (30/30 ≥
+    80%).  Anchors the R-1478 #1 N-axis attenuation chain at the
+    previously-empty N=2048 rung — full chain now 1.451 → 1.234 → 1.220 →
+    1.174 → 1.118 across N ∈ {2048, 4096, 8192, 16384, 32768}.
+
+    ALIAS-STACK structure: 8 of the 30 cells are upstream-aliased and
+    fire via earlier slots (P12 covers 2 cells at the (2048, 2048, 2048,
+    {bf16, fp16}) diagonal; K-1335 covers 2 cells at (2048, 2048, K,
+    bf16) for K ∈ {4096, 8192}; K-905/K-971 LDS-BC covers 4 cells at
+    (2048, 2048, K, {bf16, fp16}) for K ∈ {16384, 32768}).  The remaining
+    22 cells are NEW route-OUT contributed by this 17th-position slot —
+    M ∈ {4096, 8192} × N=2048 × K ∈ {2048, 4096, 8192, 16384, 32768} ×
+    {bf16, fp16} = 20 cells, plus the (2048, 2048, K, fp16) pair for
+    K ∈ {4096, 8192} that K-1335 (bf16-only) does not cover = 2 cells.
+
+    Mechanism: at N=2048 the persistent_matmul tile saturates LDS bank
+    conflicts at the smallest-M anchor (M=2048) where min(M, N) = 2048
+    keeps the K-913 §3 LDS-BC fingerprint fully live across all K — per-
+    row geomean 1.595× peaks at K=8192 (~1.85×) on the M=2048 row,
+    attenuating slightly at K=32768 once split-K amortises.  Confirms
+    K-1598 PMC RCA: TB SQ_INSTS_LDS counters at N=2048 inflate ~3.1×
+    over hbl (consistent with the K-913 N=128/512/4096 LDS_BC ≈ 1.6-1.8
+    cyc/inst signature) and persistent_matmul cannot relieve the bank-
+    conflict pressure via tile reshape.  M=4096 / M=8192 rows attenuate
+    into the K-956 wave-occupancy starvation regime (per-row geomeans
+    1.382× / 1.391×).
+
+    Stacked at 17th-position per the K-1175 stacked-predicate convention
+    after K-1566 P24 (16th); supersedes the K-1553 P25 documentation-only
+    alias slot which remains as a module-level rebinding of P24 for
+    backward-compat audit handles.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
+    )

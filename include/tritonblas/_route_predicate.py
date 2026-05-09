@@ -662,14 +662,52 @@ _K1283_A1_PERTURBATIONS_8 = frozenset({
     # body and tests/test_k971_route_predicate.py K-1283 no-leak pins.
 })
 
-# Composed 51-cell P8 envelope (K-1322 unified).  Six named provenance
-# frozensets (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits,
-# K-1231/K-1205 E_N3 N=128 admits, K-1219 E3 N=256 admits, K-1283/K-1297
-# A1 perturbations) -- the dispatch path consults the union.  Per
+# ---------------------------------------------------------------------------
+# K-1336 (S-002) carve-IN sub-frozenset (6 cells, bf16, longK + square
+# regressor cohort): the K-1311 4-iter triage produced a 6-cell manifest of
+# statistically-significant per-shape regressors (CI95-hi(delta) < 0 vs
+# tb-main on the K-1295 paired-n30 sweep).  Per-predicate ablation showed
+# 0/6 admitted by ANY existing P8 sub-frozenset / E1 envelope / K-979 P5
+# closed form / K-971 strict route table -- the regression is owned by the
+# dispatch chain *in aggregate* (the +13.89 us mean wrapper-evaluation cost,
+# CI95-lo > 0 on 6/6 cells via K-1311 §F18 re-derivation from the K-1295
+# raw tb_us deltas).  The fix is structural: route the 6 cells OUT to short-
+# circuit the chain at first strict-equality hit.  These cells already lose
+# 2-4x to hipBLASLt on the in-kernel triton path, so route-OUT (skip the
+# +13.89 us chain + dispatch torch.matmul / hipBLASLt) is a Pareto win
+# (predicted +0.36 to +0.49 ratio gain per cell).
+#
+# K-1352 composition note: 4 of these 6 cells are the SAME (M,N,K,dtype)
+# 4-tuples as `_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4` (the K-1344 admit set
+# living on `K971_ROUTE_TABLE`).  This is INTENTIONAL: the two predicates
+# attack the same cohort via DIFFERENT mechanisms (K-1335 = K-913/K-1338
+# LDS-BC fingerprint = LDS_BC > 0 PMC; K-1336 = K-138/K-1311 dispatch-
+# wrapper-overhead = +13.89 us chain cost).  Dispatch precedence
+# (P8 strict-equality is consulted BEFORE K971_ROUTE_TABLE in
+# `route_to_hbl`, lines below) means the K-1336 carve-IN catches the 4
+# overlapping cells first; K-1335 retains those 4 cells for mechanistic
+# provenance + defense-in-depth (if the K-1336 carve-IN is ever pulled, the
+# K-1335 LDS-BC predicate still routes them OUT).  See K-1352 manifest
+# `_K1335_SUBSET_OF_K1336_PRECEDENCE` assertion below.
+# ---------------------------------------------------------------------------
+_K1336_REGRESSOR_CARVEIN_6 = frozenset({
+    (1024, 1024, 4096, "torch.bfloat16"),  # K-1311 rank #3
+    (1024, 1024, 8192, "torch.bfloat16"),  # K-1311 rank #6
+    (2048, 2048, 2048, "torch.bfloat16"),  # K-1311 rank #5
+    (2048, 2048, 4096, "torch.bfloat16"),  # K-1311 rank #4
+    (2048, 2048, 8192, "torch.bfloat16"),  # K-1311 rank #1
+    (4096, 4096, 4096, "torch.bfloat16"),  # K-1311 rank #2
+})
+
+# Composed 57-cell P8 envelope (K-1352 = K-1322 51-cell + K-1336 6-cell
+# carve-IN).  Seven named provenance frozensets (K-1121 anchors, K-1131
+# neighbors, K-1175/K-1161 E2 admits, K-1231/K-1205 E_N3 N=128 admits,
+# K-1219 E3 N=256 admits, K-1283/K-1297 A1 perturbations, K-1311/K-1336
+# regressor carve-IN) -- the dispatch path consults the union.  Per
 # R-1144.DUAL-FROZENSET-PROVENANCE and its K-1175 / K-1205 / K-1219 /
-# K-1297 extensions, source-ticket lineage is load-bearing for future
-# reviewers (precedence-inversion debugging, PMC re-classifier work, ADR
-# audits) so each measurement campaign keeps its own named set with a
+# K-1297 / K-1336 extensions, source-ticket lineage is load-bearing for
+# future reviewers (precedence-inversion debugging, PMC re-classifier work,
+# ADR audits) so each measurement campaign keeps its own named set with a
 # runtime size + pairwise-disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
@@ -678,12 +716,14 @@ _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     | _K1205_EN3_ADMITS_8
     | _K1219_E3_NFLOOR256_ADMITS_7
     | _K1283_A1_PERTURBATIONS_8
+    | _K1336_REGRESSOR_CARVEIN_6
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 51, (
-    "K-1322 unified P8 envelope must be exactly 51 cells (13 K-1121 "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 57, (
+    "K-1352 composed P8 envelope must be exactly 57 cells (13 K-1121 "
     "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
     "N=128 admits + 7 K-1219 E3 N=256 admits + 8 K-1283/K-1297 A1 "
-    "perturbations); a duplicate or stray entry has crept in.")
+    "perturbations + 6 K-1336 regressor carve-IN); a duplicate or stray "
+    "entry has crept in.")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -749,22 +789,84 @@ assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8), (
 assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
     "K-1283 A1 perturbation overlaps a K-1219 E3 N=256 admit; K-1297 "
     "cells all have N >= 1024; K-1219 cells all have N=256.")
-# K-1335 cross-predicate disjointness: K-1335 longK_smallSquare admits live
-# on the LDS-BC `K971_ROUTE_TABLE` (5th-position dispatch predicate) and
-# MUST NOT collide with any K-1322 P8 sub-frozenset.  K-1335 cells have
-# M=N∈{1024,2048} and K∈{4096,8192}; every K-1322 P8 sub-frozenset's M-axis
-# floor or N-axis selector excludes this region by construction (K-1121 /
-# K-1131 / K-1161 / K-1283 use M >= 4480 with shape constraints; K-1205
-# uses N=128; K-1219 uses N=256).  Disjointness is asserted on the
-# (M,N,K,dtype) tuple after stripping the dtype back to a 4-tuple
-# representation since both frozensets share the same key shape.
-_K1335_VS_P8_DISJOINT = _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
-    _P8_MFMA_ISSUE_STALL_ROUTEOUT)
-assert _K1335_VS_P8_DISJOINT, (
-    "K-1335 longK_smallSquare admit overlaps the K-1322 51-cell P8 "
-    "MFMA-issue-stall envelope; the two predicates target distinct "
-    "hardware bottlenecks (LDS-BC vs MFMA-issue-stall per K-913 / "
-    "K-1326 / R-1329) and must remain disjoint by construction.")
+# K-1336 (K-1311 regressor carve-IN) cross-disjointness with the prior six
+# P8 sub-frozensets.  K-1336 cells have M=N in {1024, 2048, 4096} and
+# K in {2048, 4096, 8192}, all bf16 -- this region is below every prior P8
+# anchor/neighbor/E2/A1-perturbation M-axis floor (M >= 4480 in K-1121 /
+# K-1131 / K-1161 / K-1283 with the lone exception (4096, 4096, 4096) which
+# is the K-1311 rank #2 cell now owned by K-1336), and trivially disjoint
+# from N=128 (K-1205) and N=256 (K-1219) tiers.  Asserted at module load.
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1336 regressor carve-IN overlaps a K-1121 P8 anchor; the K-1121 "
+    "anchor manifest (M >= 4480 except specific S-codes) does not include "
+    "any cell at M=N in {1024, 2048, 4096} with bf16 in the K-1336 set.")
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1336 regressor carve-IN overlaps a K-1131 P8 neighbor; K-1131 "
+    "perturbations sit at M >= 4480 in the K-1144-derived neighborhood.")
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1336 regressor carve-IN overlaps a K-1161 E2 admit; the three E2 "
+    "admits ({(736,1792,736), (10112,2048,1024), (12160,2048,1024)}) are "
+    "structurally distinct from the K-1336 longK / square cells.")
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1205_EN3_ADMITS_8), (
+    "K-1336 regressor carve-IN overlaps a K-1205 E_N3 N=128 admit; K-1336 "
+    "cells all have N in {1024, 2048, 4096} -- N=128 is trivially disjoint.")
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1336 regressor carve-IN overlaps a K-1219 E3 N=256 admit; K-1336 "
+    "cells all have N in {1024, 2048, 4096} -- N=256 is trivially disjoint.")
+assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1283_A1_PERTURBATIONS_8), (
+    "K-1336 regressor carve-IN overlaps a K-1283 A1 perturbation; K-1283 "
+    "perturbations sit at M >= 6016 in the S25/S29 family (and one at "
+    "(28416, 2048, 1024)) -- structurally disjoint from the K-1336 cells.")
+# ---------------------------------------------------------------------------
+# K-1352 cross-envelope precedence-explicit assert (REPLACES the prior
+# K-1344 `_K1335_VS_P8_DISJOINT` assert which is now invalid by design).
+#
+# K-1335's 4-cell `_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4` lives on the LDS-
+# BC `K971_ROUTE_TABLE` (5th-position dispatch predicate); K-1336's 6-cell
+# `_K1336_REGRESSOR_CARVEIN_6` lives on the P8 `_P8_MFMA_ISSUE_STALL_ROUTEOUT`
+# strict-equality envelope (consulted EARLIER in `route_to_hbl`).  By
+# operational design after K-1352 composition, the K-1336 carve-IN is a
+# strict superset of the K-1335 admits at the (M,N,K,dtype) 4-tuple level
+# (K-1335's 4 cells are exactly K-1311 ranks #3 / #4 / #6 / #1; K-1336 adds
+# K-1311 ranks #5 (2048^3) and #2 (4096^3)).  The dispatch chain consults
+# P8 first, so K-1335 cells that route via the K-1336 carve-IN never reach
+# the K-971 LDS-BC predicate.  K-1335 is intentionally retained in
+# K971_ROUTE_TABLE as defense-in-depth (mechanistically-distinct LDS-BC
+# fingerprint anchored by K-913/K-1338 PMC; survives any future K-1336
+# rollback).  Asserted as a SUBSET relation, NOT a disjoint relation.
+assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 <= _K1336_REGRESSOR_CARVEIN_6, (
+    "K-1352 composition invariant violated: every K-1335 LDS-BC admit "
+    "MUST be a member of the K-1336 dispatch-wrapper-overhead carve-IN "
+    "(operational precedence: P8 strict-equality is consulted before "
+    "K971_ROUTE_TABLE in route_to_hbl; K-1335 retained for mechanistic "
+    "defense-in-depth).  An admit appearing in K-1335 but absent from "
+    "K-1336 would create a mechanism-attribution divergence between the "
+    "LDS-BC and dispatch-wrapper-overhead carve-IN paths.")
+assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.issubset(
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT), (
+    "K-1352 composition invariant violated: every K-1335 LDS-BC admit "
+    "MUST be a member of the composed 57-cell P8 envelope (via the K-1336 "
+    "carve-IN).  See `_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4` <= "
+    "`_K1336_REGRESSOR_CARVEIN_6` precondition above.")
+# Negative invariant (regression firewall): the 2 cells unique to K-1336
+# (NOT in K-1335) must NOT be in K971_ROUTE_TABLE -- they were not part of
+# the K-1335 PMC anchor cohort and have no LDS-BC mechanistic basis.
+_K1336_ONLY_CELLS = _K1336_REGRESSOR_CARVEIN_6 - (
+    _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4)
+assert _K1336_ONLY_CELLS == frozenset({
+    (2048, 2048, 2048, "torch.bfloat16"),
+    (4096, 4096, 4096, "torch.bfloat16"),
+}), (
+    "K-1352 composition invariant violated: the K-1336-only cells "
+    "(K-1336 minus K-1335) must be exactly the 2 cells (2048^3, 4096^3) "
+    "bf16 (K-1311 ranks #5 and #2 -- the square_mid cohort cells outside "
+    "the K-1335 longK_smallSquare PMC anchor set).")
+assert _K1336_ONLY_CELLS.isdisjoint(K971_ROUTE_TABLE), (
+    "K-1352 composition invariant violated: the 2 K-1336-only cells "
+    "(2048^3, 4096^3) bf16 leaked into K971_ROUTE_TABLE; they have no "
+    "K-913/K-1338 PMC LDS-BC anchoring and must NOT route via the LDS-BC "
+    "predicate.  Their dispatch is owned exclusively by the K-1336 P8 "
+    "carve-IN (dispatch-wrapper-overhead-skip mechanism).")
 
 
 # ---------------------------------------------------------------------------

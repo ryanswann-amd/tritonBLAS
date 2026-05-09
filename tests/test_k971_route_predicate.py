@@ -30,6 +30,7 @@ from tritonblas._route_predicate import (
     K971_ROUTE_TABLE,
     _K905_K971_LDS_BC_ANCHORS_8,
     _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4,
+    _K1336_REGRESSOR_CARVEIN_6,
     _K1109_P6_K1074_ALLOWLIST,
     _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
     _K1109_P6_ALLOWLIST_ENV,
@@ -88,13 +89,18 @@ K950_LAND_CELLS = [
     ("L09", 1024, 1024, 16384, torch.float16,  "C9-cohortA-longK-HBLroute"),
 ]
 
-# Tuples where K-905 anchor table intentionally routes to hbl despite the
-# K-950 LAND verdict (K-905 measurement overrides — documented in the PR
-# description).
+# Tuples where the dispatch chain intentionally routes to hbl despite the
+# K-950 LAND verdict.  Provenance:
+#   * K-905 anchor table overrides on long-K cohort A (L06, L07, L09).
+#   * K-1352 / K-1336 dispatch-wrapper-overhead carve-IN on (4096^3) bf16
+#     (L05): K-1311 §F1 rank #2 (delta=-0.0110, CI95-hi(delta) < 0); K-1336
+#     short-circuits the chain at the strict-equality P8 entry to skip the
+#     +13.89 us chain-evaluation cost.  See `_K1336_REGRESSOR_CARVEIN_6`.
 K950_ANCHOR_COLLISIONS = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # L07
     (1024, 1024, 16384, "torch.float16"),   # L09
     (2048, 2048, 16384, "torch.float16"),   # L06
+    (4096, 4096,  4096, "torch.bfloat16"),  # L05 (K-1352 / K-1336 carve-IN)
 })
 
 
@@ -678,24 +684,29 @@ K1131_P8_NEIGHBORS_12_LIST = [
 ]
 
 
-# K-931 control sample — 5 cells from the K-931 always-uncovered top-40
+# K-931 control sample — 4 cells from the K-931 always-uncovered top-40
 # catalog that K-1127 confirmed are NOT in the K-1121 envelope.  Pinned
 # here as the "P8 must NOT leak into K-931 controls" no-false-positive
 # witness; mirrors K-1127's 0-FP adversarial backtest verdict.
+#
+# K-1352 NOTE: the prior K931_C04 control = (2048, 2048, 4096) bf16 was
+# REMOVED from this list because K-1336 carve-IN now intentionally admits
+# this cell (K-1311 §F1 rank #4, dispatch-wrapper-overhead route-OUT).
+# It is no longer a control; it is an intentional admit.
 K931_CONTROL_CELLS_5 = [
     ("K931_C01",   1024, 1024, 1240),  # K-989 LAND anchor (S40)
     ("K931_C02",   2048, 1024, 1024),  # mid-square mid-K
     ("K931_C03",  16384, 8192, 1024),  # extreme-M extreme-N
-    ("K931_C04",   2048, 2048, 4096),  # square mid-K
     ("K931_C05",   4096, 4096, 2048),  # square mid-K
 ]
 
 
-def test_k1322_p8_envelope_size_is_exactly_51_after_k1297_a1_extension():
-    """K-1322 unified composition: 13 K-1121 anchors + 12 K-1131 neighbors
+def test_k1352_p8_envelope_size_is_exactly_57_after_k1336_carvein_compose():
+    """K-1352 composed envelope: 13 K-1121 anchors + 12 K-1131 neighbors
     + 3 K-1175/K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219
-    E3 N=256 admits + 8 K-1283/K-1297 A1 perturbations = 51 cells.  Any
-    silent edit changes this count and trips this canary.
+    E3 N=256 admits + 8 K-1283/K-1297 A1 perturbations + 6 K-1311/K-1336
+    regressor carve-IN = 57 cells.  Any silent edit changes this count
+    and trips this canary.
 
     Provenance chain:
       * K-1144 originally pinned 25.
@@ -712,17 +723,25 @@ def test_k1322_p8_envelope_size_is_exactly_51_after_k1297_a1_extension():
         +/-1-power-of-2 perturbations of A1 anchors that K-1131 itself
         did NOT enumerate (S25 5/5 axes, S29 3/6 axes), validated
         independently on commit f4cc5cf (fix/K-1283-A1).  +8 -> 51
-        (K-1322 unified composition).  The K-1297 cells overlap the
-        K-1131 / K-1121 N axis (N in {1024, 2048, 4096}) but always
-        differ on (M, K) by construction; disjointness asserted at
-        module load."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 51
+        (K-1322 unified composition).
+      * K-1311 / K-1336 carve-IN extended by 6 dispatch-wrapper-overhead
+        regressor cells (longK + square cohort, all bf16; K-1311 ranks
+        #1-#6).  Mechanism: +13.89 us mean chain-evaluation cost on
+        cells where the chain terminates False -- short-circuiting at
+        the strict-equality P8 entry skips the chain and dispatches via
+        torch.matmul (hipBLASLt), netting a +0.36 to +0.49 ratio gain.
+        +6 -> 57 (K-1352 composed envelope).  4 of these 6 cells overlap
+        K-1335's LDS-BC admit set at the (M,N,K,dtype) level; the
+        composition invariant is the SUBSET relation
+        K-1335 <= K-1336 (asserted at module load)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 57
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
     assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
     assert len(_K1283_A1_PERTURBATIONS_8) == 8
+    assert len(_K1336_REGRESSOR_CARVEIN_6) == 6
     # K-1303 cross-band disjointness pin: K-1227 (N=128) vs K-1219 (N=256).
     assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8)
     # K-1322 K-1297 cross-disjointness with all five prior sub-frozensets.
@@ -731,6 +750,14 @@ def test_k1322_p8_envelope_size_is_exactly_51_after_k1297_a1_extension():
     assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3)
     assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8)
     assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
+    # K-1352 K-1336 carve-IN cross-disjointness with all six prior P8
+    # sub-frozensets (asserted at module load; mirrored here as a pin).
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1205_EN3_ADMITS_8)
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
+    assert _K1336_REGRESSOR_CARVEIN_6.isdisjoint(_K1283_A1_PERTURBATIONS_8)
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -899,11 +926,16 @@ def test_k1144_p8_overrides_k1109_allowlist_when_env_set(monkeypatch):
 
 
 def test_k1144_p8_does_not_overlap_k950_land_set():
-    """K-950 9-cell LAND set must remain non-routed by P8 (the LAND set
-    is the K-912/K-883 NO-LAND-for-guarded-overrides cohort).  P8 strict-
-    equality must NOT match any K-950 LAND cell; this preserves the
-    zero-leakage property the K-1003 P5 verification contract guarantees."""
+    """K-950 9-cell LAND set must remain non-routed by P8 EXCEPT for cells
+    explicitly admitted by post-K-1144 sub-frozensets.  K-1352 / K-1336
+    intentionally carves L05 = (4096^3) bf16 INTO the P8 envelope (K-1311
+    §F1 rank #2, dispatch-wrapper-overhead-skip).  See K950_ANCHOR_COLLISIONS
+    for the consolidated dispatch-allowlist override list.  All OTHER K-950
+    LAND cells must remain non-routed by P8."""
     for cid, M, N, K, dtype, _cohort in K950_LAND_CELLS:
+        if (M, N, K, str(dtype)) in K950_ANCHOR_COLLISIONS:
+            # Intentional override (K-905 / K-1336).
+            continue
         assert _p8_mfma_issue_stall_routeout(M, N, K, dtype) is False, (
             f"P8 leaked into K-950 LAND set on {cid} ({M},{N},{K},{dtype})")
 
@@ -1441,14 +1473,15 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1175 P8 cell {cell} dropped from K-1231 envelope; "
             "K-1205 must be strict-equality union only.")
-    # Symmetric (post K-1322): every cell beyond the original 28-cell
-    # baseline must come from K-1205 (8 N=128), K-1219 (7 N=256), or
-    # K-1283/K-1297 (8 A1 perturbations).
+    # Symmetric (post K-1352): every cell beyond the original 28-cell
+    # baseline must come from K-1205 (8 N=128), K-1219 (7 N=256),
+    # K-1283/K-1297 (8 A1 perturbations), or K-1311/K-1336 (6 carve-IN).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1205
     expected_delta = (
         _K1205_EN3_ADMITS_8
         | _K1219_E3_NFLOOR256_ADMITS_7
         | _K1283_A1_PERTURBATIONS_8
+        | _K1336_REGRESSOR_CARVEIN_6
     )
     assert delta == expected_delta, (
         "Cells added to P8 envelope past K-1175 do not match "
@@ -1614,10 +1647,13 @@ def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
     # Symmetric (post K-1322): every new cell added past K-1275 must
     # come from K-1219 (7 N=256) or K-1283/K-1297 (8 A1 perturbations).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1219
-    assert delta == (_K1219_E3_NFLOOR256_ADMITS_7 | _K1283_A1_PERTURBATIONS_8), (
+    expected = (_K1219_E3_NFLOOR256_ADMITS_7
+                | _K1283_A1_PERTURBATIONS_8
+                | _K1336_REGRESSOR_CARVEIN_6)
+    assert delta == expected, (
         "Cells added to P8 envelope past K-1275 do not match "
-        "_K1219_E3_NFLOOR256_ADMITS_7 | _K1283_A1_PERTURBATIONS_8 "
-        "exactly; an unattributed cell crept in.")
+        "_K1219_E3_NFLOOR256_ADMITS_7 | _K1283_A1_PERTURBATIONS_8 | "
+        "_K1336_REGRESSOR_CARVEIN_6 exactly; an unattributed cell crept in.")
 
 
 # ---------------------------------------------------------------------------
@@ -1710,12 +1746,14 @@ def test_k1322_does_not_disturb_existing_k1303_43_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1303 P8 cell {cell} dropped from K-1322 envelope; "
             "K-1297 must be strict-equality union only.")
-    # Symmetric: every new cell added by K-1322 must be in K-1297 A1.
+    # Symmetric (post K-1352): every new cell added past K-1303 must come
+    # from K-1297 A1 (8 cells) or K-1311/K-1336 carve-IN (6 cells).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1297
-    assert delta == _K1283_A1_PERTURBATIONS_8, (
+    expected = _K1283_A1_PERTURBATIONS_8 | _K1336_REGRESSOR_CARVEIN_6
+    assert delta == expected, (
         "Cells added to P8 envelope past K-1303 do not match "
-        "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed "
-        "cell crept in.")
+        "_K1283_A1_PERTURBATIONS_8 | _K1336_REGRESSOR_CARVEIN_6 exactly; "
+        "an unattributed cell crept in.")
 
 
 # ---------------------------------------------------------------------------
@@ -1790,42 +1828,82 @@ def test_k1335_disjoint_from_k905_k971_baseline_by_k_axis_projection():
     assert k1335_ks.isdisjoint(baseline_ks)
 
 
-def test_k1335_disjoint_from_k1322_p8_mfma_issue_stall_envelope():
-    """K-1335 lives on the LDS-BC envelope (5th-position dispatch predicate)
-    and MUST NOT collide with the K-1322 51-cell P8 MFMA-issue-stall
-    envelope (1st-position dispatch predicate).  The two predicates target
-    distinct hardware bottlenecks per K-913 / K-1326 / R-1329 mechanistic
-    disambiguation; an overlap would break attribution and risk future
-    PMC-classifier confusion when the K-1308-style residual decomposition
-    is re-run on the K-1335 envelope (K-1335-FOLLOW-B)."""
-    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
+def test_k1352_k1335_subset_of_k1336_carvein_after_compose():
+    """K-1352 composition invariant: K-1335 LDS-BC admits are a STRICT
+    SUBSET of the K-1336 dispatch-wrapper-overhead carve-IN at the
+    (M,N,K,dtype) 4-tuple level.  This INTENTIONALLY breaks the prior
+    K-1344 `disjoint_from_p8` invariant: the two predicates attack the
+    same 4-cell longK_smallSquare cohort via DIFFERENT mechanisms
+    (K-1335 = K-913/K-1338 LDS-BC fingerprint; K-1336 = K-1311 dispatch-
+    wrapper-overhead-skip).  Dispatch precedence: P8 strict-equality
+    is consulted BEFORE K971_ROUTE_TABLE in `route_to_hbl`, so the
+    K-1336 carve-IN catches the 4 overlapping cells first.  K-1335 is
+    retained for mechanistic provenance + defense-in-depth (if K-1336
+    is ever pulled, K-1335 still routes the 4 LDS-BC anchors OUT).
+
+    Negative invariant: the 2 K-1336-only cells (2048^3, 4096^3) bf16
+    -- K-1311 ranks #5 and #2 -- have NO LDS-BC PMC anchoring and MUST
+    NOT leak into K971_ROUTE_TABLE."""
+    # Positive: K-1335 is a SUBSET of K-1336 at the 4-tuple level.
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 <= _K1336_REGRESSOR_CARVEIN_6
+    # Positive: K-1335 cells are members of the composed P8 envelope (via
+    # the K-1336 carve-IN).
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.issubset(
         _P8_MFMA_ISSUE_STALL_ROUTEOUT)
+    # Set intersection: the 12 strict-equality tuples (4 in K-1335 +
+    # K971_ROUTE_TABLE + 6 in K-1336/P8 + 2 baseline overlap zero) reduce
+    # to 4 + 6 = 10 predicate fires across 6 unique (M,N,K,dtype) cells
+    # (K-1335 cardinality + K-1336 cardinality - overlap = 4 + 6 - 4 = 6).
+    overlap = _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 & _K1336_REGRESSOR_CARVEIN_6
+    assert len(overlap) == 4, (
+        "K-1335 / K-1336 4-tuple intersection must be exactly the 4 "
+        "longK_smallSquare cells (1024^2 x {4096,8192} + 2048^2 x {4096,8192}).")
+    union = _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 | _K1336_REGRESSOR_CARVEIN_6
+    assert len(union) == 6
+    # Negative: K-1336-only cells (NOT in K-1335) MUST NOT be in K971.
+    k1336_only = _K1336_REGRESSOR_CARVEIN_6 - _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4
+    assert k1336_only == frozenset({
+        (2048, 2048, 2048, "torch.bfloat16"),
+        (4096, 4096, 4096, "torch.bfloat16"),
+    })
+    assert k1336_only.isdisjoint(K971_ROUTE_TABLE), (
+        "K-1336-only cells (2048^3, 4096^3) bf16 leaked into "
+        "K971_ROUTE_TABLE; they have no K-913/K-1338 PMC LDS-BC "
+        "anchoring and must NOT route via the LDS-BC predicate.")
 
 
-def test_k1335_admit_cells_route_to_hbl_via_k971_route_table():
-    """Every K-1335 admit cell flips the full dispatch decision to
-    route-OUT (route_to_hbl = True) on the bf16 path with streamk OFF and
-    work-stealing OFF.  Exercises the *real* `k971_route_decision` helper
-    so the 5th-position predicate firing is observed end-to-end (after
-    P8 / E1 / P6 / P5 fall through to the K971_ROUTE_TABLE check)."""
+def test_k1335_admit_cells_route_to_hbl_after_k1352_compose():
+    """K-1352 composition: every K-1335 admit cell still flips the full
+    dispatch decision to route-OUT (route_to_hbl = True) on the bf16
+    path with streamk OFF and work-stealing OFF.  After K-1336 carve-IN
+    composition, the K-1335 cells are ALSO members of the composed P8
+    envelope (via _K1336_REGRESSOR_CARVEIN_6) -- dispatch precedence
+    means the P8 strict-equality check fires FIRST, but route_to_hbl
+    returns True regardless of which predicate catches the cell, so
+    end-to-end routing remains invariant.  K-1335 retains independent
+    membership in K971_ROUTE_TABLE for mechanistic provenance and
+    defense-in-depth."""
     for (sid, M, N, K, source) in K1335_LONGK_SMALLSQUARE_ADMITS_4_LIST:
-        # K-1335 cell must NOT match the K-1322 P8 envelope (otherwise the
-        # routing rationale would be MFMA-issue-stall, not LDS-BC).
-        assert (M, N, K, "torch.bfloat16") not in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
-            f"K-1335 cell {sid} ({M},{N},{K}) collides with the K-1322 P8 "
-            "envelope; mechanistic-attribution invariant violated.")
-        # K-1335 cell MUST be in the LDS-BC `K971_ROUTE_TABLE`.
+        # K-1352: K-1335 cells ARE members of the composed P8 envelope
+        # (via the K-1336 carve-IN -- this is the K-1352 invariant).
+        assert (M, N, K, "torch.bfloat16") in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1335 cell {sid} ({M},{N},{K}) missing from composed P8 "
+            "envelope; K-1352 K-1336 carve-IN must include all K-1335 cells.")
+        # K-1335 cell ALSO independently in the LDS-BC `K971_ROUTE_TABLE`
+        # (defense-in-depth: survives any future K-1336 rollback).
         assert (M, N, K, "torch.bfloat16") in K971_ROUTE_TABLE, (
             f"K-1335 cell {sid} ({M},{N},{K}) missing from K971_ROUTE_TABLE.")
-        # Full dispatch decision: routes to hbl on the bf16 path.
+        # End-to-end dispatch decision: still routes to hbl on the bf16
+        # path (whether via P8 first or K971 fallback, route_to_hbl=True).
         routed = k971_route_decision(
             M, N, K,
             "torch.bfloat16", "torch.bfloat16",
             enable_streamk=False, work_stealing=False,
             disable_env_set=False)
         assert routed is True, (
-            f"K-1335 cell {sid} ({M},{N},{K}) failed to route to hbl via "
-            "the 5th-position K971_ROUTE_TABLE predicate.")
+            f"K-1335 cell {sid} ({M},{N},{K}) failed to route to hbl after "
+            "K-1352 compose; either the P8 carve-IN or K971_ROUTE_TABLE "
+            "must fire and return True.")
 
 
 def test_k1335_k_axis_neighbor_controls_do_not_match_admit_set():
@@ -1901,3 +1979,155 @@ def test_k1335_k905_k971_baseline_cells_still_route_after_k1335_union():
             f"K-905/K-971 baseline anchor ({M},{N},{K},{dtype}) regressed "
             "after K-1335 extension; strict-equality union must be "
             "invariance-preserving.")
+
+
+# ---------------------------------------------------------------------------
+# K-1352 / K-1336 (S-002) carve-IN pins.  K-1336 productionised the K-1311
+# 6-cell dispatch-wrapper-overhead regressor manifest as a sub-frozenset
+# folded INTO `_P8_MFMA_ISSUE_STALL_ROUTEOUT`; K-1352 composes K-1336's
+# carve-IN with K-1335's K971 LDS-BC envelope on a single branch.  Pins
+# below replicate the K-1336 PR test additions plus K-1352-specific
+# composition pins.
+# ---------------------------------------------------------------------------
+K1336_REGRESSOR_CARVEIN_6_LIST = [
+    # K-1311 §F1 ranks #1-#6, all bf16 (K-1295 paired-n30 CI95-hi(delta) < 0)
+    ("K1311_R3", 1024, 1024, 4096),
+    ("K1311_R6", 1024, 1024, 8192),
+    ("K1311_R5", 2048, 2048, 2048),
+    ("K1311_R4", 2048, 2048, 4096),
+    ("K1311_R1", 2048, 2048, 8192),
+    ("K1311_R2", 4096, 4096, 4096),
+]
+# Single-axis-perturbed negative-neighbour cohort (K-1336 PR test additions):
+# 6 perturbations including the K-1311 borderline (8192,8192,8192) bf16
+# whose CI95 spans 0 at n=30 (defer admit decision to n=150).  All 6 must
+# NOT be admitted by `_K1336_REGRESSOR_CARVEIN_6`.
+K1336_NEGATIVE_NEIGHBORS_6 = [
+    ("K1311_borderline_8192cube", 8192, 8192, 8192),  # CI95 spans 0
+    ("K1336_neg_M_axis_512_2_4096", 512, 2048, 4096),
+    ("K1336_neg_N_axis_2048_512_4096", 2048, 512, 4096),
+    ("K1336_neg_K_axis_2048_2_1024", 2048, 2048, 1024),
+    ("K1336_neg_K_axis_4096_3_2048", 4096, 4096, 2048),
+    ("K1336_neg_M_axis_8192_2_4096", 8192, 2048, 4096),
+]
+
+
+def test_k1336_carvein_cardinality_is_exactly_6():
+    """K-1336 strict-equality cardinality pin.  K-1311 §F1 ranked exactly
+    6 cells with CI95-hi(delta) < 0 vs tb-main on the K-1295 paired-n30
+    sweep; K-1336 ships all 6 (and ONLY those 6).  Any silent edit changes
+    the count and trips this canary."""
+    assert len(_K1336_REGRESSOR_CARVEIN_6) == 6
+
+
+def test_k1336_carvein_contents_pinned_to_k1311_manifest():
+    """K-1336 carve-IN frozenset MUST equal the K-1311 §F1 6-cell
+    manifest exactly (no extras, no omissions).  bf16-only (the K-1311
+    paired-bench cohort was bf16-only)."""
+    expected = frozenset({
+        (1024, 1024, 4096, "torch.bfloat16"),
+        (1024, 1024, 8192, "torch.bfloat16"),
+        (2048, 2048, 2048, "torch.bfloat16"),
+        (2048, 2048, 4096, "torch.bfloat16"),
+        (2048, 2048, 8192, "torch.bfloat16"),
+        (4096, 4096, 4096, "torch.bfloat16"),
+    })
+    assert _K1336_REGRESSOR_CARVEIN_6 == expected
+
+
+def test_k1336_carvein_admits_all_6_k1311_regressors():
+    """Every K-1336 carve-IN cell flips the full dispatch decision to
+    route-OUT (route_to_hbl = True) on the bf16 path with streamk OFF /
+    work-stealing OFF.  The strict-equality lookup short-circuits at the
+    P8 envelope (1st-position dispatch predicate) -- the +13.89 us chain-
+    evaluation cost is bypassed."""
+    for (rank, M, N, K) in K1336_REGRESSOR_CARVEIN_6_LIST:
+        assert (M, N, K, "torch.bfloat16") in _K1336_REGRESSOR_CARVEIN_6, (
+            f"K-1336 carve-IN cell {rank} ({M},{N},{K}) missing from "
+            "_K1336_REGRESSOR_CARVEIN_6.")
+        assert (M, N, K, "torch.bfloat16") in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1336 carve-IN cell {rank} ({M},{N},{K}) missing from "
+            "composed P8 envelope.")
+        routed = k971_route_decision(
+            M, N, K,
+            "torch.bfloat16", "torch.bfloat16",
+            enable_streamk=False, work_stealing=False,
+            disable_env_set=False)
+        assert routed is True, (
+            f"K-1336 carve-IN cell {rank} ({M},{N},{K}) failed to route "
+            "to hbl via the composed P8 envelope short-circuit.")
+
+
+def test_k1336_carvein_does_not_admit_negative_neighbors():
+    """Single-axis-perturbed negative neighbours (K-1311 borderline 8192^3
+    + 5 single-axis perturbations of the 6 admit cells) MUST NOT match
+    the K-1336 carve-IN.  The borderline 8192^3 bf16 has CI95 spanning 0
+    at n=30 (K-1311 §F20 deferred to n=150 re-measure) -- explicitly
+    not-admitted at n=30 evidence."""
+    for (sid, M, N, K) in K1336_NEGATIVE_NEIGHBORS_6:
+        assert (M, N, K, "torch.bfloat16") not in _K1336_REGRESSOR_CARVEIN_6, (
+            f"K-1336 negative neighbour {sid} ({M},{N},{K}) leaked into "
+            "the carve-IN set; the K-1311 §F1 manifest is strictly the 6 "
+            "ranks #1-#6 cells, no perturbations admitted.")
+
+
+def test_k1336_carvein_is_bf16_only():
+    """K-1336 ships bf16 only.  The K-1295 paired-n30 sweep that K-1311
+    triaged was bf16-only; an fp16 entry would land an admit on an
+    unmeasured-dtype cell and bypass the K-1311 verification protocol."""
+    for (M, N, K, dtype) in _K1336_REGRESSOR_CARVEIN_6:
+        assert dtype == "torch.bfloat16", (
+            f"K-1336 carve-IN cell ({M},{N},{K},{dtype}) is not bf16; "
+            "the K-1295 / K-1311 verification scope is bf16-only.")
+
+
+def test_k1352_compose_invariant_k1335_subset_of_k1336_at_4tuple_level():
+    """K-1352 composition invariant (the load-bearing invariant of this
+    branch): K-1335's 4-cell `_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4` is
+    a STRICT SUBSET of K-1336's 6-cell `_K1336_REGRESSOR_CARVEIN_6` at
+    the (M,N,K,dtype) 4-tuple level.  Operationally:
+      * dispatch precedence places P8 strict-equality BEFORE
+        K971_ROUTE_TABLE in `route_to_hbl`
+      * K-1336's carve-IN catches the 4 overlapping cells via the
+        wrapper-overhead-skip mechanism on the P8 envelope
+      * K-1335 retains those 4 cells in K971_ROUTE_TABLE for mechanistic
+        defense-in-depth (LDS-BC fingerprint per K-913/K-1338 PMC; if
+        the K-1336 carve-IN is ever pulled, K-1335 still routes them)
+      * the 2 K-1336-only cells (2048^3, 4096^3) bf16 stay OUT of
+        K971_ROUTE_TABLE (no LDS-BC PMC anchor for those cells)
+
+    Set-intersection summary on the 12 strict-equality fires (the
+    'composed envelope' from K-1352 task spec, decomposed): 4 K-1335
+    fires + 6 K-1336 fires = 10 predicate fires across 6 unique
+    (M,N,K,dtype) cells (K-1336 union K-1335 = K-1336 since K-1335 is
+    a subset)."""
+    # Subset relation.
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 < _K1336_REGRESSOR_CARVEIN_6
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.issubset(
+        _P8_MFMA_ISSUE_STALL_ROUTEOUT)
+    # Cardinality decomposition.
+    assert len(_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4) == 4
+    assert len(_K1336_REGRESSOR_CARVEIN_6) == 6
+    union = (_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4
+             | _K1336_REGRESSOR_CARVEIN_6)
+    intersection = (_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4
+                    & _K1336_REGRESSOR_CARVEIN_6)
+    assert len(union) == 6
+    assert len(intersection) == 4
+    # Negative invariant: K-1336-only cells must NOT be in K971_ROUTE_TABLE.
+    k1336_only = (_K1336_REGRESSOR_CARVEIN_6
+                  - _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4)
+    assert len(k1336_only) == 2
+    assert k1336_only.isdisjoint(K971_ROUTE_TABLE)
+
+
+def test_k1352_compose_envelope_size_canary():
+    """K-1352 composed-envelope cardinality canary.  Composed P8 envelope
+    grows from K-1322's 51 cells to 57 cells (+ 6 K-1336 carve-IN, all
+    disjoint from the prior 51).  K971_ROUTE_TABLE remains at 12 cells
+    (K-1335 admits unchanged at the 4-tuple level; the K-1336 composition
+    does NOT widen K971)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 57
+    assert len(K971_ROUTE_TABLE) == 12
+    assert len(_K1336_REGRESSOR_CARVEIN_6) == 6
+    assert len(_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4) == 4

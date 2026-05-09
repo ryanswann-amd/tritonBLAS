@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -13,9 +14,25 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+# Strict-equality MFMA-issue-stall route-OUT table (36-cell envelope:
+# 13 anchors + 12 neighbors + 3 K-interior/M-axis admits + 8 N=128 admits).
+# Lives in a torch-free helper module so unit tests can exercise the lookup
+# without booting a GPU stack.
+from ._route_predicate import route_to_hbl as _mfma_stall_route_to_hbl
 
 
 _tensor_cache = {}
+
+
+def _route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    # Pure data dispatch: env killswitch -> mode/dtype guards -> 36-cell
+    # strict-equality lookup. Cells in the envelope short-circuit to
+    # hipBLASLt via torch.matmul; all other shapes fall through unchanged.
+    if os.environ.get("TRITONBLAS_DISABLE_HBL_ROUTEOUT") == "1":
+        return False
+    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
+        return False
+    return _mfma_stall_route_to_hbl(int(M), int(N), int(K), a_dtype)
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
@@ -402,6 +419,9 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        return torch.matmul(a, b)
+
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -460,6 +480,10 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

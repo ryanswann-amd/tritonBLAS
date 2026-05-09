@@ -57,6 +57,16 @@ from ._route_predicate import (
     # at N=32768 on the full K-grid.  30/30 admit at strict 1.05 gate;
     # cohort geomean tb/hbl ≈ 1.118×.  Naturally disjoint with all P1-P21.
     _k1513_p22_skinny_n32768_routeout as _R_K1513_P22_skinny_n32768_routeout,
+    # K-1538 (S-002): P23 skinny_N512 K-COMPLEMENT 30-cell alias-stack
+    # route-OUT (15th-position) — productionises the K-1538 N=512
+    # K-COMPLEMENT envelope as an alias of P15 (K-1409 EXTREMES) ⨄ P17
+    # (K-1437 BASE).  All 30 cells already routed-OUT by P15+P17 upstream;
+    # the 15th-slot documents the N=512 cohort under one symbol and is
+    # load-bearing if P15 or P17 is ever ablated.  29/30 strict admit;
+    # cohort geomean tb/hbl ≈ 1.329× (range 1.015×–1.842×).  Mirrors the
+    # K-1493 / K-1525 P20-alias-of-P19 sibling-slot productionisation
+    # pattern.
+    _k1538_p23_skinny_n512_alias_routeout as _R_K1538_P23_skinny_n512_alias_routeout,
 )
 
 
@@ -199,6 +209,21 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # cohort geomean tb/hbl ≈ 1.118× (range ≈ 1.045×-1.298×).  Naturally
     # disjoint with all P1-P21 (sibling-N firewall + R-1465 #1 invariant).
     if _R_K1513_P22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1538 P23 (15th-position): skinny_N512 K-COMPLEMENT 30-cell alias-stack
+    # route-OUT.  Stacks AFTER P22 per the K-1175 stacked-predicate
+    # convention.  Productionises the K-1538 N=512 K-COMPLEMENT envelope
+    # (M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,4096,8192,16384,32768} ×
+    # {bf16,fp16}) as an alias of the upstream P15 (K-1409 EXTREMES) ⨄ P17
+    # (K-1437 BASE) cover.  Every cell is fully covered upstream so the
+    # 15th-position membership check is unreachable while P15+P17 are
+    # enabled — by design.  The slot is load-bearing if P15 OR P17 is ever
+    # ablated, documents the N=512 cohort under one symbol, and pins the
+    # per-cell speedup ratios as comments for retro audit.  29/30 strict
+    # admit at ratio_median ≥ 1.05 ∧ CI95-lo ≥ 1.00; cohort geomean
+    # tb/hbl ≈ 1.329× (admit-subset 1.341×; range 1.015×–1.842×).  Mirrors
+    # the K-1493 / K-1525 P20-alias-of-P19 sibling-slot productionisation
+    # pattern.
+    if _R_K1538_P23_skinny_n512_alias_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

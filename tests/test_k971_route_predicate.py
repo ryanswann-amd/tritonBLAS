@@ -28,6 +28,8 @@ from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
+    _K905_K971_BASELINE_8,
+    _K1318_LONGK_SQUARE_BF16_ADMITS_4,
     _K1109_P6_K1074_ALLOWLIST,
     _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
     _K1109_P6_ALLOWLIST_ENV,
@@ -1597,3 +1599,155 @@ def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
         "Cells added to P8 envelope past K-1275 do not match "
         "_K1219_E3_NFLOOR256_ADMITS_7 exactly; an unattributed "
         "cell crept in.")
+
+
+
+# ---------------------------------------------------------------------------
+# K-1318 / K-1329 longK_smallSquare K-band fill -- pin tests.
+#
+# K-1308 ranked longK_smallSquare as the worst residual after K-1303's
+# unified 43-cell P8 envelope.  K-1318 adds 4 bf16-only strict-equality
+# admits to K971_ROUTE_TABLE (the K-905/K-971 sibling predicate) closing
+# the K=4096, 8192 K-band fill that K-1308 F8 explicitly identified.
+# Source ticket: K-1329 paired n=30 HIP-graph hot-cache MI300X bench
+# with B=10000 paired-bootstrap CI95.  All 4 cells: CI95 strictly
+# excludes 1.0 (geomean route-OUT speedup 1.300x).
+# ---------------------------------------------------------------------------
+
+K1318_LONGK_SQUARE_BF16_ADMITS_4_LIST = [
+    # (cid, M, N, K, routeOUT_speedup, ci95_lo, ci95_hi)
+    ("L1024_K4096", 1024, 1024,  4096, 1.179, 1.160, 1.194),
+    ("L1024_K8192", 1024, 1024,  8192, 1.464, 1.454, 1.475),
+    ("L2048_K4096", 2048, 2048,  4096, 1.270, 1.260, 1.279),
+    ("L2048_K8192", 2048, 2048,  8192, 1.303, 1.294, 1.311),
+]
+
+
+def test_k1318_admits_cardinality_and_disjointness():
+    """K-1318 strict-equality set is exactly 4 bf16 cells, disjoint from
+    the K-905/K-971 baseline by K-axis projection."""
+    assert len(_K1318_LONGK_SQUARE_BF16_ADMITS_4) == 4
+    assert _K1318_LONGK_SQUARE_BF16_ADMITS_4.isdisjoint(_K905_K971_BASELINE_8), (
+        "K-1318 longK_smallSquare admits overlap with K-905/K-971 baseline; "
+        "disjointness by K-axis projection (K in {4096, 8192} vs "
+        "{16384, 32768}) is required.")
+
+
+def test_k1318_admits_match_measurement_table():
+    """Each K-1318 cell in the frozenset matches the K-1329 paired n=30
+    measurement table exactly (M, N, K, dtype) -- a silent re-measurement
+    drift would change a tuple on one side and not the other."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16")
+        for (_cid, M, N, K, _spd, _lo, _hi)
+        in K1318_LONGK_SQUARE_BF16_ADMITS_4_LIST)
+    assert _K1318_LONGK_SQUARE_BF16_ADMITS_4 == expected
+
+
+def test_k1318_admits_have_M_eq_N_square():
+    """All K-1318 admits are square (M == N) per the longK_smallSquare
+    regime definition (K-1308 bucket_summary.json:longK_smallSquare)."""
+    for (M, N, K, _dtype) in _K1318_LONGK_SQUARE_BF16_ADMITS_4:
+        assert M == N, (
+            f"K-1318 admit ({M}, {N}, {K}) is non-square; K-1329 cohort "
+            "is restricted to longK_smallSquare regime.")
+        assert M in (1024, 2048), (
+            f"K-1318 admit ({M}, {N}, {K}) M is not in (1024, 2048); "
+            "K-1329 cohort is restricted to small-square M=N anchors.")
+        assert K in (4096, 8192), (
+            f"K-1318 admit ({M}, {N}, {K}) K is not in (4096, 8192); "
+            "K-1318 fills only the K-band gap between K-1308 measured "
+            "shapes and the K-905/K-971 baseline (K in {16384, 32768}).")
+
+
+def test_k1318_admits_are_bf16_only():
+    """K-1329 measurement scope is bf16 only.  fp16/fp32 with the same
+    (M, N, K) must NOT route via K971_ROUTE_TABLE -- the K-905/K-971
+    baseline ships matching fp16 entries from independent measurement;
+    K-1318 has only bf16 measurements so we ship only bf16."""
+    for (M, N, K, _dtype) in _K1318_LONGK_SQUARE_BF16_ADMITS_4:
+        for fp_dtype_str in ("torch.float16", "torch.float32"):
+            assert (M, N, K, fp_dtype_str) not in K971_ROUTE_TABLE, (
+                f"K-1318 K971 entry leaked into non-bf16 dtype "
+                f"{fp_dtype_str} for cell ({M}, {N}, {K}); K-1318 is "
+                "bf16-only by measurement scope.")
+
+
+def test_k1318_admits_route_via_k971_dispatch_chain():
+    """End-to-end: each K-1318 cell triggers route-OUT via the production
+    `_k971_route_to_hbl` dispatch helper (i.e. not just present in the
+    set, but actually consulted by the dispatch chain at the K971 final
+    step after P8/E1/P5 all fail to fire)."""
+    for (M, N, K, _dtype) in _K1318_LONGK_SQUARE_BF16_ADMITS_4:
+        # P8 must NOT fire (these cells are not in the 43-cell P8 envelope).
+        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+            f"P8 unexpectedly fired on K-1318 cell ({M}, {N}, {K}); "
+            "K-1318 cells must reach the K971 strict-equality table at "
+            "the bottom of the dispatch chain.")
+        # E1 must NOT fire (N=1024 or 2048 is in {1792,2048,3072} for N=2048
+        # only, but M=2048 < E1 M_FLOOR=4480 so E1 short-circuits).  For
+        # N=1024 cells, N is outside E1's N-set entirely.
+        assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is False, (
+            f"E1 unexpectedly fired on K-1318 cell ({M}, {N}, {K}); "
+            "K-1318 cells must reach the K971 strict-equality table.")
+        # K971 strict-equality must say YES.
+        assert (M, N, K, "torch.bfloat16") in K971_ROUTE_TABLE, (
+            f"K-1318 cell ({M}, {N}, {K}) missing from K971_ROUTE_TABLE.")
+        # End-to-end dispatch (replicates the production decision).
+        decision = _k971_route_to_hbl(
+            M, N, K, torch.bfloat16, torch.bfloat16,
+            enable_streamk=False, work_stealing=False)
+        assert decision is True, (
+            f"_k971_route_to_hbl returned False for K-1318 cell "
+            f"({M}, {N}, {K}); expected route-OUT True via the K971 "
+            "strict-equality table.")
+
+
+def test_k1318_does_not_disturb_k905_k971_baseline():
+    """K-1318 must extend, not replace, the K-905/K-971 baseline.  Every
+    pre-K-1318 K971 entry must remain present in the unified table."""
+    pre_k1318 = _K905_K971_BASELINE_8
+    assert len(pre_k1318) == 8
+    for cell in pre_k1318:
+        assert cell in K971_ROUTE_TABLE, (
+            f"K-905/K-971 baseline cell {cell} dropped from K-1318 "
+            "K971_ROUTE_TABLE; K-1318 must be strict-equality union only.")
+    # Symmetric: every new cell added by K-1318 must be in the K-1318 set.
+    delta = K971_ROUTE_TABLE - pre_k1318
+    assert delta == _K1318_LONGK_SQUARE_BF16_ADMITS_4, (
+        "Cells added to K971_ROUTE_TABLE past the K-905/K-971 baseline "
+        "do not match _K1318_LONGK_SQUARE_BF16_ADMITS_4 exactly; an "
+        "unattributed cell crept in.")
+
+
+def test_k1318_admits_disjoint_from_p8_43_cell_envelope():
+    """K-1318 cells must be disjoint from the K-1303 unified 43-cell P8
+    envelope to avoid double-routing (P8 wins first if both fire, but
+    the ticket pre-conditions assume K-1318 cells reach K971 ONLY)."""
+    for cell in _K1318_LONGK_SQUARE_BF16_ADMITS_4:
+        assert cell not in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1318 cell {cell} overlaps the K-1303 P8 envelope; "
+            "K-1318 cells must be exclusive to the K971 strict-equality "
+            "table for clean precedent attribution.")
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,routeOUT_spd,ci95_lo,ci95_hi", K1318_LONGK_SQUARE_BF16_ADMITS_4_LIST,
+    ids=[r[0] for r in K1318_LONGK_SQUARE_BF16_ADMITS_4_LIST])
+def test_k1318_per_cell_measurement_pin(cid, M, N, K, routeOUT_spd, ci95_lo, ci95_hi):
+    """One pin per K-1329 measured cell. Verifies (a) the cell is in the
+    shipped frozenset, (b) the speedup is >= 1.0 (route-OUT is a win),
+    (c) the CI95 interval lo > 1.0 (gap is statistically significant).
+    These are documentation-pins -- they encode the K-1329 measurement
+    contract into the test file so a silent regression in the table
+    requires actively breaking these tests."""
+    assert (M, N, K, "torch.bfloat16") in _K1318_LONGK_SQUARE_BF16_ADMITS_4, cid
+    assert routeOUT_spd >= 1.0, (
+        f"K-1318 cell {cid} measured speedup {routeOUT_spd} < 1.0; "
+        "route-OUT is not a win for this cell -- it should not be in "
+        "the admit set.")
+    assert ci95_lo > 1.0, (
+        f"K-1318 cell {cid} CI95 lower bound {ci95_lo} crosses 1.0; "
+        "the gap is not statistically significant -- this cell should "
+        "not be admitted.")
+    assert ci95_hi >= ci95_lo, f"CI95 inverted for {cid}"

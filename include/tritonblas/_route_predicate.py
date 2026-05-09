@@ -18,7 +18,7 @@ import os
 # structurally collide with K-950 LAND cells (e.g. (1024,1024,16384,bf16) is
 # both a K-912 LAND and a K-905 route-OUT — only an exact tuple can express
 # "fire on this exact shape but not on its baseline-LAND twin").
-K971_ROUTE_TABLE = frozenset({
+_K905_K971_BASELINE_8 = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),
     (1024, 1024, 32768, "torch.bfloat16"),  # K-971 (K-905 N4: hbl/off=1.73x)
@@ -28,6 +28,72 @@ K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
     (2048, 2048, 32768, "torch.float16"),
 })
+
+# ---------------------------------------------------------------------------
+# K-1318 / K-1329 (S-002) — longK_smallSquare K-band fill (4 cells, bf16).
+#
+# K-1308 per-bucket residual analysis (output/bucket_summary.json) ranked
+# the longK_smallSquare regime as the single worst residual after the
+# K-1303 unified 43-cell P8 envelope: 4 anchors (1024^2 and 2048^2 at
+# K=4096, 8192) with a mean tb-over-hbl ratio of 0.305 across all four
+# K-1295 measurement branches (tb-main, tb-k1216k1227, tb-4pred — within
+# 3% of each other), confirming the gap is NOT autotune-addressable: no
+# (BM,BN,BK,WPEU,NS,NW) permutation in the existing in-kernel catalog
+# closes the gap (K-1308 F12: 4-pred ratio == main ratio for these cells
+# within CV).
+#
+# K-1329 paired n=30 HIP-graph hot-cache MI300X (rad-mi300x-1, gfx942,
+# ROCm 7.2) on fix/K-1303 measured the route-OUT speedup (tb_us/hbl_us)
+# per cell with B=10000 paired-bootstrap percentile-CI95:
+#   (1024, 1024, 4096, bf16)   1.179x   CI95 [1.160, 1.194]   excl_unity=Y
+#   (1024, 1024, 8192, bf16)   1.464x   CI95 [1.454, 1.475]   excl_unity=Y
+#   (2048, 2048, 4096, bf16)   1.270x   CI95 [1.260, 1.279]   excl_unity=Y
+#   (2048, 2048, 8192, bf16)   1.303x   CI95 [1.294, 1.311]   excl_unity=Y
+# 4-cell geomean: 1.300x.  All CI95 strictly exclude 1.0 — every cell
+# is a stat-sig win for hipBLASLt at the bf16 dtype.
+#
+# Mechanism: same persistent-residual root cause as K-913 / K-905 / K-971
+# — the in-kernel matmul on small M=N square long-K shapes hits LDS-bank-
+# conflict bound throughput because the BM=BN=128 tile cannot saturate
+# the LDS read ports while keeping K-loop pipelined.  hipBLASLt selects a
+# different microkernel (SplitK / streamk variant per K-913 PMC notes).
+# The K-913 LDS_BC=1.78 measurement at (1024,1024,8192) — exactly one of
+# this PR's admits — is the cited mechanistic anchor.
+#
+# Mechanism (the K-905/K-971 / K-913 LDS-bank-conflict band) is the
+# dominating mechanism for these cells, NOT the P8 MFMA-issue-stall
+# pathology of K-1144 / K-1303.  This PR therefore extends the K-905/K-971
+# strict-equality table (a sibling predicate of P8, consulted in the same
+# `_k971_route_to_hbl` dispatch chain after P8/E1/P5).  bf16-only by
+# design — the fp16 sibling cells are deferred pending an independent
+# fp16 measurement campaign (K-905/K-971 paired bf16+fp16 entries reflect
+# pre-existing measurement coverage; K-1318 has only bf16 measurements).
+#
+# Disjointness: by construction, this set has K in {4096, 8192} while
+# the K-905/K-971 baseline set has K in {16384, 32768} — no overlap on
+# the K-axis.  Asserted at module load below.
+# ---------------------------------------------------------------------------
+_K1318_LONGK_SQUARE_BF16_ADMITS_4 = frozenset({
+    (1024, 1024,  4096, "torch.bfloat16"),  # routeOUT 1.179x [1.160, 1.194]
+    (1024, 1024,  8192, "torch.bfloat16"),  # routeOUT 1.464x [1.454, 1.475]
+    (2048, 2048,  4096, "torch.bfloat16"),  # routeOUT 1.270x [1.260, 1.279]
+    (2048, 2048,  8192, "torch.bfloat16"),  # routeOUT 1.303x [1.294, 1.311]
+})
+
+# Composed K971 envelope: K-905/K-971 baseline (8 cells, mixed bf16+fp16
+# at K in {16384, 32768}) ∪ K-1318 longK_smallSquare K-band fill (4
+# bf16-only cells at K in {4096, 8192}).  Two named provenance frozensets
+# per R-1144.DUAL-FROZENSET-PROVENANCE so future reviewers can trace each
+# entry back to its measurement campaign.
+K971_ROUTE_TABLE = _K905_K971_BASELINE_8 | _K1318_LONGK_SQUARE_BF16_ADMITS_4
+assert len(K971_ROUTE_TABLE) == 12, (
+    "K-1318 unified K971_ROUTE_TABLE must be exactly 12 cells (8 K-905/K-971 "
+    "baseline + 4 K-1318 longK_smallSquare bf16 K-band fill); a duplicate "
+    "or stray entry has crept in.")
+assert _K905_K971_BASELINE_8.isdisjoint(_K1318_LONGK_SQUARE_BF16_ADMITS_4), (
+    "K-1318 longK_smallSquare admits overlap with the K-905/K-971 baseline; "
+    "K-1318 cells have K in {4096, 8192} while baseline cells have K in "
+    "{16384, 32768} — disjointness by K-axis projection is required.")
 
 
 def _dtype_is_bf16(dtype) -> bool:

@@ -1421,13 +1421,14 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
             f"K-1175 P8 cell {cell} dropped from K-1231 envelope; "
             "K-1205 must be strict-equality union only.")
     # Symmetric: every new cell added by K-1205 must be in E_N3 or in
-    # K-1297's A1 perturbation extension (the K-1297 layer added 9 more
-    # A1-anchor perturbation cells on top of the K-1205 36-cell baseline).
+    # K-1297's A1 perturbation extension (the K-1297 layer added 8 more
+    # A1-anchor perturbation cells on top of the K-1205 36-cell baseline
+    # under the V2 corrected protocol).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1205
-    expected_delta = _K1205_EN3_ADMITS_8 | _K1283_A1_PERTURBATIONS_9
+    expected_delta = _K1205_EN3_ADMITS_8 | _K1283_A1_PERTURBATIONS_8
     assert delta == expected_delta, (
         "Cells added to P8 envelope past K-1175 do not match "
-        "_K1205_EN3_ADMITS_8 | _K1283_A1_PERTURBATIONS_9 exactly; "
+        "_K1205_EN3_ADMITS_8 | _K1283_A1_PERTURBATIONS_8 exactly; "
         "an unattributed cell crept in.")
 
 
@@ -1630,3 +1631,75 @@ def test_k1283_does_not_disturb_existing_p8_36_cell_envelope():
     assert delta == _K1283_A1_PERTURBATIONS_8, (
         "Cells added to P8 envelope past K-1205 do not match "
         "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed cell crept in.")
+
+
+# ---------------------------------------------------------------------------
+# K-1297 / K-1283-A1 extension regression pin -- K-931 control no-leak under
+# the new 44-cell envelope, plus the V1->V2 reclassified A1_S18_Mx2 cell.
+#
+# Testing-Zealot ask: prove the K-1297 8-cell extension did NOT pull the
+# K-931 always-uncovered noise-floor shapes into the productionized
+# envelope, and prove that the V1->V2 methodology correction (which
+# downgraded A1_S18_Mx2 from admit to reject) is enforced by the test
+# suite rather than only by inline comments.  The earlier K-1144-keyed
+# `test_k1144_p8_does_not_leak_into_k931_control_cells` only checked the
+# 36-cell envelope; this pin re-affirms that property under the post-
+# K-1297 44-cell envelope as a parametrized envelope-membership trap.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cid,M,N,K", K931_CONTROL_CELLS_5,
+                         ids=[c[0] for c in K931_CONTROL_CELLS_5])
+def test_k1297_extension_preserves_k931_no_leak_in_44_cell_envelope(
+        cid, M, N, K):
+    """The K-1297 +8-cell extension MUST NOT pull any of the K-931 always-
+    uncovered noise-floor shapes into `_P8_MFMA_ISSUE_STALL_ROUTEOUT`.
+    This is a parametrized envelope-membership pin (different from the
+    K-1144 pin which checks the strict-equality predicate function): if
+    a future contributor relaxes the A1 frozenset to a parametric form
+    that happens to subsume any K-931 control, this test trips."""
+    cell = (M, N, K, "torch.bfloat16")
+    assert cell not in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+        f"K-1297 envelope {len(_P8_MFMA_ISSUE_STALL_ROUTEOUT)}-cell set "
+        f"now contains K-931 control {cid} ({M},{N},{K}) -- the A1 "
+        "extension leaked into the noise-floor shapes.")
+    # Predicate-function level cross-check (defense in depth).
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+        f"P8 predicate fired on K-931 control {cid} ({M},{N},{K}) under "
+        f"the post-K-1297 44-cell envelope; the K-1297 extension must "
+        "remain strict-equality and disjoint from K-931 controls.")
+
+
+def test_k1297_v2_reclassified_s18_mx2_is_explicit_no_leak_pin():
+    """Pin the V1->V2 methodology correction:  A1_S18_Mx2 (11944, 1792, 768,
+    bf16) was admitted in the V1 attempt of K-1297 (V1 1.155x [1.034,
+    1.268]); the V2 protocol's interleaved-block timing surfaced
+    hipBLASLt-vs-Triton timing noise the V1 per-arm capture was masking
+    with autotune-transient bias, and the cell measured 1.214x [0.950,
+    1.547] under V2 -- CI95-lo straddles 1.0, fails admit gate.
+
+    Test asserts:
+      (a) the cell is NOT in the productionized 44-cell envelope (carve-
+          out by V2 reclassification);
+      (b) the cell IS in the K-1297 A1 reject pin list as a no-leak
+          regression trap (reviewer Skeptic's ask: enforce the V1->V2
+          downgrade in the test suite, not just in inline comments).
+
+    This pin is the test-level enforcement of the V1->V2 ed61887 commit
+    so a future contributor cannot silently "restore" the V1 admit
+    (e.g. by undoing the V2 reclassification) without first removing
+    this pin -- which makes the deviation auditable."""
+    cell_s18_mx2 = (11944, 1792, 768, "torch.bfloat16")
+    assert cell_s18_mx2 not in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+        "A1_S18_Mx2 (11944, 1792, 768, bf16) leaked back into the "
+        "K-1297 envelope; V2 protocol explicitly rejected this cell at "
+        "1.214x CI95-lo=0.950 -- if you are restoring the V1 admit, "
+        "you must first re-measure under V2 and update the reject pin.")
+    assert _p8_mfma_issue_stall_routeout(11944, 1792, 768, torch.bfloat16) is False, (
+        "P8 predicate fired on A1_S18_Mx2 -- V2 reclassification not "
+        "honored at the predicate-function level.")
+    # Cross-check that S18_Mx2 is in the explicit reject manifest list.
+    s18_mx2_in_rejects = any(
+        cid == "A1_S18_Mx2" for (cid, *_rest) in K1283_A1_REJECTED_7_LIST)
+    assert s18_mx2_in_rejects, (
+        "A1_S18_Mx2 must appear in K1283_A1_REJECTED_7_LIST as the "
+        "V1->V2 reclassification pin; if you removed it, the V1->V2 "
+        "methodology correction is no longer enforced by the test suite.")

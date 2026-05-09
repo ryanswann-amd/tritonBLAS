@@ -98,6 +98,13 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-1652/K-1672: kpack=1 is PMC-verified bank-conflict-free on the M=N=4096
+    # cohort (MI300X/gfx942) at the Origami-selected 256x256x64 / 8 warps / 2
+    # stages config. K-1652 falsified the kpack=2 LDS-swizzle hypothesis: it
+    # introduces 8.4M bank conflicts/kernel and regresses ~9%. Do not flip back
+    # to kpack=2 without re-running tests/test_lds_swizzle_policy.py + a paired
+    # n>=30 cohort sweep; K-1641 PMC rules the residual gap as LDS pipeline
+    # back-pressure (SQ_WAIT_INST_LDS), not bank conflicts.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -244,6 +251,9 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-1652/K-1672: kpack=1 is PMC-verified bank-conflict-free; see
+    # persistent_matmul_lt above for the falsified-kpack=2 evidence and
+    # K-1641 LDS-back-pressure root-cause pointer.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

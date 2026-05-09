@@ -686,20 +686,18 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_36_after_k1205_extension():
+def test_k1144_p8_envelope_size_is_exactly_42_after_k1336_carvein():
     """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
-    E_N3 = 36 cells.  Any silent edit changes this count and trips this
-    canary.
+    E_N3 + 6 K-1336 Population A regressor carve-IN = 42 cells.  Any silent
+    edit changes this count and trips this canary.
 
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024); K-1231 /
-    K-1205 extends by 8 N-axis-validated cells at N=128 (E_N3 cohort with
-    M from K-1121 anchor M-set, K in K-1144 K-set {256, 768, 1024}, bf16),
-    decisively diverging from K-1161's K-axis NEGATIVE_AXIS_PIVOT (88.9%
-    N-axis admit vs 16.7% K-axis admit on the same hardware/methodology).
-    See the _K1205_EN3_ADMITS_8 docstring in _route_predicate.py for the
-    full mechanism narrative and the EN_K768_S24 (M=4480) carve-out."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
+    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells;
+    K-1231/K-1205 extends by 8 N-axis-validated cells at N=128; K-1336 adds
+    6 Population A cells (longk + square mid-K) per K-1311 paired n=30
+    triage (CI95 hi(delta_ratio) < 0 vs tb-main, mechanism = dispatch-
+    wrapper overhead on non-admitted cells -- routing them OUT short-
+    circuits the chain to the wrapper-overhead ceiling)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 42
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3

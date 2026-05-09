@@ -3300,3 +3300,32 @@ _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p33_skinny_n224_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P34 (25th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells from
+# the paired N ∈ {96, 160, 224, 288} K-COMPLEMENT sweep on MI300X / gfx942
+# (bench_paired.csv 4-cell direct anchor at M=4096 × K ∈ {4096, 16384} ×
+# {bf16, fp16}: ratio_tb_over_hbl ∈ [3.10, 5.37] — TB-native is 3.1–5.4×
+# SLOWER than hipBLASLt across all 4 directly measured cells).  Envelope
+# expanded to the standard M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,
+# 16384} × {bf16,fp16} grid per the K-1810/K-1817 wave-misaligned skinny-N
+# alias-stack convention (same M/K/dtype shape as P32 N=160 and P33 N=224).
+# Both dtype rows load-bearing — no upstream alias overlap (N=288 falls
+# above the R-K979 P5 minMN ≤ 192 clause and outside every K-1367/K-1397
+# P13 N ∈ {128, 256} envelope and the K-1700/K-1748 P29/P30 N ∈ {64, 384,
+# 768, 1536} alias-stacks).  Mechanism (K-913 §3 / R-K1673 dtype-invariance):
+# BLOCK_N=128 packs N=288 into TWO K-block columns (one full BLOCK_N=128 +
+# one wave-misaligned 160-wide remainder); SQ_LDS_BANK_CONFLICT/inst stays
+# elevated and persistent_matmul cannot trade tile reshape for atomic-
+# reduction.  Same dtype-invariant LDS-BC fingerprint as K-1673 P28
+# (N=128), K-1810 P32 (N=160), K-1817 P33 (N=224), K-1775 P31 (N=256), now
+# applied to the wave-misaligned N=288 rung.  hipBLASLt's split-K kernel
+# selection clears the band — paired CSV anchor: hbl_med_us 43.8–159.6 vs
+# tb_med_us 291.1–494.0 (cohort gmean speedup ≥ 4.0× across the 4 verified
+# cells; the remaining 14 cells inherit via dtype-mirror + M-axis closure
+# per R-K1673 dtype-invariance and K-913 §3 ±19% cross-M neighborhood).
+_P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 288, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p34_skinny_n288_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

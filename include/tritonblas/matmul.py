@@ -125,6 +125,16 @@ from ._route_predicate import (
     # dtype rows load-bearing — no upstream alias overlap (N=224 is the first
     # N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192).
     _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
+    # P34 (25th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
+    # the paired N ∈ {96,160,224,288} sub-cohort (paired n=30 HIP-graph hot-cache
+    # bench_paired.csv anchor: ratio_tb_over_hbl ∈ [3.10, 5.37] across the 4
+    # directly-measured cells at M=4096 × K ∈ {4096, 16384} × {bf16, fp16}).
+    # Both dtype rows load-bearing — no upstream alias overlap (N=288 falls
+    # above the R-K979 P5 minMN ≤ 192 clause and outside every K-1367/K-1397
+    # P13 N ∈ {128, 256} envelope).  Closes the wave-misaligned skinny-N
+    # ladder rung between P31 N=256 and P30 N=384.
+    _P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -407,6 +417,19 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # bearing, closes the wave-misaligned N=224 dtype-mirror (BLOCK_N=128 packs
     # N=224 into one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint).
     if (int(M), int(N), int(K), str(a_dtype)) in _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18: return True
+    # P34 (25th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells from
+    # the paired N ∈ {96,160,224,288} sub-cohort (M ∈ {2048,4096,8192} × N=288 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Paired n=30 HIP-graph hot-cache
+    # bench_paired.csv direct anchor at M=4096 × K ∈ {4096, 16384} × {bf16, fp16}:
+    # ratio_tb_over_hbl ∈ [3.10, 5.37] — TB-native is 3.1–5.4× SLOWER than HBL.
+    # Both dtype rows load-bearing — no upstream alias overlap (N=288 falls above
+    # the R-K979 P5 minMN ≤ 192 clause and outside K-1367/K-1397 P13 N ∈ {128, 256}
+    # envelopes).  Closes the wave-misaligned N=288 dtype-mirror; mechanism is the
+    # same K-913 §3 LDS-BC fingerprint as P31/P32/P33 (BLOCK_N=128 packs N=288
+    # into a wave-misaligned K-block column layout where persistent_matmul cannot
+    # trade tile reshape for atomic-reduction; only HBL's split-K kernel selection
+    # clears the band).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

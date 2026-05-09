@@ -241,6 +241,37 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-1653: Bump BLOCK_K to next power-of-two for long-K wide-N geometry
+        # to amortize A/B tile reloads and reduce L2 read pressure.
+        #
+        # K-1634 PMC verdict: the N=16384 long-K loser cohort is uniformly
+        # L2-thrash-bound (TB issues 0.72-0.81x the TCC requests of hipBLASLt
+        # but at 5-18 pp lower L2 hit rate -> larger absolute miss bytes).
+        # Doubling BLOCK_K halves the K-iteration count, so each A/B tile
+        # load is amortized over 2x more dot products and the wall-clock
+        # tile-residency window shrinks proportionally.
+        #
+        # The bump is gated on LDS capacity -- when the 256x256 heuristic
+        # tile above already saturates LDS at the current BK, the bump is
+        # skipped (the kernel-side B-pointer hoist in `reduce_axis`
+        # already addresses the per-iteration recompute cost for those
+        # tiles).  Trigger window is intentionally narrow (K>=16384 AND
+        # N>=8192) so smaller-K / smaller-N cells are unaffected.
+        if self._k >= 16384 and self._n >= 8192:
+            cur_bk = self._result.config.mt.k
+            cur_bm = self._result.config.mt.m
+            cur_bn = self._result.config.mt.n
+            # Next power-of-two strictly greater than cur_bk.
+            next_bk = 1 << cur_bk.bit_length() if cur_bk > 0 else 64
+            max_bk = max(self._block_k_range)
+            next_bk = min(next_bk, max_bk)
+            if (next_bk > cur_bk
+                and self._k % next_bk == 0
+                and check_triton_lds_capacity(
+                    cur_bm, cur_bn, next_bk, bytes_a, bytes_b, lds_cap, self._num_stages
+                )):
+                self._result.config.mt.k = next_bk
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:

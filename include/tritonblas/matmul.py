@@ -1,5 +1,4 @@
 import functools
-import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -89,32 +88,13 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
-    num_stages = getattr(selector, "num_stages", 2)
-
-    # ---------------------------------------------------------------
-    # K-1699 minimal-diff prototype (S-002):
-    # Gate NS=3 + BK=128 ONLY on the (M=N=8192, K>=16384) shape
-    # signature, which corresponds to the K-COMPLEMENT alias-stack
-    # cohort identified in K-1686's PMC RCA. K-1655 falsified this
-    # NS/BK pair for M=N=4096, but K-1686 shows the 8192 envelope has
-    # a different occupancy/LDS-pressure profile, motivating a
-    # narrowly-gated retry. Override is a no-op for every other shape.
-    # Kill switch: TRITONBLAS_DISABLE_K1699_S002=1
-    # ---------------------------------------------------------------
-    if (
-        M == 8192
-        and N == 8192
-        and K >= 16384
-        and not os.environ.get("TRITONBLAS_DISABLE_K1699_S002")
-    ):
-        num_stages = 3
-        BLK_K = 128
-
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
     total_programs = total_tiles
     even_k = K % BLK_K == 0
+
+    num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16

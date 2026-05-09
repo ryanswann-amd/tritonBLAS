@@ -321,3 +321,101 @@ def test_ablation_p23_does_not_overshoot_outside_bucket(upstream_n512_silenced):
             _k1538_p23_skinny_n512_alias_routeout as p23,
         )
         assert p23(M, N, K, dt) is False
+
+
+# ---------------------------------------------------------------------------
+# REVIEWER-MANDATED (Skeptic) — realistic upstream-perturbation pin.
+#
+# The blanket-False ablation above proves slot-15 reachability under the
+# extreme "every upstream layer disabled" hypothetical, but a more durable
+# regression pin asserts that P23 catches each cell that an upstream layer
+# legitimately *drops* (the realistic refactor scenario: a future P15/P17
+# audit shrinks the frozenset by a few cells).  This test patches P15 and
+# P17 to their actual frozensets minus a hand-picked cell, then proves the
+# dispatch chain still routes that cell via slot 15.
+# ---------------------------------------------------------------------------
+
+# Cells to perturb out of P15 and P17 — picked to cover both K-extremes
+# (P15 territory: K∈{2048,32768}) and K-middle (P17 territory:
+# K∈{4096,8192,16384}), and to span both dtypes.
+_REALISTIC_PERTURBATIONS = [
+    # (drop-from-frozenset-name, M, N, K, dtype_str)
+    ("P15", 8192,  512, 32768, "torch.bfloat16"),  # P15 K=32768 corner
+    ("P15", 2048,  512,  2048, "torch.float16"),   # P15 K=2048 corner
+    ("P17", 4096,  512,  8192, "torch.bfloat16"),  # P17 K-middle
+    ("P17", 8192,  512, 16384, "torch.float16"),   # P17 K-middle (top)
+]
+
+
+@pytest.mark.parametrize("drop_from,M,N,K,dtype_str", _REALISTIC_PERTURBATIONS)
+def test_realistic_perturbation_p23_catches_cells_dropped_from_p15_or_p17(
+    monkeypatch, drop_from, M, N, K, dtype_str
+):
+    """Realistic-perturbation regression pin (Skeptic / K-1558 retry).
+
+    Models a plausible refactor where an upstream K-COMPLEMENT layer is
+    *legitimately* edited (one cell removed), rather than the blanket-False
+    ablation above.  The cell is required to still route True via the
+    15th-position P23 alias-stack — proving the load-bearing-fallback
+    property holds under realistic, not just extreme, upstream churn.
+
+    Pre-condition: the dropped cell IS a member of the source frozenset
+    (caught at fixture time so an upstream rename does not silently
+    no-op this pin)."""
+    import tritonblas._route_predicate as rp
+
+    dtype = torch.bfloat16 if dtype_str == "torch.bfloat16" else torch.float16
+    cell = (int(M), int(N), int(K), dtype_str)
+
+    if drop_from == "P15":
+        original = rp._K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT
+        assert cell in original, (
+            f"perturbation pre-condition failed: {cell} not in P15 — pin "
+            "is no-op; remove from _REALISTIC_PERTURBATIONS or pick a "
+            "different cell")
+        perturbed = frozenset(original - {cell})
+        monkeypatch.setattr(rp,
+            "_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT", perturbed)
+        monkeypatch.setattr(rp, "_k1409_p15_skinny_n512_routeout",
+            lambda Mi, Ni, Ki, dt: (int(Mi), int(Ni), int(Ki), str(dt))
+                                    in perturbed)
+    elif drop_from == "P17":
+        original = rp._K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17
+        assert cell in original, (
+            f"perturbation pre-condition failed: {cell} not in P17 — pin "
+            "is no-op; remove from _REALISTIC_PERTURBATIONS or pick a "
+            "different cell")
+        perturbed = frozenset(original - {cell})
+        monkeypatch.setattr(rp,
+            "_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17", perturbed)
+        monkeypatch.setattr(rp,
+            "_k1437_p17_skinny_n512_kcompl_base_routeout",
+            lambda Mi, Ni, Ki, dt: (int(Mi), int(Ni), int(Ki), str(dt))
+                                    in perturbed)
+    else:
+        raise AssertionError(f"unknown frozenset: {drop_from}")
+
+    # Cell is still routed True — P23 alias-stack carries the load that
+    # the perturbed upstream layer no longer covers.
+    assert k971_route_decision(
+        M, N, K, dtype, dtype,
+        enable_streamk=False, work_stealing=False,
+    ) is True
+
+
+def test_realistic_perturbation_disjoint_siblings_invariant_holds_at_load():
+    """Disjoint-siblings invariant pin (Skeptic / K-1558 retry).
+
+    The K-1532 minimalist refactor expressed sibling-N firewall as a
+    data-driven assert loop run at module load.  This pin re-runs the
+    invariant from the test side so a regression in the loop (e.g. a
+    silent ``except AssertionError: pass`` wrapper introduced by a
+    future refactor) is still caught by pytest, not just by the
+    happens-to-be-imported-first module-load order."""
+    import tritonblas._route_predicate as rp
+    for sibling_name, sibling_set in rp._K1538_P23_DISJOINT_SIBLINGS:
+        assert rp._K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_30.isdisjoint(
+            sibling_set), (
+            f"K-1538 P23 sibling-firewall regressed against {sibling_name}; "
+            "the only intentional aliases are P15 and P17 (omitted from "
+            "_K1538_P23_DISJOINT_SIBLINGS by design).")

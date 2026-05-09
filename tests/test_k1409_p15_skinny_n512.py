@@ -1,8 +1,8 @@
-"""K-1409 P15 + K-1400 P14 + K-1389 P13 + K-1361 P12 pin tests — torch-free.
+"""K-1409 P15 + K-1382 P14 + K-1367 P13 + K-1361 P12 pin tests — torch-free.
 
 Validates the K-1409 productionisation of the 18-cell
 `_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_18` frozenset stacked as the
-9th-position envelope on top of the K-1400 P14 91-cell baseline (sibling
+9th-position envelope on top of the K-1382 P14 91-cell baseline (sibling
 to P14 with N axis bumped 256 → 512; envelope grows 91 → 109 cells).
 
 These tests pin:
@@ -13,8 +13,8 @@ These tests pin:
     K971_ROUTE_TABLE
   * dispatch precedence: dtype-mismatch / streamk / work-stealing carve-outs
     short-circuit ahead of every strict-equality table
-  * regression firewall: every K-1400 prior admit (K971_ROUTE_TABLE, P8, P13,
-    P14) still routes via its original predicate after the +P15 stack
+  * regression firewall: every prior admit (K971_ROUTE_TABLE, P8, K-1367 P13,
+    K-1382 P14) still routes via its original predicate after the +P15 stack
   * boundary controls (M=1024, M=16384, N=128/256/1024) MUST NOT be admitted
     by P15
 
@@ -44,7 +44,7 @@ from tritonblas._route_predicate import (
 
 # ---------------------------------------------------------------------------
 # Cardinality pins.  Any deviation indicates an authoring typo against the
-# K-1365 / K-1382 / K-1400 / K-1409 bucket-rule resolution.
+# K-1365 / K-1382 / K-1409 bucket-rule resolution.
 # ---------------------------------------------------------------------------
 def test_p15_skinny_n512_kcomplement_cardinality_18():
     assert len(_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_18) == 18
@@ -200,7 +200,7 @@ def test_p15_admit_cell_carveout_short_circuits(enable_streamk, work_stealing, b
 
 
 # ---------------------------------------------------------------------------
-# Regression firewall — every cell in the K-1400 prior 91-cell envelope still
+# Regression firewall — every cell in the K-1382 P14 prior 91-cell envelope still
 # routes to hipBLASLt after the +P15 stack.
 # Per R-1322.STRICT-EQUALITY-UNION-PRESERVES-PRIOR-ADMIT-INVARIANCE.
 # ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ def test_no_regression_on_p14_prior_admits():
 # ---------------------------------------------------------------------------
 # K-1409 boundary controls — adjacent non-admitted cells in the
 # skinny_N512 K-COMPLEMENT region MUST still NOT be admitted by the P15
-# strict-equality predicate.  Mirrors K-1400's 6-cell controls with N=512.
+# strict-equality predicate.  Mirrors K-1382 P14's 6-cell controls with N=512.
 # ---------------------------------------------------------------------------
 _K1409_BOUNDARY_TRITON_CELLS = [
     # M=1024 — directly below the M=2048 cohort floor; same N=512, same K

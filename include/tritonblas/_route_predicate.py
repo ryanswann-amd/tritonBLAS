@@ -1246,11 +1246,11 @@ def _k1382_p14_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
 #
 # K-1409 productionises the `skinny_N512` K-COMPLEMENT residual as
 # `_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_18`, layered as the 9th-position
-# envelope in the dispatch precedence chain on top of the K-1400 P14
+# envelope in the dispatch precedence chain on top of the K-1382 P14
 # 91-cell baseline (envelope grows 91 → 109 cells; +18 admits).
 #
-# Bucket scope: third successive sibling extension after K-1389 (N=128) and
-# K-1400 (N=256) along the N axis.  R-1382 had predicted "roughly null
+# Bucket scope: third successive sibling extension after K-1367 P13 (N=128) and
+# K-1382 P14 (N=256) along the N axis.  R-1382 had predicted "roughly null
 # discriminator at N=512"; K-1409 paired n=30 evidence DISPROVES the
 # null-discriminator hypothesis and refines R-1382 to
 # R-1409.LDS-BC-DISCRIMINATOR-ATTENUATES-WITH-N-BUT-REMAINS-PER-CELL-ADMIT-CLEAN
@@ -1277,10 +1277,10 @@ def _k1382_p14_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
 #       R-1382 N-attenuation).  Documented in K-1409/output/summary.md.
 #
 # Pareto front (R-1382 reconfirmed): low-M / high-K wins (M=2048 K=16384 reaches
-# 1.617× while M=8192 K=4096 compresses to 1.32×; consistent with K-1382/K-1400
-# end-to-end M ↔ K trade).
+# 1.617× while M=8192 K=4096 compresses to 1.32×; consistent with K-1367 P13 /
+# K-1382 P14 end-to-end M ↔ K trade).
 #
-# Projected K-1247 cohort lift: stacking 18 admit cells onto the K-1400
+# Projected K-1247 cohort lift: stacking 18 admit cells onto the K-1382 P14
 # 91-cell envelope shifts post-route geomean 1.150 → 1.184 (+3.40 pp).
 #
 # Disjointness: P15 cells use N=512, M ∈ {2048, 4096, 8192}, K ∈ {4096, 8192,
@@ -1370,8 +1370,8 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
     MI300X / gfx942 with B=10000 vectorised paired bootstrap (numpy
     advanced-indexing per R-1298 / R-1367); 18/18
     ROUTE-OUT, cohort geomean tb/hbl = 1.372×, min CI95-lo = 1.071,
-    range 1.084×–1.646×.  N-axis attenuation continues from K-1389 N=128
-    (1.678×) → K-1400 N=256 (1.471×) → K-1409 N=512 (1.372×); per-cell
+    range 1.084×–1.646×.  N-axis attenuation continues from K-1367 P13 N=128
+    (1.678×) → K-1382 P14 N=256 (1.471×) → K-1409 P15 N=512 (1.372×); per-cell
     discriminator stays clear of the strict 1.05 admit gate.
 
     Stacked LAST (9th-position) per K-1175 stacked-predicate convention;

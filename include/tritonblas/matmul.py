@@ -115,8 +115,8 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     if _R_K1382_P14_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1409 (S-002): P15 skinny_N512 K-COMPLEMENT 18-cell route-OUT (9th-position
     # envelope). Stacks AFTER K-1382 P14 per K-1175 stacked-predicate convention;
-    # third successive sibling N-extension (K-1389 N=128 → K-1400 N=256 → K-1409
-    # N=512). Verified at paired n=30 HIP-graph hot-cache + B=10000 vectorised
+    # third successive sibling N-extension (K-1367 P13 N=128 → K-1382 P14 N=256
+    # → K-1409 P15 N=512). Verified at paired n=30 HIP-graph hot-cache + B=10000 vectorised
     # paired bootstrap CI95 on MI300X gfx942:
     # 18/18 ROUTE-OUT, cohort geomean tb/hbl=1.372×, min CI95-lo=1.071,
     # range 1.084×–1.646×. DISPROVES R-1382's null-discriminator-at-N=512

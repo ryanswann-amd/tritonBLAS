@@ -37,7 +37,7 @@ from tritonblas._route_predicate import (
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
     _K1205_EN3_ADMITS_8,
-    _K1283_A1_PERTURBATIONS_9,
+    _K1283_A1_PERTURBATIONS_8,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -687,27 +687,29 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_45_after_k1297_a1_extension():
+def test_k1144_p8_envelope_size_is_exactly_44_after_k1297_a1_extension():
     """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
-    E_N3 + 9 K-1283/K-1297 A1 perturbations = 45 cells.  Any silent edit
+    E_N3 + 8 K-1283/K-1297 A1 perturbations = 44 cells.  Any silent edit
     changes this count and trips this canary.
 
     K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells;
     K-1231 / K-1205 extends by 8 N-axis-validated cells at N=128 (E_N3);
-    K-1283 / K-1297 extends by 9 A1-sub-cohort cells — K-1131-style
+    K-1283 / K-1297 extends by 8 A1-sub-cohort cells — K-1131-style
     +/-1-power-of-2 perturbations of A1 anchors that K-1131 itself did NOT
-    enumerate (S25 5/5 axes, S29 3/6 axes, S18 M*2 axis).  The A1 cohort
-    geomean is 1.354x at paired n=30 HIP-graph hot-cache; 6 candidates with
-    CI95-lo <= 1.0x are deliberately omitted (see K1283_A1_REJECTED_6_LIST
-    below).  See the _K1283_A1_PERTURBATIONS_9 docstring in
-    _route_predicate.py for the full mechanism narrative and the wpeu=1
-    isolation methodology."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 45
+    enumerate (S25 5/5 axes, S29 3/6 axes).  The A1 cohort geomean is
+    1.389x at paired n=30 HIP-graph hot-cache (V2 corrected protocol);
+    7 candidates with CI95-lo <= 1.0x are deliberately omitted (see
+    K1283_A1_REJECTED_7_LIST below).  See the _K1283_A1_PERTURBATIONS_8
+    docstring in _route_predicate.py for the full mechanism narrative
+    and the V2 vs V1 methodology delta (V1 had a per-arm autotune-
+    transient bug that produced K931_C02 phantom 1.836x and incorrectly
+    admitted A1_S18_Mx2; V2 fixed both)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 44
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
-    assert len(_K1283_A1_PERTURBATIONS_9) == 9
+    assert len(_K1283_A1_PERTURBATIONS_8) == 8
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1437,83 +1439,89 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
 # 2.10.0) with B=10000 percentile-CI95 bootstrap on log-ratios; admit gate
 # = per-cell CI95-lo > 1.0x (above the no-regression bar).  K-1297 evaluated
 # 15 candidates under K-1131-style +/-1-power-of-2 axis perturbation of the
-# K-1283 A1 anchors {S25, S29, un-covered axes of S18/S24}; 9 admitted,
-# 6 rejected.
+# K-1283 A1 anchors {S25, S29, un-covered axes of S18/S24}; 8 admitted,
+# 7 rejected (V2 corrected protocol -- see V2 docstring on
+# _K1283_A1_PERTURBATIONS_8 for the V1 vs V2 methodology delta).
 # ---------------------------------------------------------------------------
-K1283_A1_PERTURBATIONS_9_LIST = [
-    # (cid, M, N, K, hbl_tb_med, CI95_lo)
-    ("A1_S25_Mx2", 12032, 2048, 1024, 3.365, 3.009),  # cohort MAX
-    ("A1_S25_Nx2",  6016, 4096, 1024, 1.383, 1.351),
-    ("A1_S25_N/2",  6016, 1024, 1024, 1.202, 1.143),
-    ("A1_S25_Kx2",  6016, 2048, 2048, 1.264, 1.242),
-    ("A1_S25_K/2",  6016, 2048,  512, 1.226, 1.140),
-    ("A1_S29_Mx2", 28416, 2048, 1024, 1.185, 1.163),
-    ("A1_S29_Nx2", 14208, 4096, 1024, 1.143, 1.071),
-    ("A1_S29_K/2", 14208, 2048,  512, 1.126, 1.035),
-    ("A1_S18_Mx2", 11944, 1792,  768, 1.155, 1.034),  # cohort MIN admit
+K1283_A1_PERTURBATIONS_8_LIST = [
+    # (cid, M, N, K, hbl_tb_med, CI95_lo)  -- V2 measurements
+    ("A1_S25_Mx2", 12032, 2048, 1024, 1.493, 1.461),
+    ("A1_S25_Nx2",  6016, 4096, 1024, 1.522, 1.497),
+    ("A1_S25_N/2",  6016, 1024, 1024, 1.746, 1.703),  # cohort MAX
+    ("A1_S25_Kx2",  6016, 2048, 2048, 1.290, 1.267),
+    ("A1_S25_K/2",  6016, 2048,  512, 1.186, 1.123),  # cohort MIN admit
+    ("A1_S29_Mx2", 28416, 2048, 1024, 1.205, 1.080),
+    ("A1_S29_Nx2", 14208, 4096, 1024, 1.467, 1.192),
+    ("A1_S29_K/2", 14208, 2048,  512, 1.289, 1.120),
 ]
 
-# K-1297 A1 candidates that REJECTED at CI95-lo <= 1.0x.  Carve-out is
-# implicit (cell is omitted from the strict-equality frozenset by
-# construction); this list is the explicit regression-trap counterpart per
-# R-1175.PIN-REJECTED-CELLS-AS-NO-LEAK-WITNESSES.  A future contributor who
-# tries to widen the A1 envelope to a parametric perturbation (e.g. "all
+# K-1297 A1 candidates that REJECTED at CI95-lo <= 1.0x under V2 protocol.
+# Carve-out is implicit (cell is omitted from the strict-equality frozenset
+# by construction); this list is the explicit regression-trap counterpart
+# per R-1175.PIN-REJECTED-CELLS-AS-NO-LEAK-WITNESSES.  A future contributor
+# who tries to widen the A1 envelope to a parametric perturbation (e.g. "all
 # +/-1 axis-perturbations of the A1 anchor set") without re-measuring will
 # trip these pins.
-K1283_A1_REJECTED_6_LIST = [
+#
+# Note: A1_S18_Mx2 (11944, 1792, 768) was a V1 admit (1.155x, CI95-lo=1.034)
+# but is a V2 reject (1.214x, CI95-lo=0.950) -- the V2 protocol's interleaved
+# block timing surfaces hipBLASLt-vs-Triton timing noise that the V1 per-arm
+# capture was masking with autotune-transient bias.
+K1283_A1_REJECTED_7_LIST = [
     # (cid, M, N, K, hbl_tb_med, CI95_lo, mechanism)
-    ("A1_S29_M/2",  7104, 2048, 1024, 0.982, 0.927,
+    ("A1_S29_M/2",  7104, 2048, 1024, 1.060, 0.833,
      "S29 M/2 boundary -- M=7104 sits at the hbl/tb crossover for K=1024 high-aspect cells"),
-    ("A1_S29_N/2", 14208, 1024, 1024, 1.076, 0.987,
-     "S29 N/2 boundary -- CI95-lo straddles 1.0; not robustly admittable"),
-    ("A1_S29_Kx2", 14208, 2048, 2048, 1.026, 0.924,
+    ("A1_S29_N/2", 14208, 1024, 1024, 0.967, 0.768,
+     "S29 N/2 boundary -- V2 reading flips negative; not robustly admittable"),
+    ("A1_S29_Kx2", 14208, 2048, 2048, 1.219, 0.946,
      "S29 K*2 boundary -- K=2048 doubles per-tile work and TB autotune catches up"),
-    ("A1_S18_Kx2",  5972, 1792, 1536, 0.877, 0.743,
+    ("A1_S18_Mx2", 11944, 1792,  768, 1.214, 0.950,
+     "S18 M*2 -- V1 admit reclassified by V2 protocol (CI95-lo straddles 1.0)"),
+    ("A1_S18_Kx2",  5972, 1792, 1536, 1.143, 0.863,
      "S18 K*2 -- K=1536 is in the K-1161-style K-axis tail where TB wins"),
-    ("A1_S24_Mx2",  8960, 3072,  768, 1.017, 0.880,
+    ("A1_S24_Mx2",  8960, 3072,  768, 1.126, 0.972,
      "S24 M*2 -- N=3072 + K=768 + M=8960 ambiguous regime"),
-    ("A1_S24_N/2",  4480, 1536,  768, 1.163, 0.971,
+    ("A1_S24_N/2",  4480, 1536,  768, 1.073, 0.868,
      "S24 N/2 -- N=1536 + M=K-1142-floor straddles the K-1205-style "
      "small-M Triton-favoured tail at the cohort M-floor"),
 ]
 
 
-def test_k1283_a1_perturbations_envelope_size_is_exactly_9():
+def test_k1283_a1_perturbations_envelope_size_is_exactly_8():
     """Pin K-1283/K-1297 A1 perturbation sub-frozenset cardinality.  The
-    K-1297 brief gated landing at per-cell CI95-lo > 1.0x; 9/15 = 60%
-    candidates admitted (6/15 rejected at the boundary).  Any silent edit
-    changes the count and trips this canary."""
-    assert len(_K1283_A1_PERTURBATIONS_9) == 9
+    K-1297 brief gated landing at per-cell CI95-lo > 1.0x; under the V2
+    protocol 8/15 = 53% candidates admitted (7/15 rejected at the
+    boundary).  Any silent edit changes the count and trips this canary."""
+    assert len(_K1283_A1_PERTURBATIONS_8) == 8
 
 
 def test_k1283_a1_perturbations_pairwise_disjoint_with_k1121_k1131_k1161_k1205():
     """K-1297 A1 perturbations are K-1131-style +/-1-power-of-2 perturbations
-    of A1 anchors that K-1131 itself did NOT enumerate (S25 / S29 / un-
-    covered axes of S18/S24); they have N >= 1024 (S25/S29) or N in
-    {1792, 3072} (S18/S24) so disjoint from K-1205 N=128; they differ from
+    of A1 anchors that K-1131 itself did NOT enumerate (S25 / S29); they
+    have N >= 1024 (S25/S29) so disjoint from K-1205 N=128; they differ from
     parents on exactly one axis so disjoint from K-1121 anchors; they
     avoid the K-1131 enumerated cells by construction."""
-    assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1121_P8_ANCHORS_13)
-    assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1131_P8_NEIGHBORS_12)
-    assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1161_E2_ADMITS_3)
-    assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1205_EN3_ADMITS_8)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8)
 
 
 def test_k1283_a1_perturbations_envelope_contents_pinned_to_k1297_manifest():
-    """Pin the K-1297 9-admit envelope to source-of-truth (the K-1297 paired
-    n=30 dataset summarised in K1283_A1_PERTURBATIONS_9_LIST).  A silent
+    """Pin the K-1297 8-admit envelope to source-of-truth (the K-1297 paired
+    n=30 V2 dataset summarised in K1283_A1_PERTURBATIONS_8_LIST).  A silent
     edit to either constant trips here."""
     expected = frozenset(
         (M, N, K, "torch.bfloat16")
-        for _cid, M, N, K, _hbl_tb, _ci_lo in K1283_A1_PERTURBATIONS_9_LIST)
-    assert _K1283_A1_PERTURBATIONS_9 == expected
+        for _cid, M, N, K, _hbl_tb, _ci_lo in K1283_A1_PERTURBATIONS_8_LIST)
+    assert _K1283_A1_PERTURBATIONS_8 == expected
 
 
 def test_k1283_a1_perturbations_satisfy_k1142_m_floor():
     """K-1142 / K-1161 carve-out: every K-1297 admit must have M >= 4480
     (the K-1142 small-M Triton-favoured tail floor) -- preserves the same
     M-floor discipline that K-1205 / K-1219 / K-1131 ship with."""
-    for (M, N, K, dtype) in _K1283_A1_PERTURBATIONS_9:
+    for (M, N, K, dtype) in _K1283_A1_PERTURBATIONS_8:
         assert M >= 4480, (
             f"K-1283 A1 cell {(M, N, K, dtype)!r} has M={M} < 4480; "
             "violates K-1142 M-floor carve-out for the small-M "
@@ -1524,21 +1532,21 @@ def test_k1283_a1_perturbations_satisfy_k1161_k_floor():
     """K-1161 / K-1176 carve-out: every K-1297 admit must have K >= 256
     (the K-1161 K-floor discipline -- K-floor relaxation past K=256 was
     cross-arch NEGATIVE_AXIS_PIVOT)."""
-    for (M, N, K, dtype) in _K1283_A1_PERTURBATIONS_9:
+    for (M, N, K, dtype) in _K1283_A1_PERTURBATIONS_8:
         assert K >= 256, (
             f"K-1283 A1 cell {(M, N, K, dtype)!r} has K={K} < 256; "
             "violates K-1161 K-floor discipline.")
 
 
 @pytest.mark.parametrize(
-    "cid,M,N,K,hbl_tb_med,ci95_lo", K1283_A1_PERTURBATIONS_9_LIST,
-    ids=[c[0] for c in K1283_A1_PERTURBATIONS_9_LIST])
-def test_k1283_p8_admits_all_9_a1_perturbation_cells(
+    "cid,M,N,K,hbl_tb_med,ci95_lo", K1283_A1_PERTURBATIONS_8_LIST,
+    ids=[c[0] for c in K1283_A1_PERTURBATIONS_8_LIST])
+def test_k1283_p8_admits_all_8_a1_perturbation_cells(
         cid, M, N, K, hbl_tb_med, ci95_lo):
     """Every K-1283/K-1297 A1 perturbation admit must fire the P8
     strict-equality match.  Each was paired-n=30 measured at hbl/tb_med
-    >= 1.126x AND CI95-lo > 1.00 (strict admit gate exceeded with margin)
-    on rad-mi300x-1 under HIP-graph hot-cache."""
+    >= 1.186x AND CI95-lo > 1.07 (strict admit gate exceeded with margin)
+    on rad-mi300x-1 under HIP-graph hot-cache (V2 protocol)."""
     assert ci95_lo > 1.00, (
         f"{cid} CI95-lo {ci95_lo:.3f} fails CI95-lo > 1.00 admit gate")
     assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
@@ -1546,14 +1554,14 @@ def test_k1283_p8_admits_all_9_a1_perturbation_cells(
 
 
 @pytest.mark.parametrize(
-    "cid,M,N,K,hbl_tb_med,ci95_lo", K1283_A1_PERTURBATIONS_9_LIST,
-    ids=[c[0] for c in K1283_A1_PERTURBATIONS_9_LIST])
-def test_k1283_dispatch_routes_all_9_a1_perturbation_cells_out_to_hbl(
+    "cid,M,N,K,hbl_tb_med,ci95_lo", K1283_A1_PERTURBATIONS_8_LIST,
+    ids=[c[0] for c in K1283_A1_PERTURBATIONS_8_LIST])
+def test_k1283_dispatch_routes_all_8_a1_perturbation_cells_out_to_hbl(
         cid, M, N, K, hbl_tb_med, ci95_lo):
     """End-to-end dispatch check: with default carve-outs disabled,
     _k971_route_to_hbl must return True for every K-1297 A1 admit so the
     cell is routed to hipBLASLt and silently picks up the measured
-    1.13x-3.37x speedup."""
+    1.19x-1.75x speedup."""
     decision = _k971_route_to_hbl(
         M, N, K,
         a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
@@ -1567,7 +1575,7 @@ def test_k1283_a1_perturbations_are_bf16_only():
     """K-1297 measurement scope is bf16 only (matching K-1283 A1 sub-cohort
     parentage).  fp16 / fp32 with the same (M, N, K) must NOT fire P8 --
     fp16 dispatch is owned by the K-1093 / K-1125 mirror predicate line."""
-    for (M, N, K, _dtype) in _K1283_A1_PERTURBATIONS_9:
+    for (M, N, K, _dtype) in _K1283_A1_PERTURBATIONS_8:
         for fp_dtype in (torch.float16, torch.float32):
             assert _p8_mfma_issue_stall_routeout(M, N, K, fp_dtype) is False, (
                 f"P8 fired on non-bf16 dtype {fp_dtype} for K-1297 A1 "
@@ -1575,14 +1583,14 @@ def test_k1283_a1_perturbations_are_bf16_only():
 
 
 @pytest.mark.parametrize(
-    "cid,M,N,K,hbl_tb_med,ci95_lo,mechanism", K1283_A1_REJECTED_6_LIST,
-    ids=[c[0] for c in K1283_A1_REJECTED_6_LIST])
+    "cid,M,N,K,hbl_tb_med,ci95_lo,mechanism", K1283_A1_REJECTED_7_LIST,
+    ids=[c[0] for c in K1283_A1_REJECTED_7_LIST])
 def test_k1283_p8_does_not_leak_into_a1_perturbation_rejects(
         cid, M, N, K, hbl_tb_med, ci95_lo, mechanism):
     """NO-LEAK pin (R-1175.PIN-REJECTED-CELLS-AS-NO-LEAK-WITNESSES extended
-    to the K-1297 A1 perturbation campaign):  6 K-1297 candidates measured
+    to the K-1297 A1 perturbation campaign):  7 K-1297 candidates measured
     at CI95-lo <= 1.0x are deliberately omitted from
-    _K1283_A1_PERTURBATIONS_9 (carve-out by omission).  This test is the
+    _K1283_A1_PERTURBATIONS_8 (carve-out by omission).  This test is the
     explicit regression trap.
 
     A future contributor who tries to widen the A1 envelope to a parametric
@@ -1593,7 +1601,7 @@ def test_k1283_p8_does_not_leak_into_a1_perturbation_rejects(
     and traceable to the per-cell measured CI95-lo)."""
     assert ci95_lo <= 1.00, (
         f"{cid} reject pin requires measured CI95-lo <= 1.0 (got "
-        f"{ci95_lo:.3f}); update K1283_A1_REJECTED_6_LIST if K-1297 "
+        f"{ci95_lo:.3f}); update K1283_A1_REJECTED_7_LIST if K-1297 "
         "measurements were re-run with different verdict.")
     assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
         f"P8 leaked admit into K-1297 A1 reject {cid} "
@@ -1603,7 +1611,7 @@ def test_k1283_p8_does_not_leak_into_a1_perturbation_rejects(
 def test_k1283_does_not_disturb_existing_p8_36_cell_envelope():
     """K-1231 / K-1205 -> K-1283 / K-1297 invariance check: the original
     36-cell P8 envelope is preserved exactly -- K-1297 strict-equality
-    union ADDS 9 cells without re-measuring or modifying any existing
+    union ADDS 8 cells without re-measuring or modifying any existing
     K-1144 / K-1175 / K-1205 cell.  This is
     R-1184.STRICT-EQUALITY-UNION-PROVES-EXISTING-CELL-INVARIANCE-WITHOUT-
     RE-MEASUREMENT in test form, applied to the K-1297 layer."""
@@ -1619,6 +1627,6 @@ def test_k1283_does_not_disturb_existing_p8_36_cell_envelope():
             "K-1297 must be strict-equality union only.")
     # Symmetric: every new cell added by K-1297 must be in the A1 set.
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1297
-    assert delta == _K1283_A1_PERTURBATIONS_9, (
+    assert delta == _K1283_A1_PERTURBATIONS_8, (
         "Cells added to P8 envelope past K-1205 do not match "
-        "_K1283_A1_PERTURBATIONS_9 exactly; an unattributed cell crept in.")
+        "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed cell crept in.")

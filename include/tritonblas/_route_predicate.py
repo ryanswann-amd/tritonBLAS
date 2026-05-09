@@ -519,10 +519,23 @@ _K1205_EN3_ADMITS_8 = frozenset({
 #
 # K-1297 closes the A1-only perturbation gap: 15 candidates evaluated under
 # the K-1131 +/-1-power-of-2 generator, filtered to (M >= 4480 per K-1142
-# floor) AND (K >= 256 per K-1161 / K-1176 floor); 9 cells admit at paired
+# floor) AND (K >= 256 per K-1161 / K-1176 floor); 8 cells admit at paired
 # n=30 HIP-graph hot-cache CI95-lo > 1.0x on rad-mi300x-1 (MI300X gfx942,
 # rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0); cohort
-# geomean of admits = 1.354x; 6 candidates rejected (CI95-lo straddles 1.0x).
+# geomean of admits = 1.389x; 7 candidates rejected (CI95-lo straddles 1.0x).
+#
+# Bench methodology V2 (corrected from V1): negative controls run as A/A
+# replays of a SINGLE captured graph (both arms identical kernel, leak
+# detection structural-by-construction).  V1 had a per-arm
+# capture+warm-cycle bug that gave the FIRST arm autotune-transient samples
+# (~0.15ms) and the SECOND arm steady-state samples (~0.03ms), producing
+# K931_C02 phantom 1.836x.  V2 fixes this; all 5 K-931 controls now land
+# within the ±5% noise floor (max |delta| = 4.7%; CI95 of all 5 contains
+# 1.0).  V2 also reclassified one V1 admit as a reject:
+#   * A1_S18_Mx2 (11944, 1792, 768) bf16: V1=1.155x admit, V2=1.214x with
+#     CI95-lo=0.950 -- structurally a noise-floor straddler under V2's
+#     interleaved-block timing protocol; deliberately OMITTED.
+#
 # Disjointness with prior four sub-frozensets verified by construction:
 # every K-1297 admit is a K-1131-style perturbation of an A1 anchor, so it
 # differs from the parent on exactly one of the four (M, N, K, dtype) axes
@@ -531,33 +544,36 @@ _K1205_EN3_ADMITS_8 = frozenset({
 # N=128 (so disjoint from K-1205), none match the three K-1161 E2 admits.
 #
 # Strict-equality only (R-1131): no parametric envelope; each cell directly
-# measured. Per-cell hbl/tb speedups + CI95 annotated below.
+# measured. Per-cell hbl/tb speedups + CI95 (V2 measurement) annotated below.
 # ---------------------------------------------------------------------------
-_K1283_A1_PERTURBATIONS_9 = frozenset({
+_K1283_A1_PERTURBATIONS_8 = frozenset({
     # ----- S25 (6016, 2048, 1024) family — A1 anchor, 5/5 axes admit -----
-    (12032, 2048, 1024, "torch.bfloat16"),  # A1_S25_Mx2  hbl/tb=3.365x CI95=[3.009, 3.718] (cohort MAX)
-    ( 6016, 4096, 1024, "torch.bfloat16"),  # A1_S25_Nx2  hbl/tb=1.383x CI95=[1.351, 1.419]
-    ( 6016, 1024, 1024, "torch.bfloat16"),  # A1_S25_N/2  hbl/tb=1.202x CI95=[1.143, 1.264]
-    ( 6016, 2048, 2048, "torch.bfloat16"),  # A1_S25_Kx2  hbl/tb=1.264x CI95=[1.242, 1.286]
-    ( 6016, 2048,  512, "torch.bfloat16"),  # A1_S25_K/2  hbl/tb=1.226x CI95=[1.140, 1.302]
+    (12032, 2048, 1024, "torch.bfloat16"),  # A1_S25_Mx2  hbl/tb=1.493x CI95=[1.461, 1.530]
+    ( 6016, 4096, 1024, "torch.bfloat16"),  # A1_S25_Nx2  hbl/tb=1.522x CI95=[1.497, 1.547]
+    ( 6016, 1024, 1024, "torch.bfloat16"),  # A1_S25_N/2  hbl/tb=1.746x CI95=[1.703, 1.787] (cohort MAX)
+    ( 6016, 2048, 2048, "torch.bfloat16"),  # A1_S25_Kx2  hbl/tb=1.290x CI95=[1.267, 1.310]
+    ( 6016, 2048,  512, "torch.bfloat16"),  # A1_S25_K/2  hbl/tb=1.186x CI95=[1.123, 1.252]
     # ----- S29 (14208, 2048, 1024) family — A1 anchor, 3/6 axes admit -----
-    (28416, 2048, 1024, "torch.bfloat16"),  # A1_S29_Mx2  hbl/tb=1.185x CI95=[1.163, 1.207]
-    (14208, 4096, 1024, "torch.bfloat16"),  # A1_S29_Nx2  hbl/tb=1.143x CI95=[1.071, 1.217]
-    (14208, 2048,  512, "torch.bfloat16"),  # A1_S29_K/2  hbl/tb=1.126x CI95=[1.035, 1.245]
-    # ----- S18 (5972, 1792, 768) family — un-covered M-axis admit -----
-    (11944, 1792,  768, "torch.bfloat16"),  # A1_S18_Mx2  hbl/tb=1.155x CI95=[1.034, 1.268]
-    # NOTE: 6 K-1297 candidates were rejected (CI95-lo <= 1.0x) and are
-    # DELIBERATELY OMITTED here -- A1_S29_M/2 (7104,2048,1024) 0.982x,
-    # A1_S29_N/2 (14208,1024,1024) 1.076x, A1_S29_Kx2 (14208,2048,2048)
-    # 1.026x, A1_S18_Kx2 (5972,1792,1536) 0.877x, A1_S24_Mx2 (8960,3072,
-    # 768) 1.017x, A1_S24_N/2 (4480,1536,768) 1.163x.  The S24/S18 K-axis
-    # rejects mirror the K-1161 K-floor lesson (R-1161.K-FLOOR-RELAXATION-
-    # SURFACES-TB-FAVOURED-SMALL-M-TAIL); the S29 boundary rejects sit at
-    # the M=7104 / N=1024 / K=2048 perimeter where wpeu=1 isolation is
-    # ambiguous.  See K1283_A1_REJECTED_6_LIST in tests for no-leak pins.
+    (28416, 2048, 1024, "torch.bfloat16"),  # A1_S29_Mx2  hbl/tb=1.205x CI95=[1.080, 1.342]
+    (14208, 4096, 1024, "torch.bfloat16"),  # A1_S29_Nx2  hbl/tb=1.467x CI95=[1.192, 1.779]
+    (14208, 2048,  512, "torch.bfloat16"),  # A1_S29_K/2  hbl/tb=1.289x CI95=[1.120, 1.487]
+    # NOTE: 7 K-1297 candidates were rejected (CI95-lo <= 1.0x) under the V2
+    # protocol and are DELIBERATELY OMITTED here:
+    #   A1_S29_M/2 (7104,2048,1024)  1.060x CI95-lo=0.833
+    #   A1_S29_N/2 (14208,1024,1024) 0.967x CI95-lo=0.768
+    #   A1_S29_Kx2 (14208,2048,2048) 1.219x CI95-lo=0.946
+    #   A1_S18_Mx2 (11944,1792, 768) 1.214x CI95-lo=0.950  (V1 had as admit)
+    #   A1_S18_Kx2 ( 5972,1792,1536) 1.143x CI95-lo=0.863
+    #   A1_S24_Mx2 ( 8960,3072, 768) 1.126x CI95-lo=0.972
+    #   A1_S24_N/2 ( 4480,1536, 768) 1.073x CI95-lo=0.868
+    # The S24/S18 K-axis rejects mirror the K-1161 K-floor lesson
+    # (R-1161.K-FLOOR-RELAXATION-SURFACES-TB-FAVOURED-SMALL-M-TAIL); the S29
+    # boundary rejects sit at the M=7104 / N=1024 / K=2048 perimeter where
+    # wpeu=1 isolation is ambiguous.  See K1283_A1_REJECTED_7_LIST in
+    # tests/test_k971_route_predicate.py for explicit no-leak regression pins.
 })
 
-# Composed 45-cell P8 envelope.  Five named provenance frozensets
+# Composed 44-cell P8 envelope.  Five named provenance frozensets
 # (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits, K-1231/
 # K-1205 E_N3 admits, K-1283/K-1297 A1 perturbations) -- the dispatch path
 # consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE and its
@@ -570,12 +586,12 @@ _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
-    | _K1283_A1_PERTURBATIONS_9
+    | _K1283_A1_PERTURBATIONS_8
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 45, (
-    "K-1283 / K-1297 P8 envelope must be exactly 45 cells (13 K-1121 "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 44, (
+    "K-1283 / K-1297 P8 envelope must be exactly 44 cells (13 K-1121 "
     "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
-    "N-axis admits + 9 K-1283 A1 perturbations); a duplicate or stray "
+    "N-axis admits + 8 K-1283 A1 perturbations); a duplicate or stray "
     "entry has crept in.")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
@@ -603,19 +619,19 @@ assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates "
     "have N=128 by construction and no K-1161 E2 admit has N=128.")
 # K-1297 A1 perturbations cross-disjointness with the prior four sub-sets.
-assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1121_P8_ANCHORS_13), (
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13), (
     "K-1283 A1 perturbation overlaps a K-1121 anchor; the K-1131-style "
     "+/-1-power-of-2 perturbation generator excludes the parent anchor "
     "by construction.")
-assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1283 A1 perturbation overlaps a K-1131 neighbor; K-1297 selected "
     "only A1-anchor perturbations on axes K-1131 did NOT enumerate (S25, "
     "S29, plus un-covered M/K axes of S18/S24).")
-assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1161_E2_ADMITS_3), (
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1283 A1 perturbation overlaps a K-1161 E2 admit; the three E2 "
     "admits ({(736,1792,736), (10112,2048,1024), (12160,2048,1024)}) are "
     "structurally distinct from the K-1297 A1 perturbation cells.")
-assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1205_EN3_ADMITS_8), (
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8), (
     "K-1283 A1 perturbation overlaps a K-1205 E_N3 admit; K-1297 cells "
     "all have N >= 1024 (S25/S29 family) or N in {1792, 3072} (S18/S24 "
     "family); K-1205 cells all have N=128.")
@@ -663,7 +679,7 @@ def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     K-1231/K-1205 E_N3 N-axis admits at N=128 + K-1283/K-1297 A1 sub-cohort
     perturbations of S25/S29 anchors and un-covered axes of S18/S24).
 
-    Returns True iff (M, N, K, dtype) matches one of the 45 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 44 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

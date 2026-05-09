@@ -3212,3 +3212,14 @@ def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
         (int(M), int(N), int(K), str(dtype))
         in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
     )
+
+
+# K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack — 29 K-1709 admit cells
+# (M ∈ {2048,4096,8192} × N=64 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+# minus the bubble cell (2048, 64, 4096, fp16) which fails the strict 1.05 gate
+# at CI95-lo=1.045).  15 bf16 cells alias R-K979 P5 Clause-3; 14 fp16 cells are
+# NEW route-OUT.  Sibling-N disjoint by construction (no prior K-COMPL slot N=64).
+_K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29 = frozenset(
+    (M, 64, K, dt) for M in (2048, 4096, 8192)
+    for K in (2048, 4096, 8192, 16384, 32768) for dt in ("torch.bfloat16", "torch.float16")
+) - frozenset({(2048, 64, 4096, "torch.float16")})

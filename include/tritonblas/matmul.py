@@ -106,6 +106,8 @@ from ._route_predicate import (
     # chain.
     _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack — 29 K-1709 admit cells.
+    _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29,
 )
 
 
@@ -357,6 +359,8 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
     # handles per the K-1175 stacked-predicate convention.
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack (29 cells; cohort geomean tb_forced/hbl=1.93×).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29: return True
     return False
 
 

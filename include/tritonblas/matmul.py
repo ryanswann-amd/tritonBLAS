@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -13,9 +14,39 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
+# Stacked route-OUT predicate (P8 28-cell strict-equality + E1 axis-aligned
+# envelope + N=128 N-axis admit extension) lives in a torch-free helper module
+# so unit/integration tests can exercise it without booting a GPU stack.
+from ._route_predicate import (
+    K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
+    R_K979_P5_route_to_hbl as _R_P5_route_to_hbl,
+    R_K1037_P6_admit_wpeu1 as _R_P6_admit_wpeu1,
+    _p8_mfma_issue_stall_routeout as _R_P8_mfma_issue_stall_routeout,
+    R_K1142_E1_route_to_hbl as _R_E1_route_to_hbl,
+)
 
 
 _tensor_cache = {}
+
+
+def _route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    # Production dispatch chain: env-killswitch -> guards -> P8 strict-equality
+    # (28 P8 anchors + 8 N=128 admits, total 36 cells) -> E1 axis-aligned
+    # envelope -> P6 in-kernel admit -> P5 closed-form -> K971 anchor table.
+    # All decisions are pure data + closed-form; no kernel changes.
+    if os.environ.get("TRITONBLAS_DISABLE_K971") == "1":
+        return False
+    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
+        return False
+    if _R_P8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    if _R_E1_route_to_hbl(int(M), int(N), int(K), a_dtype):
+        return True
+    if _R_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype):
+        return False
+    if _R_P5_route_to_hbl(int(M), int(N), int(K), a_dtype):
+        return True
+    return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
@@ -402,6 +433,9 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        return torch.matmul(a, b)
+
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -460,6 +494,10 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

@@ -43,6 +43,11 @@ from ._route_predicate import (
     # P17 skinny_N512 K-COMPLEMENT BASE 17-cell route-OUT (11th-position) —
     # completes the P15 N=512 EXTREMES sibling at the BASE K band.
     _k1437_p17_skinny_n512_kcompl_base_routeout as _R_K1437_P17_skinny_n512_kcompl_base_routeout,
+    # K-1478 (S-002): P19 skinny_N16384 K-COMPLEMENT 30-cell route-OUT
+    # (12th-position) — extends the K-COMPLEMENT N-ladder one bucket up
+    # to N=16384 (full K-grid).  30/30 admit at strict 1.05 gate; cohort
+    # geomean tb/hbl = 1.174×.  Naturally disjoint with all P1-P17.
+    _k1478_p19_skinny_n16384_routeout as _R_K1478_P19_skinny_n16384_routeout,
 )
 
 
@@ -164,6 +169,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # EXTREMES only) to 29/30 (P15 ⨄ P17, with one cell P5-pre-routed at
     # chain pos 4).  Per-cell ratios 1.24×-1.64×; cohort geomean 1.40×.
     if _R_K1437_P17_skinny_n512_kcompl_base_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1478 P19 (12th-position): skinny_N16384 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P17 per K-1175 stacked-predicate convention; closes the
+    # N=16384 column along the K-COMPLEMENT axis (full K-grid 2048-32768).
+    # 30/30 admit at strict ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01 gate;
+    # cohort geomean tb/hbl = 1.174×, range 1.056×-1.359×.  Natural
+    # disjointness with all P1-P17 (sibling-N firewall + R-1465 #1
+    # zero-P12-deferral invariant).
+    if _R_K1478_P19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

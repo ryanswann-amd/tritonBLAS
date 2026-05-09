@@ -40,6 +40,9 @@ from ._route_predicate import (
     # K-1429 (S-002): P16 skinny_N1024 K-COMPLEMENT 29-cell route-OUT
     # (10th-position).
     _k1429_p16_skinny_n1024_routeout as _R_K1429_P16_skinny_n1024_routeout,
+    # K-1437 (S-002 sibling): P17 skinny_N512 K-COMPLEMENT BASE 18-cell
+    # route-OUT (11th-position) — completes K-1417 P15 N=512 EXTREMES sibling.
+    _k1437_p17_skinny_n512_kcompl_base_routeout as _R_K1437_P17_skinny_n512_kcompl_base_routeout,
 )
 
 
@@ -155,6 +158,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # by construction with all P1–P15 sub-frozensets via cross-frozenset
     # asserts at module load.
     if _R_K1429_P16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1437 (S-002 sibling): P17 skinny_N512 K-COMPLEMENT BASE 18-cell
+    # route-OUT (11th-position envelope).  Stacks AFTER K-1429 P16 per
+    # K-1175 stacked-predicate convention; closes the K-1417 P15 EXTREMES
+    # sibling at N=512 BASE band (K ∈ {4096, 8192, 16384}) — N=512 K-COMPL
+    # goes from 12/30 (40%, EXTREMES only) to 30/30 (100%, BASE ⨄ EXTREMES).
+    # Mechanism: at BASE K the wrapper-overhead ceiling has dissipated
+    # (R-1367.WRAPPER-OVERHEAD-CEILING-DISAPPEARS-AT-LARGE-K) but the N=512
+    # persistent_matmul tile aspect still accumulates LDS bank conflicts
+    # beyond the K-913 §3 floor; hipBLASLt's split-K kernel re-selects to a
+    # pattern that better matches the M ∈ {2048, 4096, 8192} anchors.
+    # K-1409 paired n=30 + B=10000 vectorised bootstrap CI95 on MI300X
+    # gfx942 (OCI MI300X fallback): 17/18 admit at strict 1.05 gate (1
+    # P5-pre-routed cell at chain pos 4 << pos 11 included for arithmetic
+    # completeness), cohort geomean tb/hbl = 1.397×, range 1.244×–1.644×;
+    # envelope grows 126 → 144 cells.  Disjoint by construction with all
+    # P1–P16 sub-frozensets via cross-frozenset asserts at module load.
+    if _R_K1437_P17_skinny_n512_kcompl_base_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

@@ -72,22 +72,10 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     if _R_K1338_longk_smallsquare_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1357 / K-1364 (P12 S-002): square_mid PMC-driven 3-cell strict-equality
     # route-OUT, stacked AFTER the K-1338 longK_smallSquare 6-cell frozenset.
-    # Closes the K-1345 #1 ranked predicate-addressable residual bucket
-    # (square_mid: T1=2048^3 bf16, T2=2048^3 fp16, T3=4096^3 bf16) where
-    # tritonblas/hipBLASLt single-shot inverse ratios are 3.87x (T1, T2 via
-    # K-877 PMC LDS-BC mechanism: SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889
-    # cyc/inst on TB vs 0.000 on HBL) and 1.82x (T3 via K-1345 5-anchor
-    # triangulated VALU-packing dispatch-over-launch mechanism: waves_per_CU
-    # TB/HBL = 1.85x, VALU/MFMA TB/HBL = 1.75x).  Both bf16 and fp16 admits
-    # on T1/T2 honor the K-877 S1a/S1b direct PMC measurement (LDS_BC = 0.889
-    # cyc/inst on both dtypes); T3 is bf16-only by direct triangulation
-    # provenance.  Disjoint with all prior frozensets by construction
-    # (square_mid M=N=K in {2048, 4096}; K-1322 P8 sits at M >= 4480 or
-    # K <= 1024 or N in {128, 256}; K-1338 sits at M=N in {1024, 2048} and
-    # K in {4096, 8192, 16384} -- K-1357 P12 T3 (4096^3) is on the M=N=4096
-    # plane which K-1338 does not enumerate).  8192^3 bf16 (the 3rd K-1345
-    # square_mid candidate) is HBM-asymptote-bound per K-1308 F4 row 7 and
-    # DROP-correct (not admitted to this frozenset).
+    # T1/T2 = (2048^3 bf16/fp16) LDS-BC bound (K-877 S1a/S1b direct PMC);
+    # T3 = (4096^3 bf16) VALU-packing dispatch over-launch (K-1345 5-anchor
+    # triangulated). 8192^3 bf16 deliberately DROPPED (K-1308 F4 row 7,
+    # HBM-asymptote-bound). Disjoint with K-1322 P8 + K-1338 by construction.
     if _R_K1357_p12_square_mid_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope as defense-
     # in-depth AFTER P8 28-cell strict-equality. K-1209 ablation on K-931

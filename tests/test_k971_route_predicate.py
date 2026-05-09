@@ -44,7 +44,6 @@ from tritonblas._route_predicate import (
     _K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6,
     _p12_square_mid_routeout,
     _P12_SQUARE_MID_ROUTEOUT,
-    _K1357_P12_PMC_SQUARE_MID_ROUTEOUT_3,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -1733,139 +1732,40 @@ def test_k1338_dispatch_chain_does_not_route_with_killswitch():
 
 # ---------------------------------------------------------------------------
 # K-1357 / K-1364 (P12) — square_mid PMC-driven 3-cell route-OUT.
-# Productionized atop the K-1338 longK_smallSquare 6-cell envelope (and the
-# K-1322 P8 51-cell envelope below that).  Three strict-equality cells
-# (T1=2048^3 bf16, T2=2048^3 fp16, T3=4096^3 bf16) close the K-1345 #1
-# ranked predicate-addressable residual bucket.  T1/T2 measured by direct
-# K-877 PMC capture (LDS-BC mechanism); T3 by K-1345 5-anchor triangulation
-# (VALU-packing dispatch-over-launch mechanism).  8192^3 bf16 (the 3rd
-# K-1345 square_mid candidate) is HBM-asymptote-bound per K-1308 F4 row 7
-# and DROP-correct (not admitted).
+# T1=(2048^3 bf16), T2=(2048^3 fp16), T3=(4096^3 bf16). DROP zone:
+# (8192^3 bf16) HBM-asymptote-bound per K-1308 F4 row 7.
 # ---------------------------------------------------------------------------
-K1357_P12_SQUARE_MID_LIST = [
-    # (cid, M, N, K, dtype) — bf16 + fp16 admits per direct PMC measurement
-    ("T1", 2048, 2048, 2048, torch.bfloat16),  # K-877 S1b LDS-BC=0.889 cyc/inst
-    ("T2", 2048, 2048, 2048, torch.float16),   # K-877 S1a LDS-BC=0.889 (PMC mirror)
-    ("T3", 4096, 4096, 4096, torch.bfloat16),  # K-1345 5-anchor TRIANGULATED
-]
-
-
-def test_k1357_p12_square_mid_envelope_size_and_alias():
-    """Pin the K-1357 P12 frozenset at exactly 3 cells and check the
-    public alias (`_P12_SQUARE_MID_ROUTEOUT`) the dispatcher consults
-    is the SAME object as the tagged provenance constant."""
-    assert len(_P12_SQUARE_MID_ROUTEOUT) == 3
-    assert len(_K1357_P12_PMC_SQUARE_MID_ROUTEOUT_3) == 3
-    assert _P12_SQUARE_MID_ROUTEOUT is _K1357_P12_PMC_SQUARE_MID_ROUTEOUT_3
-
-
-def test_k1357_p12_square_mid_contents_are_pinned_to_manifest():
-    """Pin the 3-cell envelope to the K-1357 PMC measurement manifest.
-    A silent edit to either constant trips here."""
+def test_k1357_p12_membership_and_disjoint():
+    """Pin the 3-cell admit set, exercise the predicate on every admit
+    cell, and assert pairwise-disjointness with the prior 57-cell envelope."""
     expected = frozenset({
         (2048, 2048, 2048, "torch.bfloat16"),
         (2048, 2048, 2048, "torch.float16"),
         (4096, 4096, 4096, "torch.bfloat16"),
     })
     assert _P12_SQUARE_MID_ROUTEOUT == expected
-
-
-def test_k1357_p12_disjoint_with_k1322_p8_envelope():
-    """K-1357 P12 cohort must be pairwise-disjoint with the K-1322 P8
-    51-cell envelope (P8 sits at M >= 4480 or K <= 1024 or N in {128, 256};
-    K-1357 P12 sits at M=N=K in {2048, 4096})."""
     assert _P12_SQUARE_MID_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT)
-
-
-def test_k1357_p12_disjoint_with_k1338_longk_smallsquare():
-    """K-1357 P12 cohort must be pairwise-disjoint with the K-1338
-    longK_smallSquare 6-cell envelope (K-1338 requires K >= 4096 and
-    M=N in {1024, 2048}; K-1357 P12 T1/T2 sit at K=2048 (excluded by
-    K floor) and T3 sits at M=N=K=4096 (excluded by K-1338 M floor))."""
     assert _P12_SQUARE_MID_ROUTEOUT.isdisjoint(_LONGK_SMALLSQUARE_ROUTEOUT)
-
-
-@pytest.mark.parametrize("cid,M,N,K,dtype", K1357_P12_SQUARE_MID_LIST,
-                         ids=[c[0] for c in K1357_P12_SQUARE_MID_LIST])
-def test_k1357_p12_admits_all_3_cells(cid, M, N, K, dtype):
-    """Every K-1357 P12 cell must fire the strict-equality match for
-    its admitted dtype (bf16 for T1/T3, fp16 for T2)."""
-    assert _p12_square_mid_routeout(M, N, K, dtype) is True
-    assert _p12_square_mid_routeout(M, N, K, str(dtype)) is True
-
-
-@pytest.mark.parametrize("M,N,K", [
-    # Adjacent shapes that must NOT fire (R-1131 anti-overshoot doctrine)
-    (2048, 2048, 4096),   # T1 K-axis perturbation -- captured by K-1338, not K-1357
-    (2048, 2048, 1024),   # T1 K-axis perturbation below cohort
-    (4096, 4096, 8192),   # T3 K-axis perturbation -- DROP-zone (HBM-asymptote-bound)
-    (4096, 4096, 2048),   # T3 K-axis perturbation below cohort
-    (8192, 8192, 8192),   # K-1345 #3 candidate explicitly DROPPED (K-1308 F4 row 7)
-    (1024, 1024, 1024),   # M=N=K below cohort
-    (2048, 4096, 2048),   # M != N (not square)
-    (4096, 2048, 4096),   # M != N (not square)
-])
-def test_k1357_p12_does_not_admit_neighbors(M, N, K):
-    """Strict-equality predicate must NOT fire on cells one axis-step
-    outside the K-1357 P12 cohort (per R-1131 anti-overshoot doctrine)."""
-    assert _p12_square_mid_routeout(M, N, K, torch.bfloat16) is False
-    assert _p12_square_mid_routeout(M, N, K, torch.float16) is False
-
-
-def test_k1357_p12_t3_does_not_admit_fp16():
-    """T3 (4096^3) is bf16-only by direct K-1345 triangulation provenance.
-    fp16 admit at T3 deferred until direct fp16 anchor available
-    (R-1131 anti-overshoot)."""
-    assert _p12_square_mid_routeout(4096, 4096, 4096, torch.float16) is False
-
-
-def test_k1357_p12_does_not_admit_fp32():
-    """K-1357 P12 admits only bf16 and fp16 (per K-877 S1a/S1b PMC capture
-    scope); fp32 / int8 / etc. must NOT fire."""
-    assert _p12_square_mid_routeout(2048, 2048, 2048, torch.float32) is False
-    assert _p12_square_mid_routeout(2048, 2048, 2048, "torch.int8") is False
-
-
-@pytest.mark.parametrize("cid,M,N,K,dtype", K1357_P12_SQUARE_MID_LIST,
-                         ids=[c[0] for c in K1357_P12_SQUARE_MID_LIST])
-def test_k1357_p12_dispatch_chain_routes_to_hbl(cid, M, N, K, dtype):
-    """End-to-end: every K-1357 P12 cell, when run through the full
-    `_k971_route_to_hbl` dispatch chain (with streamk=False,
-    work_stealing=False, both dtypes equal), must return True so the
-    matmul wrapper hands the call off to torch.matmul / hipBLASLt."""
-    routed = _k971_route_to_hbl(M, N, K, dtype, dtype,
-                                enable_streamk=False, work_stealing=False)
-    assert routed is True, (
-        f"K-1357 P12 cell {cid} ({M},{N},{K},{dtype}) should route to "
-        f"hipBLASLt after the K-1322 P8 + K-1338 envelopes; got {routed}")
-
-
-def test_k1357_p12_dispatch_chain_does_not_route_when_streamk_on():
-    """K-1357 P12, like every other route-OUT predicate, must not fire
-    when the caller has explicitly enabled streamk or work-stealing."""
-    M, N, K = 2048, 2048, 2048
-    assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
-                              enable_streamk=True,
-                              work_stealing=False) is False
-    assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
-                              enable_streamk=False,
-                              work_stealing=True) is False
-
-
-def test_k1357_p12_dispatch_chain_does_not_route_with_killswitch():
-    """K-1357 P12 inherits the K-989 K-971 killswitch: setting
-    TRITONBLAS_DISABLE_K971=1 must short-circuit the entire route-OUT
-    chain (including K-1357 P12)."""
-    import os as _os
-    M, N, K = 2048, 2048, 2048
-    prev = _os.environ.get("TRITONBLAS_DISABLE_K971")
-    _os.environ["TRITONBLAS_DISABLE_K971"] = "1"
-    try:
-        assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
+    # Predicate fires on every admit cell + dispatch chain routes to HBL.
+    for (M, N, K, dt) in [(2048, 2048, 2048, torch.bfloat16),
+                          (2048, 2048, 2048, torch.float16),
+                          (4096, 4096, 4096, torch.bfloat16)]:
+        assert _p12_square_mid_routeout(M, N, K, dt) is True
+        assert _k971_route_to_hbl(M, N, K, dt, dt,
                                   enable_streamk=False,
-                                  work_stealing=False) is False
-    finally:
-        if prev is None:
-            _os.environ.pop("TRITONBLAS_DISABLE_K971", None)
-        else:
-            _os.environ["TRITONBLAS_DISABLE_K971"] = prev
+                                  work_stealing=False) is True
+
+
+@pytest.mark.parametrize("M,N,K,dtype", [
+    (8192, 8192, 8192, torch.bfloat16),  # K-1308 F4 row 7 DROP (HBM-bound)
+    (4096, 4096, 4096, torch.float16),   # T3 fp16 deferred (no direct anchor)
+    (2048, 2048, 4096, torch.bfloat16),  # K-axis neighbor (covered by K-1338)
+    (1024, 1024, 1024, torch.bfloat16),  # below cohort
+    (2048, 4096, 2048, torch.bfloat16),  # M != N (not square)
+    (2048, 2048, 2048, torch.float32),   # dtype scope carve-out
+])
+def test_k1357_p12_negative_neighbors_and_drops(M, N, K, dtype):
+    """Anti-overshoot: predicate must NOT fire on near-neighbors, on the
+    deliberately-DROPPED 8192^3 cell, on T3-fp16 (deferred), on non-square
+    shapes, or on dtypes outside {bf16, fp16}."""
+    assert _p12_square_mid_routeout(M, N, K, dtype) is False

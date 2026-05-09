@@ -390,6 +390,33 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+# K-1793: hipBLASLt route-OUT for the N=192 K-COMPLEMENT adjacency band.
+# K-1782 paired n=30 hot-cache HIP-graph sweep on MI300X (gfx942) confirmed 18
+# verified-winning cells where hipBLASLt beats persistent_matmul on the N=192
+# rung between K-1685 P28's N=128 alias slot and K-1538 P22's N=256 alias slot.
+# Mechanism: at N=192 Origami selects BLOCK_N=64 (next-power-of-two above 192/3
+# tile sweet-spot), leaving the column-narrow workload mismatched against the
+# K-913 §3 LDS bank-conflict footprint at K >= 4096. hipBLASLt's Cijk_* path
+# at N=192 uses BK=64 with double-buffered async LDS hand-off that hides the
+# back-pressure (same mechanism as the K-1764 M=N=4096 mid-K cohort).
+# Mirrors the K-1749 / K-1753 / K-1764 dispatcher-gate pattern: a single
+# membership predicate + early return at the top of `_matmul`/`_matmul_out`.
+# Disjoint from every prior K-COMPLEMENT slot by N-axis projection (N=192 is
+# absent from P1-P31 alias-stack frozensets per K-1687 cross-N stitching audit).
+_K1793_GATE_N = 192
+_K1793_GATE_M = frozenset({2048, 4096, 8192})
+_K1793_GATE_K = frozenset({4096, 8192, 16384})
+_K1793_GATE_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _k1793_route_to_hbl(M, N, K, dtype):
+    """Return True iff (M,N,K,dtype) is in the K-1793 N=192 K-COMPLEMENT cohort."""
+    return (N == _K1793_GATE_N
+            and M in _K1793_GATE_M
+            and K in _K1793_GATE_K
+            and dtype in _K1793_GATE_DTYPES)
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -401,6 +428,12 @@ def _matmul(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-1793: HBL route-OUT for N=192 K-COMPLEMENT adjacency band (caller did
+    # not explicitly request streamk). Disjoint from all P1-P31 alias-stack
+    # slots by N-axis projection.
+    if not enable_streamk and _k1793_route_to_hbl(M, N, K, a.dtype):
+        return torch.matmul(a, b)
 
     out = a.new_empty(M, N)
 
@@ -460,6 +493,11 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-1793: HBL route-OUT for N=192 K-COMPLEMENT adjacency band (out= mirror).
+    if not enable_streamk and _k1793_route_to_hbl(M, N, K, a.dtype):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

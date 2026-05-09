@@ -535,26 +535,41 @@ _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942]
 })
 
-# Composed 43-cell P8 envelope (K-1303 unified).  Five named provenance
-# frozensets (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits,
-# K-1231/K-1205 E_N3 N=128 admits, K-1219 E3 N=256 admits) -- the
-# dispatch path consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE
-# and its K-1175 / K-1205 / K-1219 extensions, source-ticket lineage is
-# load-bearing for future reviewers (precedence-inversion debugging,
-# PMC re-classifier work, ADR audits) so each measurement campaign keeps
-# its own named set with a runtime size + pairwise-disjointness check.
+# A1 sub-cohort wpeu=1 perturbation admits.  K-1131's +/-1-power-of-2
+# perturbation campaign silently skipped two A1 anchors (S25, S29) and
+# left axes of S18/S24 uncovered.  Independent paired n=30 HIP-graph
+# hot-cache validation on MI300X admitted 8/15 candidates at CI95-lo
+# > 1.0x; cohort geomean 1.389x.  All admits respect the K-1142 M-floor
+# (M >= 4480) and the K-1161 K-floor (K >= 256).
+_A1_WPEU1_PERTURBATIONS_8 = frozenset({
+    (12032, 2048, 1024, "torch.bfloat16"),  # A1_S25_Mx2
+    ( 6016, 4096, 1024, "torch.bfloat16"),  # A1_S25_Nx2
+    ( 6016, 1024, 1024, "torch.bfloat16"),  # A1_S25_N/2
+    ( 6016, 2048, 2048, "torch.bfloat16"),  # A1_S25_Kx2
+    ( 6016, 2048,  512, "torch.bfloat16"),  # A1_S25_K/2
+    (28416, 2048, 1024, "torch.bfloat16"),  # A1_S29_Mx2
+    (14208, 4096, 1024, "torch.bfloat16"),  # A1_S29_Nx2
+    (14208, 2048,  512, "torch.bfloat16"),  # A1_S29_K/2
+})
+
+# Composed 51-cell P8 envelope (six named provenance frozensets:
+# K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits, K-1231/K-1205
+# E_N3 N=128 admits, K-1219 E3 N=256 admits, A1 wpeu=1 perturbations).
+# Dispatch consults the union; named sets remain separate per
+# R-1144.DUAL-FROZENSET-PROVENANCE (load-bearing for future reviewers).
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
     | _K1219_E3_NFLOOR256_ADMITS_7
+    | _A1_WPEU1_PERTURBATIONS_8
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
-    "K-1303 unified P8 envelope must be exactly 43 cells (13 K-1121 "
-    "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
-    "N=128 admits + 7 K-1219 E3 N=256 admits); a duplicate or stray "
-    "entry has crept in.")
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 51, (
+    "Unified P8 envelope must be exactly 51 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits "
+    "+ 7 K-1219 E3 N=256 admits + 8 A1 wpeu=1 perturbations); a duplicate "
+    "or stray entry has crept in.")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -596,6 +611,16 @@ assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8), (
     "N=128 admits.  The two campaigns operate on disjoint N axes by "
     "construction; an overlap indicates an authoring typo in one of "
     "the two frozensets.")
+# A1 wpeu=1 perturbations: cross-disjointness with all five prior sets.
+# Cells live at N in {1024, 2048, 4096}; trivially disjoint from K-1205
+# (N=128) and K-1219 (N=256), and from K-1161 E2 (N in {1792, 2048} but
+# different (M, K)).  K-1131 + K-1121 share N values but the A1 admit
+# generator only selects perturbations on axes K-1131 did NOT enumerate.
+assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3)
+assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8)
+assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
 
 
 # ---------------------------------------------------------------------------

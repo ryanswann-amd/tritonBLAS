@@ -38,6 +38,17 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
+#
+# K-1686 LDS_WAIT cohort (M=N=8192 × K∈{16384,32768} × {bf16,fp16}) — DO NOT
+# attempt to fix by raising num_stages alone. Two falsified attempts:
+#   K-1699: BK=128 + NS=3 — empirically regressed (BK was the conflated var).
+#   K-1714: hold-BK NS=3 LDS-double-buffer probe — empirically a no-op
+#     (geomean 0.9964x ± 0.4 % on the 6-cell cohort). At NS=3 the 256x256xBK64
+#     oracle tile needs 128 KB of LDS but MI300X exposes only 64 KB/CU, so any
+#     selector that bumps NS forces a BK shrink (64→32) that doubles K-loop
+#     iters and erases the LDS_WAIT relief. Future work must target the LDS
+#     budget itself or LDS-bank-conflict structure (K-1652-style swizzle), not
+#     num_stages.
 #@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,

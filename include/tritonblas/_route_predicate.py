@@ -1705,6 +1705,19 @@ assert len(_K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30) == 30, (
     "{bf16,fp16} = 30 sweep cells, 30/30 admit at the strict ratio_median ≥ "
     "1.05 ∧ bootstrap p(<1.05) < 0.01 gate); any deviation indicates an "
     "authoring typo against the K-1478 paired n=30 admit set.")
+# K-1493 (S-002) closure: a follow-up productionization investigation was
+# scoped to add a 13th-position P20 frozenset for the same N=16384 envelope.
+# Re-measurement on MI300X / gfx942 (paired n=30 HIP-graph hot-cache) found
+# zero additional admit cells beyond the K-1478 P19 envelope above the
+# strict ≥1.05 ∧ p(<1.05)<0.01 gate; the 30-cell P19 set is the complete
+# admit closure for the M ∈ {2048,4096,8192} × N=16384 × K ∈ {2048,4096,
+# 8192,16384,32768} × {bf16,fp16} sweep grid.  Per the Minimalist /
+# "no dead code by design" rule, the P20 slot is intentionally NOT taken;
+# regression pin tests that lock the K-1478 envelope at 30 cells (and pin
+# every cell + dtype against drift) live at
+# `tests/test_k1493_p19_envelope_closure.py`.  Reopen the slot only when a
+# real K-COMPLEMENT-EXTENDED admit set (e.g. K=65536, M=16384, or
+# N=32768) actually diverges from this envelope.
 # Cross-frozenset disjointness — K-1478 P19 vs prior 11-predicate stack.
 # Natural disjointness everywhere: P19 has N=16384, prior K-COMPLEMENT
 # predicates use N ∈ {128,256,512,1024} and P12 uses M=N=K ∈ {2048,4096}.

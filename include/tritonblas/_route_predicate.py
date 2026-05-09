@@ -482,6 +482,41 @@ assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "candidate generator excluded all K-1131 neighbors by construction.")
 
 
+# ---------------------------------------------------------------------------
+# K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope productionised
+# from K-1151 / K-1142 stacked AFTER the P8 28-cell strict-equality route.
+# K-1209 ablation on K-931 always-uncovered top-40 confirmed E1 is fully
+# dominated by P8+K-1175 on this cohort (0 marginal cells, 0 marginal FPs);
+# E1 is retained as defense-in-depth for cohorts beyond K-931 where the
+# audit chain has not yet enumerated every K-1142-envelope-admittable cell.
+# E1 ships with the K-1142 (M >= 4480) ∧ (K >= 256) carve-out which holds
+# at 0 FPs across all 4 stacked configurations on K-931 top-40 (K-1209).
+# E2 K-floor=128 is EXCLUDED per K-1176 cross-arch failure (0/8 cells on
+# MI325X/MI355X) — no K-axis relaxation past K=256.
+# ---------------------------------------------------------------------------
+K1142_E1_NS = frozenset({1792, 2048, 3072})
+K1142_E1_KS = frozenset({256, 768, 1024})
+K1142_E1_M_FLOOR = 4480  # K-1121 anchor S24's M (margin 0; excludes FP1=256x2048x256)
+K1142_E1_K_FLOOR = 256   # K-1161 NEGATIVE_AXIS_PIVOT pin; do NOT relax to 128
+
+
+def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
+    """K-1151 E1 envelope route-OUT — bf16 ∧ N∈{1792,2048,3072} ∧
+    K∈{256,768,1024} ∧ M≥4480 ∧ K≥256. Stacked AFTER P8 in K-1209-stacked
+    so P8 wins on overlap (no double-routing); E1 only fires on cells P8
+    does not already enumerate. K-1209 confirmed 0 marginal coverage on
+    K-931 top-40 beyond P8+K-1175 — E1 is defense-in-depth for non-K-931
+    catalogs where the audit chain has not converged.
+    """
+    if not _dtype_is_bf16(dtype):
+        return False
+    if N not in K1142_E1_NS or K not in K1142_E1_KS:
+        return False
+    if M < K1142_E1_M_FLOOR or K < K1142_E1_K_FLOOR:
+        return False
+    return True
+
+
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
     triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
@@ -535,10 +570,18 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
-    # K-1144: P8 (K-1121 + K-1131 measurement-validated 25-cell envelope)
-    # takes precedence over P6 admit so K-1121's paired n=30 evidence
-    # overrides K-1089 envelope admit for the S24/S29/N11 overlap.
+    # K-1144 + K-1175: P8 28-cell strict-equality (13 K-1121 anchors +
+    # 12 K-1131 neighbors + 3 K-1161 E2 admits) takes precedence over P6
+    # admit so K-1121's paired n=30 evidence overrides K-1089 envelope
+    # admit for the S24/S29/N11 overlap.
     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth
+    # AFTER P8. K-1209 ablation showed E1 is fully dominated by P8+K-1175 on
+    # K-931 top-40 (0 marginal cells / 0 marginal FPs); E1 only fires on
+    # non-K-931 cohort cells the K-1142->K-1161->K-1175 audit chain has not
+    # yet enumerated. E2 K-floor=128 EXCLUDED (K-1176 cross-arch failure).
+    if R_K1142_E1_route_to_hbl(int(M), int(N), int(K), a_dtype):
         return True
     # K-1089: P6 admit overrides P5 route-OUT for MFMA-stall structural
     # signature; cells fall through to in-kernel dispatch.

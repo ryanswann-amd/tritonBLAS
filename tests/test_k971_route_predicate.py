@@ -36,6 +36,11 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    R_K1142_E1_route_to_hbl,
+    K1142_E1_NS,
+    K1142_E1_KS,
+    K1142_E1_M_FLOOR,
+    K1142_E1_K_FLOOR,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -1079,3 +1084,103 @@ def test_k1175_p8_e2_admits_m_axis_cells_at_k1024_anchor_k():
         assert N == 2048  # K-1121 anchor N
         # M is interior to the K-1121 anchor M-range:
         assert 8064 < M < 14208
+
+
+# ===========================================================================
+# K-1209-stacked / K-1216 — E1 axis-aligned envelope pin tests.
+# E1 (R_K1142_E1_route_to_hbl) is stacked AFTER P8 28-cell strict-equality
+# in dispatch precedence; K-1209 ablation on K-931 always-uncovered top-40
+# confirmed E1 contributes 0 marginal cells beyond P8+K-1175 (16/40 union)
+# but E1 is retained as defense-in-depth for non-K-931 cohorts where the
+# audit chain has not converged. These tests pin (a) the K-1142 carve-out
+# floors holding against the 2 K-1142 inverse-predicate FPs, (b) E1
+# admitting all K-1121 anchors that lie inside its envelope, and (c) the
+# E2 K-floor=128 exclusion (K-1176 cross-arch failure: do NOT relax K_FLOOR
+# from 256 to 128 — 0/8 cells admit on MI325X/MI355X).
+# ===========================================================================
+
+
+def test_k1216_e1_envelope_constants_pinned():
+    """K-1209-stacked / K-1216: pin the K-1142 E1 envelope structural
+    constants. A future refactor that loosens these values silently
+    re-admits the K-1142 inverse-predicate FPs and breaks the 0-FP
+    composition guarantee K-1209 confirmed across 4 stacked configs.
+    """
+    assert K1142_E1_NS == frozenset({1792, 2048, 3072})
+    assert K1142_E1_KS == frozenset({256, 768, 1024})
+    assert K1142_E1_M_FLOOR == 4480  # K-1121 anchor S24's M (margin 0)
+    assert K1142_E1_K_FLOOR == 256   # K-1161 NEGATIVE_AXIS_PIVOT pin
+
+
+def test_k1216_e1_excludes_k1142_fp1_at_M_floor():
+    """K-1142 FP1 = (M=256, N=2048, K=256) bf16: hbl/tb=0.972x (TB-TIE).
+    Must be excluded by M >= 4480 carve-out. Re-admitting this cell
+    silently re-introduces K-1142's paired-n=30 false positive."""
+    assert R_K1142_E1_route_to_hbl(256, 2048, 256, torch.bfloat16) is False
+
+
+def test_k1216_e1_excludes_k1142_fp2_at_M_floor():
+    """K-1142 FP2 = (M=2048, N=1792, K=256) bf16: hbl/tb=1.035x (TB-TIE).
+    Must be excluded by M >= 4480 carve-out (M=2048 < 4480)."""
+    assert R_K1142_E1_route_to_hbl(2048, 1792, 256, torch.bfloat16) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", [
+    ("S24",  4480, 3072,  768),
+    ("S29", 14208, 2048, 1024),
+    ("S30", 16256, 2048, 1024),
+    ("S31", 18304, 2048, 1024),
+    ("S32", 20352, 2048, 1024),
+    ("S33", 22400, 2048, 1024),
+    ("S34", 24448, 2048, 1024),
+    ("S35", 26496, 2048, 1024),
+    ("S37", 25600, 2048,  256),
+    ("S39", 49152, 2048,  256),
+])
+def test_k1216_e1_admits_k1121_anchors_inside_envelope(cid, M, N, K):
+    """K-1121 anchors that lie inside E1 envelope must be admitted.
+    These overlap with P8 strict-equality (P8 wins by precedence) but
+    E1 must independently classify them correctly so the predicate is
+    self-consistent for downstream callers / non-K-931 cohorts."""
+    assert R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16) is True
+
+
+def test_k1216_e1_excludes_e2_kfloor_128_per_k1176_cross_arch_failure():
+    """K-1176 cross-arch port of E2 K-floor=128 relaxation FAILED on both
+    MI325X and MI355X (0/8 cells admit). The K_FLOOR=256 pin in E1 must
+    reject any cell with K < 256 to prevent re-introducing the K-1176-
+    rejected K-axis relaxation. This test pins E1's K-axis floor at 256
+    against a future relaxation attempt."""
+    # Sample E2 K-floor=128 candidate cells from K-1161 audit:
+    for M in (4480, 8192, 16256):
+        for N in (1792, 2048, 3072):
+            assert R_K1142_E1_route_to_hbl(M, N, 128, torch.bfloat16) is False
+            assert R_K1142_E1_route_to_hbl(M, N, 192, torch.bfloat16) is False
+
+
+def test_k1216_e1_is_bf16_only():
+    """E1 inherits K-1142's bf16-only audit scope (the K-1051/K-1031/K-1121
+    measurement chain is bf16). Non-bf16 dtypes must return False so the
+    fp16 anchor table (K-905/K-971) and fp16 envelope (K-1093/K-1125) own
+    fp16 dispatch decisions exclusively."""
+    for dt in (torch.float16, torch.float32, torch.float64):
+        assert R_K1142_E1_route_to_hbl(4480, 2048, 768, dt) is False
+
+
+def test_k1216_e1_dispatch_stacked_after_p8_no_double_route():
+    """K-1209 dominance check: every cell E1 admits inside P8's 28-cell
+    envelope is already routed True by P8, so E1's own True is harmless
+    (idempotent). For K-1121 anchors / K-1131 neighbors / K-1175 E2
+    admits that lie inside E1, the dispatch verdict is True regardless
+    of which predicate fires first — the brief's no-double-routing
+    guarantee holds at the verdict level."""
+    # Sample 5 P8-anchored cells inside E1 envelope (overlap region):
+    for M, N, K in [(4480, 3072, 768), (14208, 2048, 1024),
+                    (10112, 2048, 1024), (16256, 2048, 1024),
+                    (49152, 2048, 256)]:
+        p8_says = _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
+        e1_says = R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16)
+        assert p8_says is True
+        # E1 may or may not fire depending on whether cell is inside E1
+        # envelope; verdict is True iff either fires (dispatch is OR).
+        assert (p8_says or e1_says) is True

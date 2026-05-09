@@ -27,6 +27,7 @@ from ._route_predicate import (
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
     _p8_mfma_issue_stall_routeout as _R_K1144_P8_mfma_issue_stall_routeout,
+    R_K1142_E1_route_to_hbl as _R_K1142_E1_route_to_hbl,
 )
 
 
@@ -55,6 +56,16 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # Clause-2 / K-1062 Clause-4, P8's strict-equality match returns the
     # same True verdict (frozenset O(1) lookup; harmless).
     if _R_K1144_P8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope as defense-
+    # in-depth AFTER P8 28-cell strict-equality. K-1209 ablation on K-931
+    # always-uncovered top-40 (40 cells) confirmed E1 contributes 0 marginal
+    # cells beyond P8+K-1175 (16/40 union vs 16/40 P8+K-1175); E1 is retained
+    # for non-K-931 cohorts where the K-1142 -> K-1161 -> K-1175 audit chain
+    # has not yet enumerated every K-1142-envelope-admittable cell. The
+    # K-1142 carve-out (M >= 4480) ∧ (K >= 256) holds at 0 FPs on K-931.
+    # E2 K-floor=128 EXCLUDED per K-1176 cross-arch failure (0/8 cells on
+    # MI325X/MI355X) — the K-axis floor stays pinned at K=256.
+    if _R_K1142_E1_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
     # K-1089 (S-002): R-K1037 P6 structural surrogate admits MFMA-issue-stall
     # cells back to in-kernel dispatch with waves_per_eu=1 (set in the
     # persistent dispatch path below). When P6 admits, route-OUT (P5 + the

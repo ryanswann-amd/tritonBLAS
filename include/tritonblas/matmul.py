@@ -98,22 +98,7 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # Skinny-N + deep-K LDS-pressure mitigation: for N=64 with M>=4096 and K>=4096,
-    # pack 2 K-elements per LDS read (kpack=2) to halve the issued LDS-instruction
-    # count. PMC profiling on this cohort identifies LDS bank-conflict cycles and the
-    # raw LDS-instruction issue count as the dominant wall-cycle taxes vs hipBLASLt.
-    # For fp16/bf16 with mfmaInstrSize=16, kpack=2 aligns one ds_read with 2 MFMA-K
-    # iterations - the LDS budget is unchanged (no extra pipeline buffer required).
-    # Gate is intentionally narrow: M>=4096 excludes M=2048 cells where the gain is
-    # outweighed by tail effects, and K>=4096 excludes shallow-K cells where the LDS
-    # issue count is not yet the bottleneck. Set TRITONBLAS_DISABLE_SKINNY_KPACK=1 to
-    # restore baseline kpack=1 (paired A/B harness).
-    import os as _os
-    if (N == 64 and M >= 4096 and K >= 4096
-            and _os.environ.get('TRITONBLAS_DISABLE_SKINNY_KPACK', '0') != '1'):
-        kpack = 2
-    else:
-        kpack = 1
+    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

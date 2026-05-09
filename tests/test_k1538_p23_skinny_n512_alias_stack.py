@@ -246,3 +246,78 @@ def test_disable_env_set_short_circuit():
         enable_streamk=False, work_stealing=False,
         disable_env_set=True,
     ) is False
+
+
+# ---------------------------------------------------------------------------
+# Ablation pin — REVIEWER-MANDATED.  The 15th-position P23 slot is
+# unreachable under normal operation because every cell is short-circuited
+# by P15 (9th) and P17 (11th) upstream.  This block silences the upstream
+# K-COMPLEMENT layers (P5, E1, P15, P17) and proves P23 carries the full
+# 30-cell N=512 envelope on its own — i.e. the slot is not dead code; it
+# is a load-bearing fallback if any upstream layer is ever ablated.
+# Without this test the alias-stack convention has zero runtime coverage.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def upstream_n512_silenced(monkeypatch):
+    """Monkey-patch every upstream predicate that could short-circuit a
+    P23 N=512 admit cell.  P5 (closed-form) and E1 (axis-aligned envelope)
+    can catch isolated N=512 cells; P15 (EXTREMES) and P17 (BASE) cover
+    the entire P23 cohort by construction.  Silencing all four guarantees
+    that any N=512 admit reaching the dispatch chain is routed *only*
+    through the P23 slot — proving slot-15 reachability."""
+    import tritonblas._route_predicate as rp
+    monkeypatch.setattr(rp, "_k1409_p15_skinny_n512_routeout",
+                        lambda M, N, K, dt: False)
+    monkeypatch.setattr(rp, "_k1437_p17_skinny_n512_kcompl_base_routeout",
+                        lambda M, N, K, dt: False)
+    monkeypatch.setattr(rp, "R_K979_P5_route_to_hbl",
+                        lambda M, N, K, dt: False)
+    monkeypatch.setattr(rp, "R_K1142_E1_route_to_hbl",
+                        lambda M, N, K, dt: False)
+    yield
+
+
+@pytest.mark.parametrize("M,N,K,dtype_str", sorted(EXPECTED_ADMIT_30))
+def test_ablation_p23_carries_full_envelope_when_upstream_silenced(
+    upstream_n512_silenced, M, N, K, dtype_str
+):
+    """With P5+E1+P15+P17 silenced, every one of the 30 P23 admit cells
+    must still route True via the 15th-position slot.  Proves P23 is the
+    load-bearing fallback — not dead code."""
+    dtype = torch.bfloat16 if dtype_str == "torch.bfloat16" else torch.float16
+    assert k971_route_decision(
+        M, N, K, dtype, dtype,
+        enable_streamk=False, work_stealing=False,
+    ) is True
+
+
+def test_ablation_p23_alone_routes_strict_reject_cell(upstream_n512_silenced):
+    """The single K-1538 strict-reject cell (2048, 512, 2048, bf16) is
+    preserved by P15 EXTREMES upstream in production.  When P15 is
+    silenced, P23 alias-stack still routes it (frozenset membership) —
+    confirming the 'preserved-by-upstream-routing' commentary in the
+    P23 docstring is observably true under ablation."""
+    assert k971_route_decision(
+        2048, 512, 2048, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False,
+    ) is True
+
+
+def test_ablation_p23_does_not_overshoot_outside_bucket(upstream_n512_silenced):
+    """Negative ablation pin — silencing the upstream layers must NOT
+    cause P23 to admit cells outside its 30-element strict-equality
+    frozenset.  N=1024 / N=256 / off-grid K must still return False."""
+    for (M, N, K, dt) in (
+        (2048, 1024,  8192, torch.bfloat16),
+        (2048,  256,  8192, torch.bfloat16),
+        (2048,  512,  1024, torch.bfloat16),
+        (2048,  512, 65536, torch.bfloat16),
+        (1024,  512,  8192, torch.bfloat16),
+    ):
+        # k971_route_decision may still route via OTHER predicates — but
+        # the P23-direct check must match the bucket exactly.
+        from tritonblas._route_predicate import (
+            _k1538_p23_skinny_n512_alias_routeout as p23,
+        )
+        assert p23(M, N, K, dt) is False

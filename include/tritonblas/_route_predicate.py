@@ -3324,3 +3324,33 @@ _K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34 = (
 )
 # Cardinality (==34) gated by tests/test_k1811_p33_skinny_n96_n160_n224_kcompl_aliasstack.py
 # per the K-1748 minimalist split: src holds data, tests hold invariants.
+
+
+# K-1825 P34 (25th-slot): N=288 K-COMPLEMENT alias-stack — promotes the
+# K-1812 verified winners that fall outside every upstream slot.  Per the
+# K-1812 24-cell PMC sweep (M=4096 × N∈{96,128,160,224,256,288} × K∈{4096,
+# 16384} × {bf16, fp16}, paired n=20 hot-cache), all 24 cells satisfy the
+# strict admit gate (HBL median ≥ 1.05× TB ∧ paired-diff t-test p<0.05),
+# but 20/24 are already routed by upstream slots:
+#   - N=128 (4 cells): P13 N=128 K-COMPLEMENT (K-1367).
+#   - N=160 bf16 + N=96 bf16 (4 cells): R-K979 P5 Clause-3 (minMN≤192,K≥2048).
+#   - N=160 fp16 + N=96 fp16 (4 cells): P33 N∈{96,160,224} K-COMPLEMENT.
+#   - N=224 (4 cells): P33 N∈{96,160,224} K-COMPLEMENT.
+#   - N=256 (4 cells): P21 N=256 K-mid K-COMPLEMENT (K-1503).
+# The 4 net-new cells are N=288 at M=4096 × K∈{4096,16384} × {bf16, fp16},
+# with measured TB/HBL ratios 3.10×–5.37× (p≈0 for all four).  Conservative
+# admit set: only the 4 cells K-1812 directly measured — extrapolation to
+# M∈{2048,8192} is intentionally deferred (K-1812 §7 caveat: "continue
+# cell-by-cell verification per K-1681/K-1710/K-1781 precedent").
+# Sibling-N firewall: N=288 is disjoint from every prior slot's N-axis
+# projection (P28 N=128, P29 N=64, P30 N∈{384,768,1536}, P31 N∈{32,48,80},
+# P32 N=192, P33 N∈{96,160,224}, P21 N=256, P13 N∈{128,256}) — no overlap
+# possible by construction.
+_K1825_P34_SKINNY_N288_KCOMPL_ALIASSTACK_4 = frozenset({
+    (4096, 288,  4096, "torch.bfloat16"),  # K-1812: r=5.368 p=4.8e-205
+    (4096, 288, 16384, "torch.bfloat16"),  # K-1812: r=3.114 p<1e-300
+    (4096, 288,  4096, "torch.float16"),   # K-1812: r=5.209 p=2.0e-197
+    (4096, 288, 16384, "torch.float16"),   # K-1812: r=3.096 p<1e-300
+})
+# Cardinality (==4) gated by tests/test_k1825_p34_skinny_n288_kcompl_aliasstack.py
+# per the K-1748 minimalist split: src holds data, tests hold invariants.

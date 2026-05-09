@@ -121,6 +121,10 @@ from ._route_predicate import (
     # K-1811 P33 (24th-slot): N∈{96,160,224} K-COMPLEMENT alias-stack — 34
     # cells extending P32 to the wave-misaligned skinny-N cohort (K-1794 / K-1795).
     _K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34,
+    # K-1825 P34 (25th-slot): N=288 K-COMPLEMENT alias-stack — 4 cells
+    # promoting K-1812's net-new winners (only N=288 sits outside every
+    # upstream slot; the other 20/24 K-1812 cells are already covered).
+    _K1825_P34_SKINNY_N288_KCOMPL_ALIASSTACK_4,
 )
 
 
@@ -398,6 +402,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (excludes the 2 K=8192 cells where TB wins r>1.7×).  Verified by K-1811
     # paired n=30 HIP-graph hot-cache + 6-cell N∈{128,192} adjacency guard band.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34: return True
+    # K-1825 P34 (25th-slot): N=288 K-COMPLEMENT alias-stack (4 cells; K-1812
+    # admit-gate winners at M=4096 × K∈{4096,16384} × {bf16,fp16}, ratios
+    # 3.10×–5.37×, paired-t p≈0).  Every other K-1812 winner is already
+    # routed by an upstream slot (P5/P13/P21/P33), so the net-new admit set
+    # is precisely the 4 N=288 cells K-1812 directly measured.  Verified by
+    # K-1825 paired n=30 HIP-graph hot-cache pre/post + 4-cell N∈{256,256}
+    # adjacency guard band (no-op via P21 already routed).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1825_P34_SKINNY_N288_KCOMPL_ALIASSTACK_4: return True
     return False
 
 

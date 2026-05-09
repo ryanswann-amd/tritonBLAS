@@ -1,17 +1,16 @@
 """Unit fixture — K-1563 P24 skinny_N4096 K-COMPLEMENT 30-cell route-OUT
 envelope (16th-position).
 
-Verifies:
+Verifies (covering the same ground as the prior 79-pin-test draft, collapsed
+per Minimalist review feedback):
   (a) frozenset cardinality + exact admit-set match (K-1553 30 cells);
-  (b) every admit cell predicate-returns True;
+  (b) per-cell, single parametrize: predicate True ∧ full dispatch True ∧
+      partial-alias invariant holds (overlap subset of P12; load-bearing
+      cells disjoint from P12);
   (c) sibling-N firewall sentinels return False (carry-out N-axis carve-out);
-  (d) PARTIAL-ALIAS invariant — the 2/30 (4096,4096,4096,bf16/fp16) cells
-      ARE in K-1361 P12 SQUARE_MID (documented partial alias); the other
-      28/30 cells are load-bearing strict-equality admits;
-  (e) the public `k971_route_decision` dispatch returns True for every P24
-      cell at default flag values (no double-admit, no flag interference);
-  (f) carve-out negatives: streamk / work_stealing / dtype-mismatch all
-      veto routing.
+  (d) carve-out negatives: streamk / work_stealing / dtype-mismatch all
+      veto routing;
+  (e) cohort gate metadata sanity (K-1553 headline ≥ K-1563 floors).
 
 Source data: K-1553 paired n=30 HIP-graph hot-cache on MI300X / gfx942
 (OCI amd-rccl fallback per R-1414; c42 unavailable) against the LIVE
@@ -37,31 +36,46 @@ _P24_P12_OVERLAP = frozenset({
     (4096, 4096, 4096, "torch.float16"),
 })
 
+_DTYPE_OBJ = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
+
 
 # ---------------------------------------------------------------------------
-# (a) frozenset shape pin — 30 cells, exact M/N/K/dtype grid.
+# (a) frozenset shape pin — 30 cells, exact M/N/K/dtype grid + partial-alias
+#     invariant holds at the set-algebra level.
 # ---------------------------------------------------------------------------
-def test_p24_cardinality_is_thirty():
-    assert len(_K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30) == 30
-
-
-def test_p24_admit_set_is_full_n4096_kcompl_grid():
+def test_p24_admit_set_shape_and_alias_invariant():
     expected = {
         (M, 4096, K, dtype)
         for M in (2048, 4096, 8192)
         for K in (2048, 4096, 8192, 16384, 32768)
         for dtype in ("torch.bfloat16", "torch.float16")
     }
+    assert len(_K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30) == 30
     assert _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30 == expected
+    # Documented 2-cell P12 overlap is a subset of both P12 and P24.
+    assert _P24_P12_OVERLAP <= _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4
+    assert _P24_P12_OVERLAP <= _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30
+    # The other 28/30 cells are NEW admits — disjoint from P12.
+    load_bearing = _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30 - _P24_P12_OVERLAP
+    assert len(load_bearing) == 28
+    assert load_bearing.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
 
 
 # ---------------------------------------------------------------------------
-# (b) every admit cell predicate-returns True.
+# (b) per-cell parametrize collapses three former tests into one — predicate
+#     True ∧ full-stack dispatch True at default flag values.
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("cell", sorted(_K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30))
-def test_p24_admit_cell_routes_true(cell):
+def test_p24_admit_cell_routes_via_predicate_and_full_dispatch(cell):
     M, N, K, dtype = cell
+    # Predicate-only.
     assert _k1563_p24_skinny_n4096_kcompl_aliasstack_routeout(M, N, K, dtype) is True
+    # Full dispatch (predicate + carve-outs + upstream layers) at defaults.
+    a = _DTYPE_OBJ[dtype]
+    assert k971_route_decision(
+        M, N, K, a_dtype=a, b_dtype=a,
+        enable_streamk=False, work_stealing=False,
+    ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -90,69 +104,26 @@ def test_p24_sibling_n_firewall_rejects(cell):
 
 
 # ---------------------------------------------------------------------------
-# (d) PARTIAL-ALIAS invariant — the 2 (4096,4096,4096,*) cells ARE in
-#     K-1361 P12 SQUARE_MID; the other 28 are load-bearing (no upstream
-#     overlap with the predicates that ship in this PR's dependency chain).
+# (d) carve-out negatives — streamk / work_stealing / dtype-mismatch all veto.
 # ---------------------------------------------------------------------------
-def test_p24_partial_alias_overlap_subset_of_p12():
-    """The 2 documented overlap cells must be in P12."""
-    assert _P24_P12_OVERLAP <= _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4
-    assert _P24_P12_OVERLAP <= _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30
-
-
-def test_p24_load_bearing_cells_disjoint_from_p12():
-    """The other 28/30 cells must be NEW admits — disjoint from P12."""
-    load_bearing = _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30 - _P24_P12_OVERLAP
-    assert len(load_bearing) == 28
-    assert load_bearing.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
-
-
-# ---------------------------------------------------------------------------
-# (e) full-stack dispatch — every admit cell routes True via k971_route_decision
-#     at default flag values (streamk=False, work_stealing=False, dtype matched).
-# ---------------------------------------------------------------------------
-_DTYPE_OBJ = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
-
-
-@pytest.mark.parametrize("cell", sorted(_K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30))
-def test_p24_full_dispatch_routes_true(cell):
-    M, N, K, dtype = cell
-    a = _DTYPE_OBJ[dtype]
-    assert k971_route_decision(
-        M, N, K, a_dtype=a, b_dtype=a,
-        enable_streamk=False, work_stealing=False,
-    ) is True
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
+             enable_streamk=True, work_stealing=False),   # streamk vetoes
+        dict(a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
+             enable_streamk=False, work_stealing=True),   # work_stealing vetoes
+        dict(a_dtype=torch.bfloat16, b_dtype=torch.float16,
+             enable_streamk=False, work_stealing=False),  # mixed dtype vetoes
+    ],
+    ids=["streamk", "work_stealing", "mixed_dtype"],
+)
+def test_p24_carveouts_veto_routing(kwargs):
+    assert k971_route_decision(2048, 4096, 8192, **kwargs) is False
 
 
 # ---------------------------------------------------------------------------
-# (f) carve-out negatives — streamk / work_stealing / dtype-mismatch all veto.
-# ---------------------------------------------------------------------------
-def test_p24_streamk_vetoes_routing():
-    assert k971_route_decision(
-        2048, 4096, 8192,
-        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
-        enable_streamk=True, work_stealing=False,
-    ) is False
-
-
-def test_p24_work_stealing_vetoes_routing():
-    assert k971_route_decision(
-        2048, 4096, 8192,
-        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
-        enable_streamk=False, work_stealing=True,
-    ) is False
-
-
-def test_p24_dtype_mismatch_vetoes_routing():
-    assert k971_route_decision(
-        2048, 4096, 8192,
-        a_dtype=torch.bfloat16, b_dtype=torch.float16,
-        enable_streamk=False, work_stealing=False,
-    ) is False
-
-
-# ---------------------------------------------------------------------------
-# (g) cohort gate sanity — ratio_median floors and cohort geomean from
+# (e) cohort gate sanity — ratio_median floors and cohort geomean from
 #     K-1553 measurement metadata; locks the productionisation gate.
 # ---------------------------------------------------------------------------
 def test_p24_cohort_gate_floor_and_geomean_sanity():

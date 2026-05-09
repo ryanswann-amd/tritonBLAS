@@ -98,6 +98,13 @@ K950_ANCHOR_COLLISIONS = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # L07 — K-905 anchor table
     (1024, 1024, 16384, "torch.float16"),   # L09 — K-905 anchor table
     (2048, 2048, 16384, "torch.float16"),   # L06 — K-905 anchor table
+    # K-1361 P12 SQUARE_MID (6th-position) measurement override: PMC-driven
+    # PMC_SQUARE_MID cohort routes (4096,4096,4096,bf16) — the same shape
+    # K-950 marks as harness-guarded LAND.  K-1361 measurement supersedes
+    # K-950 here; this allowlist entry was retroactively added when K-1563
+    # made the 2-cell P12 overlap load-bearing through the new partial-alias
+    # invariant assert in `_route_predicate.py`.
+    (4096, 4096,  4096, "torch.bfloat16"),  # L05 — K-1361 P12 SQUARE_MID
     # K-1563 P24 (16th-position) measurement override: K-1553 paired n=30
     # HIP-graph hot-cache MI300X gfx942 measured (4096,4096,8192,bf16) at
     # ratio_median = 1.137× (CI95 [1.129, 1.140]) — supersedes the K-950

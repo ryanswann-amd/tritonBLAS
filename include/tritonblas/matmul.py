@@ -76,6 +76,16 @@ from ._route_predicate import (
     # alias overlap at (4096, 4096, 4096, {bf16, fp16}); 28 NEW cells +
     # 2 P12-alias cells.
     _k1566_p24_skinny_n4096_routeout as _R_K1566_P24_skinny_n4096_routeout,
+    # K-1567 (S-002): P25 skinny_N8192 K-COMPLEMENT 30-cell route-OUT
+    # (17th-position).  Closes the previously-empty N=8192 rung of the
+    # K-COMPLEMENT N-ladder on the full K-grid {2048, 4096, 8192, 16384,
+    # 32768}.  30/30 admit at the strict 1.05 gate (K-1567 paired n=30 +
+    # B=10000 vectorised paired bootstrap MI300X gfx942 vs the live post-
+    # K-1532 oracle, HEAD 95e2c47); cohort geomean tb/hbl = 1.159×, range
+    # 1.085×–1.242×.  Sibling-N firewall disjoint with all P1-P24 (no
+    # prior frozenset carries an N=8192 cell with M ∈ {2048, 4096, 8192});
+    # all 30 cells are NEW route-OUT.
+    _k1567_p25_skinny_n8192_routeout as _R_K1567_P25_skinny_n8192_routeout,
 )
 
 
@@ -249,6 +259,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (4096, 4096, 4096, {bf16, fp16}) — P12 fires first so 28 cells are
     # NEW route-OUT and 2 cells are alias documentation.
     if _R_K1566_P24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1567 P25 (17th-position): skinny_N8192 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P24 per the K-1175 stacked-predicate convention; closes
+    # the previously-empty N=8192 rung of the K-COMPLEMENT N-ladder on the
+    # full K-grid {2048, 4096, 8192, 16384, 32768}.  30/30 admit at strict
+    # 1.05 gate (K-1567 paired n=30 + B=10000 vectorised paired bootstrap
+    # on MI300X gfx942 with TRITONBLAS_DISABLE_K971=1 vs the live post-
+    # K-1532 routing oracle, HEAD 95e2c47); cohort geomean tb/hbl = 1.159×,
+    # range 1.085×-1.242×; 0 regressions.  Per-row geomean: 1.123×
+    # (M=2048) / 1.158× (M=4096) / 1.197× (M=8192) — opposite M-trajectory
+    # to K-1566 P24 N=4096 (which peaked at M=2048): at N=8192 the M=8192
+    # row hits the longK_largeSquare regime where hipBLASLt's split-K
+    # kernel selection wins most decisively.  Sibling-N firewall disjoint
+    # with all P1-P24 (no prior frozenset carries an N=8192 cell with
+    # M ∈ {2048, 4096, 8192}); all 30 cells are NEW route-OUT.  Confirms
+    # the R-1478 #1 N-axis attenuation chain anchor at the previously-
+    # empty N=8192 rung (full chain 1.451 → 1.234 → 1.159 → 1.174 → 1.118).
+    if _R_K1567_P25_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

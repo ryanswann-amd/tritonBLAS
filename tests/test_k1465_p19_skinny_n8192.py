@@ -7,7 +7,7 @@ stack (envelope grows 127 -> 133 cells; +6 admits at the K=2048 column of
 the N=8192 column-narrow regime).
 
 K-1474 SHRUNK FROM K-1465's predicted 29-cell envelope after re-measurement
-on MI300X gfx942 / rocm7.2 found that K-1465's predicted speedups did not
+on MI300X gfx942 / the current ROCm found that K-1465's predicted speedups did not
 reproduce on the current stack.  Productionised set is the 6 K=2048 cells
 where re-measurement shows ratio_median >= 1.05 AND CI95-lo >= 1.04.
 The other 24 K-1465 sweep cells fall through to native triton dispatch.

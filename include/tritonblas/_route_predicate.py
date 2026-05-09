@@ -460,7 +460,7 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
 
 # K-1121 anchors (5 K-1051 PMC counter-matrix cells + 8 K-1031 leakage
 # cohort cells).  Per-cell mean speedup (hbl/tb) annotated from K-1121's
-# paired n=30 HIP-graph hot-cache on rad-mi300x-1 / MI300X / ROCm 7.2;
+# paired n=30 HIP-graph hot-cache on rad-mi300x-1 / MI300X / the current ROCm;
 # range 1.158x-1.365x; cohort geomean 1.226x.
 _K1121_P8_ANCHORS_13 = frozenset({
     # ----- K-1051 PMC counter-matrix cells (overlap with K-1089 P6) -----
@@ -1745,7 +1745,7 @@ def _k1437_p17_skinny_n1024_kcompl_ext_routeout(
 #
 # K-1474 RE-MEASUREMENT FINDING (binding): K-1465's predicted 29-cell
 # envelope (cohort geomean 1.220x range 1.108x-1.413x) DID NOT REPRODUCE on
-# the current MI300X gfx942 / rocm7.2 / hipBLASLt / Triton 3.6.0 stack.
+# the current MI300X gfx942 / the current ROCm / hipBLASLt / Triton 3.6.0 stack.
 # Re-measured envelope geomean was 1.0145x (range 0.962-1.083x); 0/29 cells
 # cleared the strict K-1442 1.10 admit gate; 12/29 cells showed tritonblas
 # faster than hipBLASLt (ratio_median < 1.0) -- shipping the K-1465 29-cell
@@ -1763,7 +1763,7 @@ def _k1437_p17_skinny_n1024_kcompl_ext_routeout(
 # is small -- insufficient K-loop iterations to amortise the persistent
 # kernel's tile-launch overhead vs hipBLASLt's split-K kernel selection.
 # At K >= 4096 the per-tile arithmetic intensity rises high enough that
-# tritonblas catches up (re-measurement on rocm7.2 shows tb at parity or
+# tritonblas catches up (re-measurement on the current ROCm shows tb at parity or
 # faster at K in {4096,8192,16384,32768} for this N column).
 #
 # K-1465 envelope reject cells (23 total: 17 K>=4096 + 6 K=4096) fall through
@@ -1787,7 +1787,7 @@ _K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT = _K1474_P19_SKINNY_N8192_KCOMPL_K2048_R
 assert len(_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6) == 6, (
     "_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6 must be exactly 6 cells "
     "(K-1474 re-measurement of the K-1465 30-cell envelope on MI300X gfx942 "
-    "rocm7.2 found that only the 6 K=2048 cells, M in {2048,4096,8192} x "
+    "the current ROCm found that only the 6 K=2048 cells, M in {2048,4096,8192} x "
     "N=8192 x K=2048 x {bf16,fp16}, clear a relaxed 1.05 admit gate with "
     "CI95-lo >= 1.04; the K-1442 strict 1.10 gate is unreachable on the "
     "current stack.  The other 24 K-1465 sweep cells fall through to native "
@@ -1865,13 +1865,13 @@ def _k1465_p19_skinny_n8192_routeout(
     continuity (K-1465 was the cohort sweep that prompted P19); the
     productionised set is the K-1474 SHRUNK-FROM-K1465 6-cell K=2048-column
     sub-envelope after re-measurement falsified K-1465's predicted speedups
-    on the rocm7.2 stack -- see the constant doc-comment above.
+    on the the current ROCm stack -- see the constant doc-comment above.
 
     Returns True iff (M, N, K, dtype) matches one of the 6 strict-equality
     keys: M in {2048, 4096, 8192} x N=8192 x K=2048 x {bf16, fp16}.
 
     Source measurement: K-1474 paired n=15 HIP-graph hot-cache + B=2000
-    vectorised paired bootstrap on MI300X gfx942 / rocm7.2 / hipBLASLt /
+    vectorised paired bootstrap on MI300X gfx942 / the current ROCm / hipBLASLt /
     Triton 3.6.0 (rad-mi300x-splinter1 May 2026); 6/6 cells r >= 1.05 with
     CI95-lo >= 1.04; cohort geomean tb/hbl = 1.068x; range 1.057x-1.083x.
 
@@ -1921,7 +1921,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      10. K-1433 P16 skinny_N1024 K-COMPLEMENT BASE 18-cell strict-equality -> hipBLASLt.
      11. K-1437 P17 skinny_N1024 K-COMPLEMENT EXTENDED 12-cell strict-equality -> hipBLASLt.
      12. K-1474 P19 skinny_N8192 K=2048-COLUMN 6-cell strict-equality -> hipBLASLt
-         (shrunk from K-1465's 29-cell prediction; re-measurement on rocm7.2
+         (shrunk from K-1465's 29-cell prediction; re-measurement on the current ROCm
          showed only the K=2048 sub-column clears a 1.05 admit gate).
     """
     if disable_env_set:

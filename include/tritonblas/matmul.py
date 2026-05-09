@@ -175,7 +175,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # stacked-predicate convention.
     #
     # K-1474 SHRUNK FROM K-1465's predicted 29-cell envelope after re-
-    # measurement on MI300X gfx942 / rocm7.2 / hipBLASLt / Triton 3.6.0
+    # measurement on MI300X gfx942 / the current ROCm / hipBLASLt / Triton 3.6.0
     # (rad-mi300x-splinter1) found that K-1465's predicted speedups DID NOT
     # REPRODUCE on the current stack: re-measured envelope geomean was
     # 1.0145x (range 0.962-1.083x); 0/29 cells cleared the strict K-1442

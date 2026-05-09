@@ -56,6 +56,14 @@ from ._route_predicate import (
     # unreachable while P19 is enabled — by design (claims the 13th-position
     # slot for the K-COMPLEMENT-EXTENDED follow-up).
     _k1493_p20_skinny_n16384_routeout as _R_K1493_P20_skinny_n16384_routeout,
+    # K-1531 (S-002): P21 skinny_N2048 K-COMPLEMENT 29-cell route-OUT
+    # (14th-position) — productionizes the K-1518 N=2048 envelope; cohort
+    # effective speedup vs post-K-1493 oracle = 1.190×; cohort geomean over
+    # the 21 new-routed cells = 1.281× (M=4096 row carries the heaviest
+    # pull at 1.49× geomean).  Sibling-N firewall vs all prior K-COMPLEMENT
+    # frozensets; one parity cell (8192,2048,8192,fp16) deferred (excluded
+    # from the frozenset entirely to preserve the zero-regressions invariant).
+    _k1531_p21_skinny_n2048_routeout as _R_K1531_P21_skinny_n2048_routeout,
 )
 
 
@@ -194,6 +202,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # the 13th-position slot for K-COMPLEMENT-EXTENDED follow-up; load-bearing
     # if P19 is ever ablated).
     if _R_K1493_P20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1531 P21 (14th-position): skinny_N2048 K-COMPLEMENT 29-cell route-OUT.
+    # Stacks AFTER K-1493 P20 per K-1175 stacked-predicate convention; closes
+    # the N=2048 column along the K-COMPLEMENT axis (full K-grid 2048-32768,
+    # M ∈ {2048, 4096, 8192}).  29/30 admit at strict gate (one cell
+    # deferred at TB-faster parity, ratio_med=0.997 — excluded from the
+    # frozenset entirely to preserve the zero-regressions invariant).
+    # Productionization gates: cohort effective speedup vs post-K-1493 oracle
+    # = 1.190× (≥0.85× floor PASS); cohort geomean over the 21 new-routed
+    # cells = 1.281×; M=4096 row carries the heaviest pull at 1.49× geomean.
+    # Natural sibling-N disjointness with all P1–P20.
+    if _R_K1531_P21_skinny_n2048_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

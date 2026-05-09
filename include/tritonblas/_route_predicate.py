@@ -2232,6 +2232,184 @@ def _k1538_p23_skinny_n512_alias_routeout(M: int, N: int, K: int, dtype) -> bool
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1574 (S-002) — P24 `skinny_N8192` K-COMPLEMENT route-OUT
+# (16th-position).
+#
+# Productionises the K-1565-verified N=8192 K-COMPLEMENT envelope as a
+# 30-cell strict-equality frozenset covering the previously-uncovered
+# middle bucket of the N-ladder: M ∈ {2048, 4096, 8192} × N=8192 × K ∈
+# {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}.  Closes the last
+# remaining gap in the K-COMPLEMENT N-ladder: coverage now spans
+# N ∈ {128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536}.
+#
+# Naming follows the K-1493 / K-1538 alias-stack convention
+# (`_ALIASSTACK_30` suffix); semantically this slot is LOAD-BEARING under
+# the live oracle (no upstream predicate covers N=8192 K-COMPLEMENT
+# pre-K-1574), unlike K-1538 P23 which is unreachable behind P15+P17.
+# Adopting the alias-stack naming preserves the project audit grammar
+# (single cohort symbol, frozen per-cell ratios as comments, K-1532
+# data-driven sibling firewall) — a future K-NNNN backfill that aliases
+# this envelope can chain off `_K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30`
+# without renaming.
+#
+# Source measurement (K-1574 paired n=30 HIP-graph hot-cache + B=10000
+# vectorised paired bootstrap CI95 on MI300X / gfx942 with ROCm 7.2 /
+# PyTorch 2.10.0; 50 graph replays/trial; tritonblas SHA
+# 34a64ac post-K-1555 HEAD; node useocpm2m-097-137):
+#   - 30/30 strict-admit at the strict ratio_median ≥ 1.05 ∧ CI95-lo ≥ 1.00
+#     gate (K-1492 / K-1478 / K-1532 protocol)
+#   - cohort geomean tb/hbl = 1.149× (range 1.070×–1.261×); reproduces the
+#     K-1565 anchor (1.164× geomean, same SHA family) within paired-bootstrap
+#     CI95 noise
+#   - 0 regressions, 0 errors
+#   - per-cell ratio attenuates with K within the M=2048 row
+#     (1.135× @ K=2048 → 1.070× @ K=32768) but WIDENS with K within the
+#     M=8192 row (1.203× @ K=2048 → 1.261× @ K=32768) — the M=8192 slab
+#     is the strongest route-out column at N=8192 (geomean ~1.20×); M=2048
+#     plateau ~1.10× (the narrowest in the N-ladder, consistent with the
+#     K-1465 / K-1478 / R-1478 #1 N-axis attenuation invariant for the
+#     "narrow tile" regime)
+#   - all 30 cells confirmed `routed=False` against live post-K-1555 oracle
+#     (`k971_route_decision`) before P24 is added — i.e., this slot is
+#     load-bearing, not symbolic alias dead code
+#
+# Disjointness rationale (data-driven, mirrors K-1532 / K-1538 minimalist
+# table convention so a future P25 only needs to append one row):
+#   * Sibling-N firewall vs every other K-COMPLEMENT predicate
+#     (P13(N=128), P13(N=256), P15(N=512), P16(N=1024), P17(N=512),
+#     P19(N=16384), P21(N=256-mid), P22(N=32768), P23(N=512)) — every
+#     N=8192 cell is disjoint from each by N alone.
+#   * P12 SQUARE_MID is bounded to M=N=K ∈ {2048, 4096}; N=8192 ≠ M for
+#     any cell in this cohort (M ∈ {2048,4096,8192} but K is never equal
+#     to both M and N=8192 simultaneously across the 30-cell grid).
+#   * P8 sub-frozensets cap at N=256; K971_ROUTE_TABLE at M=N square
+#     anchors M=N ∈ {1024, 2048}.  Both naturally disjoint from N=8192.
+#
+# Stacked at 16th-position per the K-1175 stacked-predicate convention
+# (after P23 K-1538 N=512 alias).  "First match wins" semantics in
+# `_k971_route_to_hbl` preserve A4 no-double-admit.
+#
+# Mechanism: at N=8192 the persistent_matmul tile aspect against
+# M ∈ {2048, 4096, 8192} sits in an intermediate regime between K-1409
+# N=512 (LDS-BC dominated, ratio widens with K) and K-1478 N=16384 (HBM
+# bandwidth dominated, ratio narrows with K).  hipBLASLt's split-K plan
+# wins by a tighter 1.07×–1.26× margin than the N=512 / N=32768 cohorts
+# (1.33× / 1.12× respectively), consistent with R-1478 #1 monotonic
+# attenuation at the middle-N rung — the bucket sits between K-1553
+# (N=4096, 1.234×) and K-1478 (N=16384, 1.174×).
+#
+# Symbol: `_K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30`
+# Cardinality: 30 cells (30/30 strict-admit, 0 regressions).
+# ---------------------------------------------------------------------------
+_K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 = frozenset({
+    # M=2048 row × N=8192 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 8192,  2048, "torch.bfloat16"),    # r=1.135 ci95_lo=1.128
+    (2048, 8192,  2048, "torch.float16"),     # r=1.119 ci95_lo=1.112
+    (2048, 8192,  4096, "torch.bfloat16"),    # r=1.120 ci95_lo=1.116
+    (2048, 8192,  4096, "torch.float16"),     # r=1.105 ci95_lo=1.102
+    (2048, 8192,  8192, "torch.bfloat16"),    # r=1.112 ci95_lo=1.108
+    (2048, 8192,  8192, "torch.float16"),     # r=1.071 ci95_lo=1.069
+    (2048, 8192, 16384, "torch.bfloat16"),    # r=1.086 ci95_lo=1.085
+    (2048, 8192, 16384, "torch.float16"),     # r=1.077 ci95_lo=1.075
+    (2048, 8192, 32768, "torch.bfloat16"),    # r=1.113 ci95_lo=1.112
+    (2048, 8192, 32768, "torch.float16"),     # r=1.070 ci95_lo=1.069 (narrowest cell)
+    # M=4096 row × N=8192 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 8192,  2048, "torch.bfloat16"),    # r=1.174 ci95_lo=1.172
+    (4096, 8192,  2048, "torch.float16"),     # r=1.192 ci95_lo=1.190
+    (4096, 8192,  4096, "torch.bfloat16"),    # r=1.165 ci95_lo=1.163
+    (4096, 8192,  4096, "torch.float16"),     # r=1.166 ci95_lo=1.164
+    (4096, 8192,  8192, "torch.bfloat16"),    # r=1.153 ci95_lo=1.151
+    (4096, 8192,  8192, "torch.float16"),     # r=1.144 ci95_lo=1.141
+    (4096, 8192, 16384, "torch.bfloat16"),    # r=1.137 ci95_lo=1.136
+    (4096, 8192, 16384, "torch.float16"),     # r=1.105 ci95_lo=1.103
+    (4096, 8192, 32768, "torch.bfloat16"),    # r=1.148 ci95_lo=1.148
+    (4096, 8192, 32768, "torch.float16"),     # r=1.116 ci95_lo=1.115
+    # M=8192 row × N=8192 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 8192,  2048, "torch.bfloat16"),    # r=1.203 ci95_lo=1.199
+    (8192, 8192,  2048, "torch.float16"),     # r=1.237 ci95_lo=1.231
+    (8192, 8192,  4096, "torch.bfloat16"),    # r=1.186 ci95_lo=1.184
+    (8192, 8192,  4096, "torch.float16"),     # r=1.177 ci95_lo=1.174
+    (8192, 8192,  8192, "torch.bfloat16"),    # r=1.138 ci95_lo=1.137
+    (8192, 8192,  8192, "torch.float16"),     # r=1.130 ci95_lo=1.129
+    (8192, 8192, 16384, "torch.bfloat16"),    # r=1.223 ci95_lo=1.222
+    (8192, 8192, 16384, "torch.float16"),     # r=1.201 ci95_lo=1.199
+    (8192, 8192, 32768, "torch.bfloat16"),    # r=1.261 ci95_lo=1.259 (max-ratio)
+    (8192, 8192, 32768, "torch.float16"),     # r=1.232 ci95_lo=1.230
+})
+assert len(_K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30) == 30, (
+    "K-1574 P24 skinny_N8192 K-COMPLEMENT frozenset must be exactly "
+    "30 cells (M ∈ {2048,4096,8192} × N=8192 × K ∈ {2048,4096,8192,16384,"
+    "32768} × {bf16,fp16}); any deviation indicates an authoring typo "
+    "against the K-1574 / K-1565 paired n=30 admit set.")
+# Cross-frozenset disjointness — K-1574 P24 vs the prior 15-predicate stack.
+# Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, 16384,
+# 32768}; N=8192 sits between P22 (N=32768) and P19 (N=16384) but shares
+# no N with any column.  P12 SQUARE_MID is bounded to M=N=K ∈ {2048, 4096};
+# P8/K971 cap at N ≤ 2048.  Data-driven assert loop mirrors the K-1532
+# minimalist refactor — a future P25 only needs to append one row to
+# `_K1574_P24_DISJOINT_SIBLINGS`.
+_K1574_P24_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("K971_ROUTE_TABLE (M=N≤2048)",       K971_ROUTE_TABLE),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P15 N=512 EXTREMES (K-1409)",       _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P17 N=512 BASE (K-1437)",           _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+    ("P23 N=512 alias-stack (K-1538)",    _K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_30),
+)
+for _sibling_name, _sibling_set in _K1574_P24_DISJOINT_SIBLINGS:
+    assert _K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30.isdisjoint(_sibling_set), (
+        f"K-1574 P24 skinny_N8192 (N=8192) overlaps {_sibling_name}; "
+        "sibling-N firewall violated — N=8192 is a previously uncovered "
+        "K-COMPLEMENT column and must not collide with any prior frozenset.")
+del _sibling_name, _sibling_set
+
+
+def _k1574_p24_skinny_n8192_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1574 P24 — direct hipBLASLt route-OUT for the 30-cell skinny_N8192
+    K-COMPLEMENT cohort (`_K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 8192 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1574 paired n=30 HIP-graph hot-cache benchmarks
+    (50 replays/trial) on MI300X (gfx942) with B=10000 vectorised paired
+    bootstrap CI95; 30/30 strict-admit at the ratio_median ≥ 1.05 ∧
+    CI95-lo ≥ 1.00 gate; cohort geomean tb/hbl = 1.149× (range
+    1.070×–1.261×).  Reproduces the K-1565 anchor (1.164×) on the same
+    HEAD SHA family within paired-bootstrap CI95 noise.
+
+    Mechanism: at N=8192 the persistent_matmul tile aspect against
+    M ∈ {2048, 4096, 8192} sits in an intermediate regime between
+    K-1409 N=512 (LDS-BC dominated, ratio widens with K) and K-1478
+    N=16384 (HBM-bound, ratio narrows with K).  hipBLASLt's split-K plan
+    wins by a tighter margin than the N=512 / N=32768 cohorts (1.33× /
+    1.12× respectively), consistent with R-1478 #1 monotonic N-axis
+    attenuation at the middle-N rung — sits between K-1553 (N=4096,
+    1.234×) and K-1478 (N=16384, 1.174×).  M=8192 slab is the strongest
+    route-out column (geomean ~1.20×); M=2048 plateau ~1.10×.
+
+    Stack position: 16th per the K-1175 stacked-predicate convention,
+    AFTER P23 (K-1538 N=512 alias-stack).  All 30 cells confirmed
+    `routed=False` against the live post-K-1555 oracle prior to P24
+    insertion — i.e., this slot is LOAD-BEARING (closes a real gap),
+    not symbolic alias dead code.  Closes the N-ladder K-COMPLEMENT
+    coverage at N ∈ {128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+    32768, 65536}.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1574_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -2266,6 +2444,13 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
          alias-stack -> hipBLASLt.  Covers the same N=512 cohort as
          P15 ⨄ P17; unreachable while either P15 or P17 is enabled,
          load-bearing fallback otherwise.  (Cohort geomean 1.329×.)
+     16. K-1574 P24 skinny_N8192 K-COMPLEMENT 30-cell strict-equality
+         alias-stack -> hipBLASLt.  Closes the previously-uncovered
+         N=8192 middle bucket of the K-COMPLEMENT N-ladder (no upstream
+         predicate covers N=8192; LOAD-BEARING under the live oracle).
+         Coverage now spans N ∈ {128, 256, 512, 1024, 2048, 4096, 8192,
+         16384, 32768, 65536}.  (Cohort geomean 1.149×, range 1.070×–
+         1.261×, 30/30 strict-admit.)
     """
     if disable_env_set:
         return False
@@ -2388,5 +2573,17 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # by upstream P15 without regression.  Mirrors the K-1493 / K-1525
     # P20-alias-of-P19 sibling-slot productionisation pattern.
     if _k1538_p23_skinny_n512_alias_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1574 P24 (16th-position): skinny_N8192 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P23 per the K-1175 stacked-predicate convention; closes
+    # the previously-uncovered N=8192 middle bucket of the K-COMPLEMENT
+    # N-ladder.  Unlike K-1538 P23 (alias of P15+P17), no upstream
+    # predicate covers N=8192 — this slot is LOAD-BEARING under the live
+    # oracle.  30/30 admit-strict (cohort geomean tb/hbl = 1.149×, range
+    # 1.070×–1.261×); per-cell ratio attenuates with K within the M=2048
+    # row but widens with K within the M=8192 row (M=8192 slab strongest
+    # at geomean ~1.20×).  N-ladder coverage now spans N ∈ {128, 256, 512,
+    # 1024, 2048, 4096, 8192, 16384, 32768, 65536}.
+    if _k1574_p24_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

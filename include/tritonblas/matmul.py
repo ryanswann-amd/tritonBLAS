@@ -34,6 +34,8 @@ from ._route_predicate import (
     _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
     # K-1382 (S-002): P14 skinny_N256 K-COMPLEMENT 18-cell route-OUT (8th-position).
     _k1382_p14_skinny_n256_routeout as _R_K1382_P14_skinny_n256_routeout,
+    # K-1412 (S-002): P15 skinny_N512 K-COMPLEMENT 12-cell route-OUT (9th-position).
+    _k1412_p15_skinny_n512_routeout as _R_K1412_P15_skinny_n512_routeout,
 )
 
 
@@ -111,6 +113,21 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # column-narrow LDS layout). Disjoint by construction with all P1–P13
     # sub-frozensets via cross-frozenset asserts at module load.
     if _R_K1382_P14_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1412 (S-002): P15 skinny_N512 K-COMPLEMENT 12-cell route-OUT (9th-position
+    # envelope) at K-axis EXTREMES (K ∈ {2048, 32768}). Stacks AFTER K-1382 P14
+    # per K-1175 stacked-predicate convention; closes the K-1404 post-P14 4-bucket
+    # decomposition residual at the skinny_N512 K-axis extremes (sibling to
+    # K-1397 N=256 K-COMPLEMENT extremes with N axis bumped 256 → 512).
+    # Mechanism: K=2048 starves persistent_matmul tile parallelism with too
+    # few K-tiles per CU; K=32768 overflows the persistent N=512 tile LDS
+    # bank-conflict capacity (consistent with K-913 longK_smallSquare PMC
+    # findings + R-1409 N-axis attenuation; LDS-BC discriminator attenuates
+    # but remains per-cell admit-clean). K-1412 paired n=30 + B=10000
+    # vectorised bootstrap CI95: 12/12 ROUTE-OUT, geomean cohort speedup
+    # ≥ 1.0× vs hipBLASLt; envelope grows 91 → 103 cells. Disjoint by
+    # construction with all P1–P14 sub-frozensets via cross-frozenset asserts
+    # at module load.
+    if _R_K1412_P15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

@@ -2239,6 +2239,18 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
          K-1553-verified N=4096 envelope under a single K-1553-named symbol
          per the K-1493 / K-1538 / K-1552 alias-stack convention; load-bearing
          only if P24 is ablated.
+
+    Documentation-only aliases (NOT in the dispatch chain — referenced in
+    module-level frozensets, asserted at module load, but not consulted by
+    `_k971_route_to_hbl` because every cell is already routed by an
+    upstream predicate):
+
+      - K-1592 P26 `_K1592_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30`: 30-cell
+        N=1024 K-COMPLEMENT envelope; alias of P16 ⨄ R-K979 P5 Clause-1.
+        K-1592 live-oracle cohort geomean tb/hbl = 1.028× vs 1.998× pre-
+        routing in K-1429's TRITONBLAS-0074 baseline — confirms the K-1429
+        P16 frozenset already collapses the N=1024 envelope to dispatch
+        noise so a separate chain entry is unreachable dead code.
     """
     if disable_env_set:
         return False
@@ -2394,6 +2406,15 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # 1.234×, range 1.114×-1.501×; 30/30 admit at strict 1.05 gate).
     if _k1553_p25_skinny_n4096_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype):
         return True
+    # K-1592 P26 is intentionally NOT wired here — it is a documentation-only
+    # alias for the 30-cell N=1024 K-COMPLEMENT envelope (defined as
+    # `_K1592_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30`, see module-level
+    # block).  P16 routes 29/30 of those cells at chain position 10, and
+    # R-K979 P5 Clause-1 routes the 30th at position 4, so any wiring here
+    # would be unreachable dead code (per the K-1605 reviewer Minimalist
+    # consensus).  The named handle exists only so future N-ladder audits
+    # can reference the K-1592 measurement envelope under a K-1592-specific
+    # symbol distinct from K-1429's P16 productionisation label.
     return False
 
 
@@ -2740,3 +2761,56 @@ def _k1553_p25_skinny_n4096_kcompl_aliasstack_routeout(M: int, N: int, K: int, d
         (int(M), int(N), int(K), str(dtype))
         in _K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30
     )
+
+
+# ---------------------------------------------------------------------------
+# K-1592 (S-002) — `_K1592_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30`
+#
+# K-1592-named symbolic alias for the K-1590/K-1592-verified 30-cell
+# `skinny_N1024` K-COMPLEMENT envelope (M ∈ {2048, 4096, 8192} × N=1024 ×
+# K ∈ {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}).  Defined as the
+# explicit set-union P16 ∪ {(2048, 1024, 4096, bf16)} — 29 cells from
+# `_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29` (the load-bearing N=1024
+# K-COMPLEMENT route-OUT productionised by K-1429) plus the single cell
+# K-1429 rejected at r=1.015 < 1.05 strict floor, which is admitted
+# structurally by R-K979 P5 Clause-1 (mid-rect LDS-bound: minMN=1024,
+# maxMN=2048 ∈ [1792,3072], K=4096 ∈ [1240,8064], bf16).
+#
+# This is a **documentation alias only** — NOT wired into
+# `_k971_route_to_hbl`.  P16 already routes 29/30 at chain position 10 and
+# P5 routes the 30th at position 4, so a separate predicate function /
+# chain entry would be unreachable dead code (per the K-1605 reviewer
+# Minimalist consensus).  The named handle exists so future N-ladder
+# audits can reference the K-1592 30-cell measurement envelope under a
+# K-1592-specific symbol distinct from K-1429's 29-cell productionisation
+# label, and so any future ablation of P16 or P5 Clause-1 has a single
+# named set to reason against.
+#
+# K-1592 paired n=30 HIP-graph hot-cache re-measurement (MI300X / gfx942,
+# 50 replays/trial, alternating tb-first/hbl-first; B=10000 vectorised
+# paired bootstrap CI95) against the LIVE post-K-1574 17-frozenset oracle
+# (HEAD 632be95): live-oracle cohort geomean tb/hbl = 1.028× vs 1.998×
+# pre-routing in K-1429's TRITONBLAS-0074 baseline — confirms P16 is
+# already collapsing the N=1024 envelope to dispatch noise (R-1592 #1 /
+# #2).  Pre-routing per-cell hipBLASLt-vs-tritonblas geomean uplift (from
+# the K-1429 paired n=30 admit measurements that productionised P16):
+# range 1.26×-8.85×; cohort geomean 2.23× (BASE 2.08× / EXTREMES 2.48×);
+# peak 8.85× at (2048, 1024, 2048, fp16).  Full per-cell table:
+# https://gist.github.com/ryanswann-amd/87eb9b14dfb03d852e3f0437de32aa8c
+# ---------------------------------------------------------------------------
+_K1592_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30 = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29
+    | frozenset({(2048, 1024, 4096, "torch.bfloat16")})
+)
+assert len(_K1592_P26_SKINNY_N1024_KCOMPL_ALIASSTACK_30) == 30, (
+    "K-1592 P26 alias must be exactly 30 cells (P16's 29 + the single "
+    "(2048,1024,4096,bf16) P5-Clause-1 witness); cardinality drift "
+    "indicates either P16 changed size or the alias definition was "
+    "edited.")
+assert R_K979_P5_route_to_hbl(2048, 1024, 4096, "torch.bfloat16"), (
+    "K-1592 P26 alias invariant: the single P16-rejected cell "
+    "(2048,1024,4096,bf16) MUST be admitted by R-K979 P5 Clause-1 "
+    "(mid-rect LDS-bound: minMN=1024, maxMN=2048 ∈ [1792,3072], "
+    "K=4096 ∈ [1240,8064], bf16).  If this assert fires, P5 Clause-1 was "
+    "tightened — re-audit before relying on the alias as a routing "
+    "fallback.")

@@ -39,6 +39,9 @@ from tritonblas._route_predicate import (
     _K1205_EN3_ADMITS_8,
     _K1219_E3_NFLOOR256_ADMITS_7,
     _A1_WPEU1_PERTURBATIONS_8,
+    _longk_smallsquare_routeout,
+    _LONGK_SMALLSQUARE_ROUTEOUT,
+    _K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -1600,3 +1603,126 @@ def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
         "Cells added to P8 envelope past K-1275 do not match "
         "(_K1219_E3_NFLOOR256_ADMITS_7 | _A1_WPEU1_PERTURBATIONS_8); "
         "cell crept in.")
+
+
+# ---------------------------------------------------------------------------
+# K-1338 (S-002) — longK_smallSquare LDS-bank-conflict 6-cell route-OUT.
+# Productionized atop the K-1322 P8 51-cell envelope.  All 6 cells (M=N
+# in {1024,2048} x K in {4096,8192,16384}, bf16) measured CI95-significant
+# route-OUTs vs hipBLASLt with the K-913 LDS-bound PMC fingerprint.
+# ---------------------------------------------------------------------------
+K1338_LONGK_SMALLSQUARE_LIST = [
+    # (cid, M, N, K) — bf16 only by design
+    ("C1", 1024, 1024,  4096),
+    ("C2", 1024, 1024,  8192),
+    ("C3", 1024, 1024, 16384),
+    ("C4", 2048, 2048,  4096),
+    ("C5", 2048, 2048,  8192),
+    ("C6", 2048, 2048, 16384),
+]
+
+
+def test_k1338_longk_smallsquare_envelope_size_and_alias():
+    """Pin the K-1338 frozenset at exactly 6 cells and check the
+    public alias name (`_LONGK_SMALLSQUARE_ROUTEOUT`) the dispatcher
+    consults is the SAME object as the tagged provenance constant."""
+    assert len(_LONGK_SMALLSQUARE_ROUTEOUT) == 6
+    assert len(_K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6) == 6
+    assert _LONGK_SMALLSQUARE_ROUTEOUT is _K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6
+
+
+def test_k1338_longk_smallsquare_contents_are_pinned_to_manifest():
+    """Pin the 6-cell envelope to the K-1338 PMC measurement manifest.
+    A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1338_LONGK_SMALLSQUARE_LIST)
+    assert _LONGK_SMALLSQUARE_ROUTEOUT == expected
+
+
+def test_k1338_disjoint_with_k1322_p8_envelope():
+    """K-1338 longK_smallSquare cohort must be pairwise-disjoint with
+    the K-1322 P8 51-cell envelope (P8 sits at M >= 4480 or K <= 1024
+    or N in {128, 256}; K-1338 sits at M=N in {1024, 2048} and
+    K in {4096, 8192, 16384})."""
+    assert _LONGK_SMALLSQUARE_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT)
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1338_LONGK_SMALLSQUARE_LIST,
+                         ids=[c[0] for c in K1338_LONGK_SMALLSQUARE_LIST])
+def test_k1338_admits_all_6_cells_bf16(cid, M, N, K):
+    """Every K-1338 cell must fire the strict-equality match for bf16."""
+    assert _longk_smallsquare_routeout(M, N, K, torch.bfloat16) is True
+    assert _longk_smallsquare_routeout(M, N, K, "torch.bfloat16") is True
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1338_LONGK_SMALLSQUARE_LIST,
+                         ids=[c[0] for c in K1338_LONGK_SMALLSQUARE_LIST])
+def test_k1338_does_not_admit_fp16(cid, M, N, K):
+    """K-1338 measurement scope is bf16; fp16 parity is tracked
+    separately (K-1093 / K-1125) and MUST NOT fire here."""
+    assert _longk_smallsquare_routeout(M, N, K, torch.float16) is False
+
+
+@pytest.mark.parametrize("M,N,K", [
+    # Adjacent shapes that must NOT fire
+    (1024, 1024, 2048),   # K below cohort floor (K=4096)
+    (2048, 2048, 2048),   # K below cohort floor
+    (1024, 1024, 32768),  # K above cohort ceiling
+    (2048, 2048, 32768),  # K above cohort ceiling
+    (4096, 4096,  4096),  # M=N above cohort
+    ( 512,  512,  4096),  # M=N below cohort
+    (1024, 2048,  4096),  # M != N (not square)
+    (2048, 1024,  4096),  # M != N (not square)
+])
+def test_k1338_does_not_admit_neighbors(M, N, K):
+    """Strict-equality predicate must NOT fire on cells one axis-step
+    outside the K-1338 cohort (per R-1131 anti-overshoot doctrine)."""
+    assert _longk_smallsquare_routeout(M, N, K, torch.bfloat16) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1338_LONGK_SMALLSQUARE_LIST,
+                         ids=[c[0] for c in K1338_LONGK_SMALLSQUARE_LIST])
+def test_k1338_dispatch_chain_routes_to_hbl(cid, M, N, K):
+    """End-to-end: every K-1338 cell, when run through the full
+    `_k971_route_to_hbl` dispatch chain (with streamk=False,
+    work_stealing=False, both dtypes bf16), must return True so the
+    matmul wrapper hands the call off to torch.matmul / hipBLASLt."""
+    routed = _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
+                                enable_streamk=False, work_stealing=False)
+    assert routed is True, (
+        f"K-1338 cell {cid} ({M},{N},{K},bf16) should route to hipBLASLt "
+        f"after the K-1322 P8 51-cell check; got {routed}")
+
+
+def test_k1338_dispatch_chain_does_not_route_when_streamk_on():
+    """K-1338, like every other route-OUT predicate, must not fire when
+    the caller has explicitly enabled streamk or work-stealing (those
+    paths bypass the route-OUT chain entirely)."""
+    M, N, K = 1024, 1024, 4096
+    assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
+                              enable_streamk=True,
+                              work_stealing=False) is False
+    assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
+                              enable_streamk=False,
+                              work_stealing=True) is False
+
+
+def test_k1338_dispatch_chain_does_not_route_with_killswitch():
+    """K-1338 inherits the K-989 K-971 killswitch: setting
+    TRITONBLAS_DISABLE_K971=1 must short-circuit the entire route-OUT
+    chain (including K-1338) so the kernel runs unconditionally.  The
+    killswitch is the single-disable lever for the whole post-K-971 stack
+    per K-883 R1 (one cohort, one disable)."""
+    import os as _os
+    M, N, K = 1024, 1024, 4096
+    prev = _os.environ.get("TRITONBLAS_DISABLE_K971")
+    _os.environ["TRITONBLAS_DISABLE_K971"] = "1"
+    try:
+        assert _k971_route_to_hbl(M, N, K, torch.bfloat16, torch.bfloat16,
+                                  enable_streamk=False,
+                                  work_stealing=False) is False
+    finally:
+        if prev is None:
+            _os.environ.pop("TRITONBLAS_DISABLE_K971", None)
+        else:
+            _os.environ["TRITONBLAS_DISABLE_K971"] = prev

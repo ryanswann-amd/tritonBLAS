@@ -27,6 +27,7 @@ from ._route_predicate import (
     R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
     _p8_mfma_issue_stall_routeout as _R_K1144_P8_mfma_issue_stall_routeout,
+    _longk_smallsquare_routeout as _R_K1338_longk_smallsquare_routeout,
     R_K1142_E1_route_to_hbl as _R_K1142_E1_route_to_hbl,
 )
 
@@ -56,6 +57,18 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # Clause-2 / K-1062 Clause-4, P8's strict-equality match returns the
     # same True verdict (frozenset O(1) lookup; harmless).
     if _R_K1144_P8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1338 (S-002): longK_smallSquare LDS-bank-conflict 6-cell strict-equality
+    # route-OUT, stacked AFTER the K-1322 P8 51-cell envelope so P8 wins on
+    # (zero) overlap.  All 6 cells (M=N in {1024,2048} x K in {4096,8192,16384},
+    # bf16) are CI95-significant route-OUTs vs hipBLASLt (paired n=30 hot-cache,
+    # B=10000 bootstrap; ratios 1.138x -> 1.436x) with the K-913 LDS-bound PMC
+    # fingerprint (TB SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889 or 1.778
+    # cyc/inst vs HBL 0.000 exactly).  Disjoint with all 6 P8 sub-frozensets by
+    # construction (P8 sits at M >= 4480 or K <= 1024 or N in {128, 256}).
+    # The two K=16384 cells are also enumerated by the K-905/K-971 final-stage
+    # strict-equality table; K-1338 promotes the route-OUT decision earlier in
+    # the chain so those cells bypass the K-1037 P6 admit gate.
+    if _R_K1338_longk_smallsquare_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope as defense-
     # in-depth AFTER P8 28-cell strict-equality. K-1209 ablation on K-931
     # always-uncovered top-40 (40 cells) confirmed E1 contributes 0 marginal

@@ -624,6 +624,85 @@ assert _A1_WPEU1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
 
 
 # ---------------------------------------------------------------------------
+# K-1338 (S-002): longK_smallSquare LDS-bank-conflict route-OUT.  Six bf16
+# cells (M=N in {1024, 2048}, K in {4096, 8192, 16384}) productionised from
+# K-1338's paired n=30 HIP-graph hot-cache benchmark + rocprofv3 4-pass PMC
+# capture on c42/MI300X (gfx942).  All six cells classify as ROUTE-OUT at
+# CI95-lo > 1.05x (ratios 1.138x -> 1.436x); every TB cell carries non-zero
+# SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS (1.778 cyc/inst on 1024-square, 0.889
+# on 2048-square) while every HBL cell measures 0.000 exactly — reproducing
+# the K-913 LDS-bound shape-invariance signature on a fourth node and on
+# the rank-#1 unprofiled cell (1024,1024,4096) bf16.  Two cells
+# ((1024,1024,16384) and (2048,2048,16384)) are also enumerated by the
+# K-905/K-971 strict-equality table at the end of the dispatch chain; the
+# K-1338 entries promote those two cells to direct route-OUT before the
+# K-1037 P6 admit gate, eliminating the (~0%) admit overlap.  The four
+# remaining cells (K in {4096, 8192}) are net-new dispatch coverage.
+#
+# Stacked AFTER the K-1322 P8 51-cell envelope so P8 wins on (zero) overlap
+# (no double-routing); the K-1338 frozenset only fires on cells P8 does
+# not already enumerate.  Pairwise disjoint with all six P8 sub-frozensets
+# by construction (longK_smallSquare cohort lives at M=N in {1024,2048}
+# and K >= 4096; P8 anchors/neighbors/admits sit at M >= 4480 or K <= 1024
+# or N in {128, 256}).  Dtype-projection: bf16 only by design (the K-913
+# / K-1338 measurement scope is bf16; fp16 parity tracked separately).
+# ---------------------------------------------------------------------------
+_K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6 = frozenset({
+    (1024, 1024,  4096, "torch.bfloat16"),  # K-1338 C1: tb/hbl=1.138 CI95-lo=1.124
+    (1024, 1024,  8192, "torch.bfloat16"),  # K-1338 C2: tb/hbl=1.301 CI95-lo=1.268
+    (1024, 1024, 16384, "torch.bfloat16"),  # K-1338 C3: tb/hbl=1.436 CI95-lo=1.421
+    (2048, 2048,  4096, "torch.bfloat16"),  # K-1338 C4: tb/hbl=1.150 CI95-lo=1.089
+    (2048, 2048,  8192, "torch.bfloat16"),  # K-1338 C5: tb/hbl=1.168 CI95-lo=1.142
+    (2048, 2048, 16384, "torch.bfloat16"),  # K-1338 C6: tb/hbl=1.366 CI95-lo=1.350
+})
+# Brief-mandated public alias (per K-1349 productionization plan: the
+# dispatcher consults `_LONGK_SMALLSQUARE_ROUTEOUT` directly).  Kept as
+# a tagged sibling so future reviewers see the K-1338 provenance and the
+# six entries remain attributable to a single measurement campaign.
+_LONGK_SMALLSQUARE_ROUTEOUT = _K1338_LONGK_SMALLSQUARE_LDSBC_ROUTEOUT_6
+assert len(_LONGK_SMALLSQUARE_ROUTEOUT) == 6, (
+    "K-1338 longK_smallSquare LDS-BC route-OUT must be exactly 6 cells "
+    "(M=N in {1024,2048} x K in {4096,8192,16384} bf16); a duplicate or "
+    "stray entry has crept in.")
+# Cross-check: K-1338 cohort is pairwise-disjoint with the K-1322 P8 51-cell
+# envelope by construction — P8 anchors/neighbors live at M >= 4480 or
+# K <= 1024 or N in {128, 256}, none of which match longK_smallSquare cells.
+assert _LONGK_SMALLSQUARE_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT), (
+    "K-1338 longK_smallSquare cohort overlaps the K-1322 P8 51-cell "
+    "envelope; no overlap is expected because P8 anchors sit at M >= 4480 "
+    "or K <= 1024 or N in {128, 256} while longK_smallSquare lives at "
+    "M=N in {1024, 2048} and K in {4096, 8192, 16384}.")
+
+
+def _longk_smallsquare_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1338 (S-002) — direct hipBLASLt route-OUT for the 6-cell
+    longK_smallSquare LDS-bank-conflict cohort.
+
+    Returns True iff (M, N, K, dtype) matches one of the 6 strict-equality
+    keys in :data:`_LONGK_SMALLSQUARE_ROUTEOUT`.  bf16-only by design
+    (the K-913 / K-1338 source measurement scope is bf16; fp16 parity is
+    tracked separately on the K-1093 / K-1125 line).
+
+    This predicate is consulted **after** the K-1322 P8 51-cell envelope
+    inside ``_k971_route_to_hbl`` / ``k971_route_decision`` per the
+    R-1144.DUAL-FROZENSET-PROVENANCE convention: P8's earlier campaigns
+    win on (zero) overlap; the K-1338 frozenset only fires on cells P8
+    does not enumerate.
+
+    For the two cells ((1024,1024,16384,bf16) and (2048,2048,16384,bf16))
+    that are also listed in the K-905/K-971 strict-equality
+    :data:`K971_ROUTE_TABLE`, the dispatch outcome is unchanged (both
+    return True -> route to hipBLASLt); K-1338 just promotes the route-OUT
+    decision in the dispatch chain so the cells bypass the intermediate
+    K-1037 P6 admit gate (no measurable overlap on those two cells; defense
+    in depth against a future P6 envelope widening).
+    """
+    if not _dtype_is_bf16(dtype):
+        return False
+    return (int(M), int(N), int(K), str(dtype)) in _LONGK_SMALLSQUARE_ROUTEOUT
+
+
+# ---------------------------------------------------------------------------
 # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope productionised
 # from K-1151 / K-1142 stacked AFTER the P8 28-cell strict-equality route.
 # K-1209 ablation on K-931 always-uncovered top-40 confirmed E1 is fully
@@ -722,6 +801,15 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # disjoint from K-1089 P6 envelope (P6 has no N<896 cells), so the
     # precedence-inversion question is unchanged.
     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1338 (S-002): longK_smallSquare LDS-bank-conflict 6-cell strict-
+    # equality route-OUT, stacked AFTER the K-1322 P8 51-cell envelope.
+    # All 6 cells (M=N in {1024,2048} x K in {4096,8192,16384}, bf16)
+    # measured CI95-significant route-OUTs vs hipBLASLt (paired n=30 hot-
+    # cache, B=10000 bootstrap, ratios 1.138x -> 1.436x) with K-913 LDS-
+    # bound PMC fingerprint (TB SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889
+    # or 1.778 cyc/inst, HBL = 0.000).  Disjoint with P8 by construction.
+    if _longk_smallsquare_routeout(int(M), int(N), int(K), a_dtype):
         return True
     # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth
     # AFTER P8. K-1209 ablation showed E1 is fully dominated by P8+K-1175 on

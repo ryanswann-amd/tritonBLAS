@@ -1219,7 +1219,7 @@ def _k1397_p13_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
 # (9th-position).
 #
 # K-1417 productionises the K-1409-derived 12-cell `skinny_N512` K-COMPLEMENT
-# EXTENSION cohort as `_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12`, layered
+# EXTENSION cohort as `_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT`, layered
 # as the 9th-position envelope in the dispatch precedence chain on top of
 # the K-1406 P14 8-predicate baseline (envelope grows by +12 admits at the
 # K-axis EXTREMES of the N=512 column-narrow regime).
@@ -1275,7 +1275,7 @@ def _k1397_p13_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
 #   * K-1397 P13 — uses N=256.
 # All asserted at module load.
 # ---------------------------------------------------------------------------
-_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12 = frozenset({
+_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT = frozenset({
     # M=2048 row × K ∈ {2048, 32768} × {bf16, fp16}
     (2048, 512,  2048, "torch.bfloat16"),
     (2048, 512,  2048, "torch.float16"),
@@ -1292,41 +1292,41 @@ _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12 = frozenset({
     (8192, 512, 32768, "torch.bfloat16"),
     (8192, 512, 32768, "torch.float16"),
 })
-assert len(_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12) == 12, (
+assert len(_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT) == 12, (
     "K-1417 P15 skinny_N512 K-COMPLEMENT EXTENSION frozenset must be exactly "
     "12 cells (M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,32768} × {bf16,fp16}); "
     "any deviation indicates an authoring typo against the K-1397 K-COMPLEMENT "
     "EXTREMES scoping at N=512 (R-1417.SKINNY-N512-K-COMPLEMENT-EXTENSION-IS-EXTREMES).")
 # Cross-frozenset disjointness — K-1417 P15 vs prior 8-predicate stack.
 _K1409_P15_VS_P8_DISJOINT = (
-    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
 assert _K1409_P15_VS_P8_DISJOINT, (
     "K-1417 P15 skinny_N512 K-COMPLEMENT EXTENSION cell overlaps the K-1322 "
     "51-cell P8 envelope; P8's K-1219 E3 N=256 sub-frozenset uses N=256 — "
     "P15 uses N=512, natural disjointness, asserted as cheap insurance per "
     "R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
 _K1409_P15_VS_K971_DISJOINT = (
-    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(K971_ROUTE_TABLE))
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT.isdisjoint(K971_ROUTE_TABLE))
 assert _K1409_P15_VS_K971_DISJOINT, (
     "K-1417 P15 skinny_N512 K-COMPLEMENT EXTENSION cell overlaps "
     "K971_ROUTE_TABLE; K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ "
     "{1024, 2048}; P15 cells all use N=512 — natural disjointness, asserted "
     "insurance.")
 _K1409_P15_VS_P12_DISJOINT = (
-    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
 assert _K1409_P15_VS_P12_DISJOINT, (
     "K-1417 P15 skinny_N512 K-COMPLEMENT EXTENSION cell overlaps K-1361 P12 "
     "square_mid; P12 cells use M=N=K ∈ {2048, 4096}; P15 cells all use N=512 "
     "— natural disjointness, asserted for completeness (A4 no-double-admit).")
 _K1409_P15_VS_K1367_P13_DISJOINT = (
-    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT.isdisjoint(
         _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
 assert _K1409_P15_VS_K1367_P13_DISJOINT, (
     "K-1417 P15 skinny_N512 cell overlaps K-1367 P13 skinny_N128; P13(N=128) "
     "cells use N=128, P15 cells use N=512 — natural disjointness, asserted "
     "for completeness (A4 sibling-N firewall).")
 _K1409_P15_VS_K1397_P13_DISJOINT = (
-    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT.isdisjoint(
         _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
 assert _K1409_P15_VS_K1397_P13_DISJOINT, (
     "K-1417 P15 skinny_N512 cell overlaps K-1397 P13 skinny_N256; P13(N=256) "
@@ -1338,7 +1338,7 @@ assert _K1409_P15_VS_K1397_P13_DISJOINT, (
 
 def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
     """K-1417 P15 — direct hipBLASLt route-OUT for the 12-cell skinny_N512
-    K-COMPLEMENT EXTENSION cohort (`_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12`).
+    K-COMPLEMENT EXTENSION cohort (`_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT`).
 
     Returns True iff (M, N, K, dtype) matches one of the 12 strict-equality
     keys: M ∈ {2048, 4096, 8192} × N = 512 × K ∈ {2048, 32768} ×
@@ -1362,7 +1362,7 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12
+        in _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT
     )
 
 

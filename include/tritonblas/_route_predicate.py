@@ -3223,3 +3223,11 @@ _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29 = frozenset(
     (M, 64, K, dt) for M in (2048, 4096, 8192)
     for K in (2048, 4096, 8192, 16384, 32768) for dt in ("torch.bfloat16", "torch.float16")
 ) - frozenset({(2048, 64, 4096, "torch.float16")})
+
+
+# C07_BK128_kp2 tile-config override (21st-slot) — JIT-search winner at M=N=2048
+# K-COMPL mid-K (BLK_K 64→128, kpack 1→2; 32KB LDS headroom). Fallback path —
+# alias-subset of P26 N=2048 route-OUT (production routes to hipBLASLt first).
+_K1721_C07_BK128_KP2_MN2048_KCOMPL_8 = frozenset(
+    (2048, 2048, K, dt) for K in (2048, 4096, 8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16"))

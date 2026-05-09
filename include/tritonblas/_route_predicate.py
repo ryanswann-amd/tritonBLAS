@@ -3239,3 +3239,21 @@ _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 = frozenset(
 )
 # Cardinality (==34) gated by tests/test_k1748_p30_skinny_nmid_alias_stack.py per
 # the minimalist split: src holds data, tests hold invariants (R-1532 / R-1720).
+
+# P31 (22nd-slot): N=256 K-COMPLEMENT verified-winner subset — 28 cells (the
+# 30-cell M ∈ {2048,4096,8192} × N=256 × K ∈ {2048,4096,8192,16384,32768} ×
+# {bf16,fp16} cohort minus 2 paired-n30 LOSER cells at (M=2048, K=2048): TB-native
+# beats hipBLASLt by 2% in bfloat16 (HBL/TB=0.98) and ties in float16 (HBL/TB=1.02,
+# p=0.79 — fails the strict ≥1.05 ∧ p<0.05 gate).
+# 28-cell winner subset paired n=30 hot-cache HIP-graph TB-native-vs-HBL on MI300X
+# (route-OUT ablated): geomean HBL/TB = 1.392×, range 1.07×–2.12×, 28/28 pass the
+# ≥1.05 ∧ p<0.05 gate; full-cohort geomean (all 30) = 1.359×, 28/30 pass the gate.
+_P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28 = frozenset(
+    (M, 256, K, dt) for M in (2048, 4096, 8192)
+    for K in (2048, 4096, 8192, 16384, 32768) for dt in ("torch.bfloat16", "torch.float16")
+) - frozenset({
+    (2048, 256, 2048, "torch.bfloat16"),
+    (2048, 256, 2048, "torch.float16"),
+})
+# Cardinality (==28) gated by tests/test_p31_skinny_n256_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

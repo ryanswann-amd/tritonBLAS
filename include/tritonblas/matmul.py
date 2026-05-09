@@ -111,6 +111,10 @@ from ._route_predicate import (
     # K-1748 P30 (21st-slot): skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT
     # alias-stack — 34 K-1711 admit cells (closes 0/34 live-oracle gap).
     _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
+    # P31 (22nd-slot): N=256 K-COMPLEMENT verified-winner subset — 28 cells
+    # (M ∈ {2048,4096,8192} × N=256 × K ∈ {2048,4096,8192,16384,32768} ×
+    # {bf16,fp16} minus 2 paired-n30 LOSER cells at (2048, 256, 2048, *)).
+    _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28,
 )
 
 
@@ -369,6 +373,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # post-K-1709 oracle had 0/34 cells active; K-1720 (parallel branch off K-1685) never
     # merged into K-1709 lineage.  Ship at 21st slot per K-1709/K-1720 disjoint-N rationale.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34: return True
+    # P31 (22nd-slot): N=256 K-COMPLEMENT verified-winner subset — 28 cells (TB-native
+    # vs HBL-native paired n=30 hot-cache HIP-graph on MI300X with route-OUT ablated:
+    # geomean HBL/TB = 1.392×, range 1.07×–2.12×, 28/28 cells pass the strict
+    # ≥1.05 ∧ p<0.05 gate; the 2 (M=2048, K=2048) LOSER cells are excluded).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28: return True
     return False
 
 

@@ -44,6 +44,10 @@ from ._route_predicate import (
     # (11th-position).
     _k1437_p17_skinny_n1024_kcompl_ext_routeout
         as _R_K1437_P17_skinny_n1024_kcompl_ext_routeout,
+    # K-1472 (S-002): P19 skinny_N4096 K-COMPLEMENT 28-cell route-OUT
+    # (12th-position).
+    _k1472_p19_skinny_n4096_kcompl_routeout
+        as _R_K1472_P19_skinny_n4096_kcompl_routeout,
 )
 
 
@@ -166,6 +170,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # with all P1–P16 sub-frozensets via cross-frozenset asserts at module
     # load.
     if _R_K1437_P17_skinny_n1024_kcompl_ext_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1472 (S-002): P19 skinny_N4096 K-COMPLEMENT 28-cell route-OUT (12th-position
+    # envelope).  Stacks AFTER K-1437 P17 per K-1175 stacked-predicate convention;
+    # extends the K-COMPLEMENT methodology one N-tier above K-1438 (P17 N=2048)
+    # to the N=4096 column-narrow regime.  Bucket rule: M ∈ {2048,4096,8192} ×
+    # N=4096 × K ∈ {2048,4096,8192,16384,32768} × {bf16,fp16} EXCEPT the 2
+    # (4096,4096,4096,*) cells already claimed by K-1361 P12 square_mid; 30 - 2
+    # = 28 cells.  K-1472 paired n=30 + B=10000 vectorised bootstrap CI95 on
+    # MI300X gfx942 (mgmt-node 10.245.143.42 fallback during c42 .43 SSH outage):
+    # 28/28 ROUTE-OUT, cohort geomean tb/hbl = 1.428×, min CI95-lo = 1.092 at
+    # (4096,4096,8192,fp16), range 1.099×–3.790× (max at (2048,4096,2048,bf16)
+    # small-K starvation).  Mechanism: TB persistent_matmul BK tile selection is
+    # misaligned with K-divisibility for the N=4096 column-narrow tile layout,
+    # causing waste iters or LDS bank conflicts (K-913 §3 lesson broadened to
+    # N=4096); hipBLASLt's split-K kernel selection wins.  Disjoint by
+    # construction with all P1–P17 sub-frozensets via cross-frozenset asserts at
+    # module load (P12 collision avoided by the explicit 4096³ exclusion).
+    if _R_K1472_P19_skinny_n4096_kcompl_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

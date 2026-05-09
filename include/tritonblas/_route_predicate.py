@@ -1444,6 +1444,23 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
 #   * K-1397 P13 — uses N=256.
 #   * K-1409 P15 (K-1417) — uses N=512.
 # All asserted at module load.
+#
+# EXTREMES-region paired-n=30 provenance (independent confirmation, MI300X
+# gfx942, B=10000 vectorised paired bootstrap CI95).  These 12 K-axis
+# EXTREMES cells (K ∈ {2048, 32768}) form a sub-region of the EXTENSION
+# block above and were re-measured under an independent paired-n=30 sweep
+# that confirmed 12/12 ROUTE-OUT under the strict ≥1.05 gate; cohort
+# geomean tb/hbl ≈ 1.6× (range 1.10×–4.87×); min CI95-lo ≈ 1.08 at
+# (2048, 1024, 2048, fp16) — the small-K small-M canary corner — and max
+# ratio_median ≈ 4.87× at (8192, 1024, 32768, bf16) — the long-K large-M
+# LDS-BC peak.  The EXTREMES sub-region is admitted by P16 at this
+# 10th-position branch via the unified BASE+EXTENSION frozenset above; no
+# separate predicate is required.  The independent EXTREMES measurement
+# is recorded here as documentation-only provenance against any future
+# BASE-only roll-back (the historical N=128/256/512 BASE/EXTENSION split
+# convention).  Per-cell EXTREMES paired ratios: see CSV
+# `output/k1437_p17_n1024_extremes_per_cell.csv` in the originating
+# task workspace.
 # ---------------------------------------------------------------------------
 _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29 = frozenset({
     # === BASE region (K ∈ {4096, 8192, 16384}) — 17 admit cells (1 reject)

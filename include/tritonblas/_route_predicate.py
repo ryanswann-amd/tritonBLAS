@@ -3260,3 +3260,25 @@ _K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36 = frozenset(
 )
 # Cardinality (==36) gated by tests/test_k1753_p31_skinny_n32_n48_n80_fp16_kcompl_routeout.py
 # per the K-1748 minimalist split: src holds data, tests hold invariants.
+
+
+# K-1800 P32 (23rd-slot): N=192 fp16 K-COMPLEMENT alias-stack — closes the
+# dtype-mirror gap left by R-K979 P5 Clause-3 (bf16-only, minMN ≤ 192 ∧
+# K ≥ 2048).  9 fp16 cells alias the bf16 row that P5 Clause-3 routes-OUT
+# upstream; bf16 path is unchanged (P5 catches first at chain pos 4).
+# Audit (K-1800, post-K-1782 paired n=30 HIP-graph hot-cache, MI300X gfx942
+# c42 down INFRA-0048): 9/9 fp16 cells satisfy the
+# strict K-1800 ship gate (HBL median ≥ 1.05× TB-direct AND paired t-test
+# p < 0.05); cohort fp16 ratio_oracle geomean = 0.667× (HBL ~1.50× faster).
+# Mechanism per K-1781 PMC RCA: K-913 sec-3 LDS-bank-conflict on the
+# N=192 column-narrow LDS layout is dtype-invariant (K-1629/K-1673 audit
+# chain), so the bf16 ratio extends cleanly to fp16.  Sibling-N disjoint
+# vs P28 (N=128) and P21 (N=256) by N-axis projection (verified by 6-cell
+# adjacency guard band, K-1800 §4).
+_K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9 = frozenset(
+    (M, 192, K, "torch.float16")
+    for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384)
+)
+# Cardinality (==9) gated by tests/test_k1800_p32_skinny_n192_fp16_kcompl_aliasstack.py
+# per the K-1748 minimalist split: src holds data, tests hold invariants.

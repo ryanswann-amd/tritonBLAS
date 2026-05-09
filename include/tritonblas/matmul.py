@@ -115,6 +115,9 @@ from ._route_predicate import (
     # route-OUT — 36 fp16-only admit cells (cohort fp16 geomean 2.965×; bf16
     # already covered by R-K979 P5 Clause-3 upstream in the dispatch chain).
     _K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36,
+    # K-1800 P32 (23rd-slot): N=192 fp16 K-COMPLEMENT alias-stack — 9 cells
+    # closing the dtype-mirror gap left by R-K979 P5 Clause-3's bf16-only gate.
+    _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9,
 )
 
 
@@ -379,6 +382,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # bf16 cells are already routed-OUT upstream by R-K979 P5 Clause-3, so this slot is
     # fp16-only — first such instance in the alias-stack chain.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36: return True
+    # K-1800 P32 (23rd-slot): N=192 fp16 K-COMPLEMENT alias-stack (9 fp16 cells;
+    # cohort fp16 geomean 0.667× pre-route → ≈1.0× post-route).  Closes dtype-
+    # mirror gap left by R-K979 P5 Clause-3's bf16-only gate (sibling bf16 row
+    # already routed-OUT upstream at chain pos 4).  Verified by K-1800 paired
+    # n=30 HIP-graph hot-cache + 6-cell N∈{128,256} adjacency guard band.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9: return True
     return False
 
 

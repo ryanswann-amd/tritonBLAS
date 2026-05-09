@@ -1901,6 +1901,28 @@ def _k1493_p20_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# P21 (K-1513) — skinny_N32768 K-COMPLEMENT 30-cell route-OUT, 14th-position.
+# Cells: M ∈ {2048,4096,8192} × N=32768 × K ∈ {2048,4096,8192,16384,32768} ×
+# {bf16,fp16}. 30/30 admit at strict ratio_median ≥ 1.05 ∧ bootstrap
+# p(<1.05) < 0.01 (MI300X/gfx942 paired n=30, B=10000 bootstrap; cohort
+# geomean tb/hbl = 1.170×). Naturally disjoint with the prior 13-predicate
+# stack by sibling-N firewall (P21 N=32768; all priors at N ∈ {128,256,512,
+# 1024,16384} or M=N square anchors). Disjointness invariants enforced as
+# pytest unit tests in tests/test_k1513_p21_skinny_n32768_kcompl_routeout.py.
+_K1513_P21_SKINNY_N32768_KCOMPL_ROUTEOUT_30 = frozenset(
+    (M, 32768, K, dt)
+    for M in (2048, 4096, 8192)
+    for K in (2048, 4096, 8192, 16384, 32768)
+    for dt in ("torch.bfloat16", "torch.float16")
+)
+assert len(_K1513_P21_SKINNY_N32768_KCOMPL_ROUTEOUT_30) == 30
+
+
+def _k1513_p21_skinny_n32768_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """P21 K-1513 14th-position route-OUT — see frozenset header comment."""
+    return (int(M), int(N), int(K), str(dtype)) in _K1513_P21_SKINNY_N32768_KCOMPL_ROUTEOUT_30
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1930,6 +1952,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      13. K-1493 P20 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt
          (alias-stack of K-1478 P19 at the 13th-position; unreachable while
          P19 is enabled, claimed for K-COMPLEMENT-EXTENDED future iteration).
+     14. P21 skinny_N32768 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt
+         (next N-ladder rung above P19 N=16384; 30/30 admit, cohort geomean
+         tb/hbl=1.170× range 1.056×-1.436×).
     """
     if disable_env_set:
         return False
@@ -2030,5 +2055,8 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # the 13th-position slot for K-COMPLEMENT-EXTENDED follow-up; load-bearing
     # if P19 is ever ablated).
     if _k1493_p20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # P21 K-1513 (14th-position): skinny_N32768 K-COMPLEMENT 30-cell route-OUT.
+    if _k1513_p21_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

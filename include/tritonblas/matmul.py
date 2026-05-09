@@ -56,6 +56,8 @@ from ._route_predicate import (
     # unreachable while P19 is enabled — by design (claims the 13th-position
     # slot for the K-COMPLEMENT-EXTENDED follow-up).
     _k1493_p20_skinny_n16384_routeout as _R_K1493_P20_skinny_n16384_routeout,
+    # K-1513 P21 skinny_N32768 K-COMPLEMENT 30-cell route-OUT (14th-position).
+    _k1513_p21_skinny_n32768_routeout as _R_K1513_P21_skinny_n32768_routeout,
 )
 
 
@@ -194,6 +196,8 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # the 13th-position slot for K-COMPLEMENT-EXTENDED follow-up; load-bearing
     # if P19 is ever ablated).
     if _R_K1493_P20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1513 P21 (14th-position): skinny_N32768 K-COMPLEMENT 30-cell route-OUT.
+    if _R_K1513_P21_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

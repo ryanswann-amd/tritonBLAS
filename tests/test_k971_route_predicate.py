@@ -88,13 +88,22 @@ K950_LAND_CELLS = [
     ("L09", 1024, 1024, 16384, torch.float16,  "C9-cohortA-longK-HBLroute"),
 ]
 
-# Tuples where K-905 anchor table intentionally routes to hbl despite the
-# K-950 LAND verdict (K-905 measurement overrides — documented in the PR
-# description).
+# Tuples where a downstream measurement-override frozenset intentionally
+# routes to hbl despite the K-950 LAND verdict (each entry is documented in
+# the originating PR description as a measurement override of the K-950 LAND
+# heuristic — first introduced for K-905 anchor-table cells, extended later
+# for K-1361 P12 SQUARE_MID and K-1563 P24 N=4096 K-COMPLEMENT productionised
+# slots).
 K950_ANCHOR_COLLISIONS = frozenset({
-    (1024, 1024, 16384, "torch.bfloat16"),  # L07
-    (1024, 1024, 16384, "torch.float16"),   # L09
-    (2048, 2048, 16384, "torch.float16"),   # L06
+    (1024, 1024, 16384, "torch.bfloat16"),  # L07 — K-905 anchor table
+    (1024, 1024, 16384, "torch.float16"),   # L09 — K-905 anchor table
+    (2048, 2048, 16384, "torch.float16"),   # L06 — K-905 anchor table
+    # K-1563 P24 (16th-position) measurement override: K-1553 paired n=30
+    # HIP-graph hot-cache MI300X gfx942 measured (4096,4096,8192,bf16) at
+    # ratio_median = 1.137× (CI95 [1.129, 1.140]) — supersedes the K-950
+    # LAND verdict for this cell.  Productionised as part of the K-1563
+    # 30-cell skinny_N4096 K-COMPLEMENT route-OUT cohort.
+    (4096, 4096,  8192, "torch.bfloat16"),  # L08 — K-1563 P24 N=4096
 })
 
 

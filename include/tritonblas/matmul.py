@@ -65,6 +65,14 @@ from ._route_predicate import (
     # load-bearing only if any upstream layer is ablated.
     _k1552_p23_skinny_n512_kcompl_aliasstack_routeout
         as _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout,
+    # K-1563 (S-002): P24 skinny_N4096 K-COMPLEMENT 30-cell route-OUT
+    # (16th-position) — closes the last gap in the K-COMPLEMENT N-ladder
+    # at N=4096 on the full K-grid.  30/30 ROUTE-OUT-CANDIDATE under K-1553
+    # paired n=30 HIP-graph hot-cache MI300X measurement; cohort geomean
+    # tb/hbl = 1.234×, range 1.114×–1.501×.  28/30 load-bearing; 2/30
+    # (4096,4096,4096,bf16/fp16) aliased to K-1361 P12 SQUARE_MID.
+    _k1563_p24_skinny_n4096_kcompl_aliasstack_routeout
+        as _R_K1563_P24_skinny_n4096_kcompl_aliasstack_routeout,
 )
 
 
@@ -221,6 +229,19 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # longK_smallSquare LDS-bank-conflict signature on the persistent_matmul
     # N=512 tile, opposite to the R-1478 #1 N-axis attenuation trajectory.
     if _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1563 P24 (16th-position): skinny_N4096 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P23 per the K-1175 stacked-predicate convention; closes
+    # the last gap in the K-COMPLEMENT N-ladder at N=4096 on the full K-grid
+    # {2048,4096,8192,16384,32768}.  K-1553 paired n=30 HIP-graph hot-cache
+    # MI300X gfx942 measurement against the LIVE post-K-1532 oracle: 30/30
+    # ROUTE-OUT-CANDIDATE under the K-1553 admit gate; cohort geomean tb/hbl
+    # = 1.234×, range 1.114×-1.501×.  Productionised under the K-1563 gate
+    # (cohort geomean ≥ 1.0× ∧ per-cell speedup ≥ 0.95×; both clear).  The
+    # 28/30 cells where no upstream layer fires are load-bearing; the 2/30
+    # cells (4096,4096,4096,bf16/fp16) overlap with K-1361 P12 SQUARE_MID
+    # at the 6th position (documented partial alias).  Cumulative N-ladder
+    # coverage now spans N ∈ {128,256,512,1024,4096,16384,32768}.
+    if _R_K1563_P24_skinny_n4096_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

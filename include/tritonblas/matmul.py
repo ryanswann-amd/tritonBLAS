@@ -40,6 +40,10 @@ from ._route_predicate import (
     # K-1433 (S-002): P16 skinny_N1024 K-COMPLEMENT BASE 18-cell route-OUT
     # (10th-position).
     _k1433_p16_skinny_n1024_routeout as _R_K1433_P16_skinny_n1024_routeout,
+    # K-1437 (S-002): P17 skinny_N1024 K-COMPLEMENT EXTENDED 12-cell route-OUT
+    # (11th-position).
+    _k1437_p17_skinny_n1024_kcompl_ext_routeout
+        as _R_K1437_P17_skinny_n1024_kcompl_ext_routeout,
 )
 
 
@@ -146,6 +150,22 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # N=1024 BASE.  Disjoint by construction with all P1–P15 sub-frozensets
     # via cross-frozenset asserts at module load.
     if _R_K1433_P16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1437 (S-002): P17 skinny_N1024 K-COMPLEMENT EXTENDED 12-cell route-OUT
+    # (11th-position envelope).  Stacks AFTER K-1433 P16 per K-1175 stacked-
+    # predicate convention; productionises the EXTREMES sibling of K-1433 P16
+    # at N=1024, covering K ∈ {2048, 32768} where (a) at K=2048 tritonblas
+    # persistent_matmul tile parallelism is starved at the N=1024 column-narrow
+    # tile layout and (b) at K=32768 the persistent_matmul kernel saturates
+    # SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS ≈ 1.78 cyc/inst (K-913 §3 long-K
+    # small-square cohort lesson, specialised to N=1024).  Paired n=30 +
+    # B=10000 vectorised bootstrap CI95 on c42 / MI300X gfx942: 12/12
+    # ROUTE-OUT, cohort geomean tb/hbl = 1.612×, min CI95-lo = 1.078,
+    # range 1.108×–4.872×; envelope grows 115 → 127 cells.  K-1433 BASE
+    # + K-1437 EXTENDED jointly partition the N=1024 column K-mesh
+    # exhaustively for M ∈ {2048, 4096, 8192}.  Disjoint by construction
+    # with all P1–P16 sub-frozensets via cross-frozenset asserts at module
+    # load.
+    if _R_K1437_P17_skinny_n1024_kcompl_ext_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

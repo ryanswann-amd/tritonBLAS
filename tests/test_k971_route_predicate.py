@@ -1121,3 +1121,108 @@ def test_k1194_p8_arch_guard_admits_28_cells_iff_mi300x(
     for cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
         assert _rp._p8_mfma_issue_stall_routeout(*cell) is expected_admit, (
             f"K-1194 arch-guard violated for {cell} on {device_name!r}")
+
+
+# ---------------------------------------------------------------------------
+# K-1194 failsafe paths — pinned per reviewer "Skeptic" + "Testing Zealot".
+# Asymmetric failsafe: no-torch / CPU-only -> True (logic-only contract;
+# no GPU dispatch can misfire); CUDA-available probe-raises -> False
+# (FAIL-CLOSED; could be MI325X / MI355X with transient ROCm error).
+# ---------------------------------------------------------------------------
+def test_k1194_arch_guard_failsafe_no_torch_returns_true(monkeypatch):
+    """K-1194 ImportError failsafe: when ``import torch`` raises (logic-only
+    test context, no torch installed), the arch-guard returns True so the
+    bf16 + 28-cell strict-equality table remains verifiable.  No GPU
+    dispatch can occur in this branch, so the verdict is moot for routing.
+
+    Implementation note: setting ``sys.modules['torch'] = None`` makes
+    Python's import machinery raise ImportError on subsequent ``import
+    torch`` calls (this is the documented mechanism for explicitly
+    masking a module)."""
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert _rp._is_mi300x() is True
+    # All 28 strict-equality cells remain verifiable:
+    for cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
+        assert _rp._p8_mfma_issue_stall_routeout(*cell) is True, (
+            f"K-1194 no-torch failsafe broke pin for {cell}")
+
+
+def test_k1194_arch_guard_failsafe_cpu_only_returns_true(monkeypatch):
+    """K-1194 CPU-only failsafe: when ``torch.cuda.is_available()`` is
+    False (CPU-only host, e.g. CI runner without a GPU), the arch-guard
+    returns True for the same logic-only-contract reason as the
+    no-torch path.  No GPU dispatch can happen here either."""
+    class _FakeCuda:
+        @staticmethod
+        def is_available(): return False
+        @staticmethod
+        def current_device():
+            raise AssertionError("must not be called when is_available()=False")
+        @staticmethod
+        def get_device_name(idx):
+            raise AssertionError("must not be called when is_available()=False")
+
+    class _FakeTorch:
+        cuda = _FakeCuda
+
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    assert _rp._is_mi300x() is True
+
+
+def test_k1194_arch_guard_failsafe_probe_raises_returns_false(monkeypatch):
+    """K-1194 FAIL-CLOSED contract (per reviewer "Skeptic"): when
+    ``torch.cuda.is_available()`` is True but the probe raises (e.g.,
+    ``get_device_name`` fails with a transient ROCm error), the
+    arch-guard returns False and the predicate is SKIPPED.
+
+    This is the load-bearing safety property: a CUDA-available system
+    where probing fails could be MI325X / MI355X, where K-1176 proved
+    0/8 K-floor cells transfer cleanly.  Route-OUT-skipped degrades
+    only to in-kernel Triton (worst case ~ -8.41pp on MI300X);
+    route-OUT-misfired on a non-MI300X gfx942 SKU has zero
+    measurement evidence and is the silent cross-arch failure mode
+    this guard exists to prevent.  The default direction was
+    inverted in the v1 attempt and corrected here."""
+    class _FakeCuda:
+        @staticmethod
+        def is_available(): return True
+        @staticmethod
+        def current_device(): return 0
+        @staticmethod
+        def get_device_name(idx):
+            raise RuntimeError("simulated transient ROCm probe failure")
+
+    class _FakeTorch:
+        cuda = _FakeCuda
+
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    assert _rp._is_mi300x() is False
+    # Predicate must be skipped end-to-end on every one of the 28 cells:
+    for cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
+        assert _rp._p8_mfma_issue_stall_routeout(*cell) is False, (
+            f"K-1194 fail-closed contract violated for {cell}: predicate "
+            f"fired despite probe-raises (would be a silent cross-arch "
+            f"misfire on MI325X / MI355X)")
+
+
+def test_k1194_arch_guard_failsafe_current_device_raises_returns_false(monkeypatch):
+    """K-1194 FAIL-CLOSED for the symmetric probe-failure path: when
+    ``current_device()`` (rather than ``get_device_name()``) raises,
+    the same fail-closed contract applies.  Pinned separately to
+    prevent a future refactor from accidentally re-introducing
+    ``return True`` on this code path."""
+    class _FakeCuda:
+        @staticmethod
+        def is_available(): return True
+        @staticmethod
+        def current_device():
+            raise RuntimeError("simulated current_device failure")
+        @staticmethod
+        def get_device_name(idx):
+            raise AssertionError("must not be reached")
+
+    class _FakeTorch:
+        cuda = _FakeCuda
+
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    assert _rp._is_mi300x() is False

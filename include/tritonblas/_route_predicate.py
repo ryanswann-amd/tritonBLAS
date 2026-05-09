@@ -499,8 +499,19 @@ assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
 # MI300A).  The check is per-call (no caching) so heterogeneous-GPU nodes
 # and HIP_VISIBLE_DEVICES toggled mid-process always see a fresh verdict;
 # the cost is negligible on a dispatch path already dominated by GPU work.
-# Fails-safe to True when torch / CUDA can't be probed so the module's
-# torch-free import contract and logic-only test invariants are preserved.
+#
+# Failsafe policy is asymmetric (fixup-1 per K-1194 reviewer "Skeptic"):
+#   * No torch / CUDA-not-available -> True. There is no GPU dispatch in
+#     this branch; the verdict is moot for routing and we keep the
+#     module's torch-free import + logic-only test invariants intact.
+#   * torch.cuda IS available but probing raises (transient ROCm error,
+#     missing get_device_name impl, etc.) -> False (FAIL-CLOSED). The
+#     active device might be MI325X / MI355X, where K-1176 proved 0/8
+#     K-floor cells transfer cleanly; route-OUT-skipped degrades only
+#     to in-kernel Triton (worst case ~ -8.41pp on MI300X), whereas
+#     route-OUT-misfired on a non-MI300X gfx942 SKU has zero
+#     measurement evidence and is the silent cross-arch failure mode
+#     this guard exists to prevent.
 # ---------------------------------------------------------------------------
 
 
@@ -510,19 +521,36 @@ def _is_mi300x() -> bool:
     Returns True iff ``torch.cuda.get_device_name`` for the active device
     starts with ``"AMD Instinct MI300X"``.  Per-call (no lru_cache) so a
     heterogeneous-GPU node (or HIP_VISIBLE_DEVICES toggled mid-process)
-    always sees a fresh verdict.  Fails-safe to True when torch / CUDA
-    are not probable so the module's torch-free import contract holds
-    (predicate falls back to legacy strict-equality behavior in that case;
-    the bf16 + 28-cell strict-equality table itself is the safety net).
+    always sees a fresh verdict.
+
+    Asymmetric failsafe (see module-level comment above):
+      * ImportError on ``import torch`` or ``cuda.is_available() is False``
+        -> True (preserves torch-free / CPU-only logic-only test
+        contract; no GPU is going to dispatch anyway).
+      * ``cuda.is_available() is True`` but the probe raises -> False
+        (FAIL-CLOSED -- the device might be MI325X / MI355X where
+        route-OUT misfire has no measurement evidence; route-OUT-
+        skipped degrades only to in-kernel Triton).
     """
     try:
         import torch  # local import keeps module torch-free at import time
+    except ImportError:
+        # Torch-free import context (logic-only tests / static analysis).
+        # No GPU dispatch can happen here, so the verdict is moot for
+        # routing; return True to preserve the legacy strict-equality
+        # invariants the in-tree pin tests assert.
+        return True
+    try:
         if not torch.cuda.is_available():
+            # CPU-only context: same logic-only contract as no-torch.
             return True
         name = torch.cuda.get_device_name(torch.cuda.current_device()) or ""
         return name.startswith("AMD Instinct MI300X")
     except Exception:
-        return True
+        # K-1194 fail-closed: probing raised on a CUDA-available system
+        # (possible transient ROCm error on MI325X / MI355X). Skip the
+        # predicate rather than risk a silent cross-arch misfire.
+        return False
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:

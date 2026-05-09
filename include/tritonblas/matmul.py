@@ -25,6 +25,34 @@ MAX_BLOCK_SIZE = 65536
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
+# K-1749 alias-stack slot 21: M=N=8192 K-COMPLEMENT remediation per K-1735.
+# Stream-K (sk_grid=N_CU) closes the gap on K=16384/32768 (K-1735 PROMOTE
+# Angle B1; gmean ratio_vs_HBL 0.9094->0.9996; beats HBL on K=32768 by 12-20%).
+# K=4096 is the K-1641 K-anomaly residual loser (TB persistent path 0.82-0.84x;
+# stream-K only lifts to 0.87-0.90x); routed OUT to hipBLASLt for guaranteed
+# 1.0x on those cells. Per K-1735 sec.5 + K-1699/K-1718 in-kernel-knob menu
+# exhaustion: this is a single mechanism per cell (route-OUT XOR knob-override),
+# never both axes combined inside the kernel (K-1699 lesson).
+_K1749_GATE_M = _K1749_GATE_N = 8192
+_K1749_GATE_DTYPES = (torch.float16, torch.bfloat16)
+_K1749_SK_GRID_N_CU = 304          # MI300X CU count (== streamk persistent geometry sweet spot)
+_K1749_STREAMK_K = frozenset({16384, 32768})
+_K1749_HBL_ROUTE_K = frozenset({4096})
+
+
+def _k1749_dispatch(M, N, K, dtype):
+    """Return ('streamk', sk_grid) | ('hbl', None) | None for K-1749 cohort."""
+    if (M != _K1749_GATE_M or N != _K1749_GATE_N
+            or dtype not in _K1749_GATE_DTYPES):
+        return None
+    if K in _K1749_STREAMK_K:
+        return ("streamk", _K1749_SK_GRID_N_CU)
+    if K in _K1749_HBL_ROUTE_K:
+        return ("hbl", None)
+    return None
+
+
+
 
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
@@ -402,6 +430,12 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    _k1749 = _k1749_dispatch(M, N, K, a.dtype)
+    if _k1749 is not None:
+        if _k1749[0] == "hbl":
+            return torch.matmul(a, b)
+        enable_streamk, sk_grid = True, _k1749[1]
+
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -460,6 +494,13 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    _k1749 = _k1749_dispatch(M, N, K, a.dtype)
+    if _k1749 is not None:
+        if _k1749[0] == "hbl":
+            torch.matmul(a, b, out=out)
+            return None
+        enable_streamk, sk_grid = True, _k1749[1]
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

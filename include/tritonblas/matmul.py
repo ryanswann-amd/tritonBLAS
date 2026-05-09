@@ -145,6 +145,13 @@ from ._route_predicate import (
     # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
     # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
     _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
+    # P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 17 cells
+    # (M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
+    # cells, MINUS (2048,352,4096,bf16) which is already routed by an upstream
+    # alias-stack slot per K-1843 paired-n30 measurement; ratio_TB/HBL=1.0031,
+    # p=0.167, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
+    # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.481×.
+    _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17,
 )
 
 
@@ -469,6 +476,26 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
     # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
     if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
+    # P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 17 cells from
+    # K-1843's N=352 sub-cohort (M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}) MINUS (2048,352,4096,bf16) which is already upstream-routed
+    # per the K-1843 paired-n30 measurement (ratio 1.0031, p=0.167, classified
+    # WITHIN_0p95X_PARITY_BAND).  K-1843 paired n=30 HIP-graph hot-cache + 3-pass
+    # rocprofv2 PMC sweep (LDS / VALU·MFMA / VMEM·L2) on MI300X / gfx942 vs the
+    # K-1825 LIVE oracle (d061410 + P32–P34 stacked): 17/17 cells admitted at the
+    # strict ≥1.05× ∧ p<0.05 gate; per-cell ratios 1.215×–1.784× (median 1.545×),
+    # per-N geomean = 1.481×.  Both dtype rows load-bearing — closes the
+    # wave-misaligned N=352 dtype-mirror (BLOCK_N=128 packs N=352 into the
+    # off-by-96 wave-misaligned column-narrow layout above the K-1850 P36 N=320
+    # rung and below the K-1748 P30 N=384 rung; N%64 = 32 ≠ 0 on MI300X CDNA3
+    # wave64 → partial-wave epilogue stalls in tritonblas persistent_matmul that
+    # hipBLASLt's split-K Tensile assembly avoids → K-913 §3 LDS-bank-conflict +
+    # R-1811 wave-misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
+    # histogram: LDS_DOMINANT 36/36 across the K-1843 N∈{320,352} cohort, with
+    # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (cohort MAX 25.27× lands at
+    # (2048,352,16384,bf16) — the worst N=352 cell); same SCHEDULER_LDS A4
+    # failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17: return True
     return False
 
 

@@ -3423,3 +3423,74 @@ _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset({
 })
 # Cardinality (==17) gated by tests/test_p36_skinny_n320_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 17 cells from
+# K-1843's N=352 sub-cohort = M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384}
+# × {bf16,fp16} = 18 cells, MINUS (2048, 352, 4096, "torch.bfloat16") which is
+# already routed by an upstream alias-stack slot (K-1843 paired-n30 measurement
+# on the LIVE oracle: ratio_TB/HBL = 1.0031, p = 0.167, classified
+# WITHIN_0p95X_PARITY_BAND — TB and HBL paths converge on the same kernel).
+# Per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST, that already-routed cell
+# is excluded from P37 to avoid duplicate routing.
+#
+# K-1843 paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep
+# (LDS / VALU·MFMA / VMEM·L2; 108 cell-engine-pass datapoints) on MI300X /
+# gfx942 (OCI MI300X fallback per INFRA-0048): bf16 N=352 unrouted 8/9 and
+# fp16 N=352 unrouted 9/9 in the pre-stack measurement against the K-1825
+# LIVE oracle (d061410 + P32–P34 stacked).  All 17 admit cells gate-pass at
+# the strict ratio_TB/HBL ≥ 1.05 ∧ scipy.stats.ttest_rel p < 0.05 floor;
+# per-cell ratios span 1.215×–1.784× (median ≈ 1.545×), per-N geomean = 1.481×.
+#
+# Mechanism (K-913 §3 LDS-bank-conflict, dtype-invariant per R-K1673 +
+# R-1811 wave-misalignment): BLOCK_N=128 packs N=352 into wave-misaligned
+# K-block columns (off-by-96 N rung above N=256, two-and-three-quarter
+# BLOCK_N tiles per N-row; N%64 = 32 ≠ 0 so the third partial tile column
+# stalls on a partial wave on MI300X CDNA3 wave64 → tritonblas
+# persistent_matmul epilogue cannot retire a clean wave on the tail
+# column).  K-1843 PMC delta ranking confirms LDS_DOMINANT in 36/36 cells
+# of the N∈{320,352} cohort with lds_wait_ratio_TB/HBL spanning
+# 1.96×–25.27× (median ≈ 8.5×; the cohort MAX 25.27× lands at
+# (2048, 352, 16384, bf16) — the worst N=352 cell), MFMA per-wave ratio
+# everywhere ≤ 0.96× (TB does *less* MFMA per wave; not the limiter),
+# VMEM per-wave ratio mostly ≤ 1.0 (rules out memory-bandwidth as the gap
+# mechanism).  Same SCHEDULER_LDS A4 failure mode as the K-1681 / K-1710 /
+# K-1781 / K-1812 / K-1824 / K-1832 wave-misaligned skinny-N class.
+# hipBLASLt's split-K Tensile assembly avoids the partial-wave epilogue
+# stall and clears the band by ~48% on average (geomean 1.481× over
+# pre-stack TB-native per K-1843).
+#
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536}), K-1775 P31 (N=256), K-1810 P32 (N=160),
+# K-1817 P33 (N=224), K-1831 P34 (N=96), K-1837 P35 (N=288), K-1850 P36
+# (N=320) — now applied to N=352 (the off-by-96 wave-misaligned rung
+# between the K-1850 P36 N=320 rung and the K-1748 P30 N=384 rung,
+# completing contiguous wave-misaligned N-ladder coverage at
+# N ∈ {96, 160, 224, 288, 320, 352}).
+#
+# Sibling-N firewall: N=352 is disjoint from every prior slot's N-axis
+# projection (P5, P13, P21, P28-P36) — natural N-axis separator, asserted
+# at module load by tests/test_p37_skinny_n352_alias_stack.py.
+_P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17 = frozenset({
+    # M=2048 (excludes the (2048, 352, 4096, "torch.bfloat16") upstream alias)
+    (2048, 352,  8192, "torch.bfloat16"),  # r=1.620 p<1e-6
+    (2048, 352, 16384, "torch.bfloat16"),  # r=1.784 p<1e-6  WORST cohort lds_wait 25.27×
+    (2048, 352,  4096, "torch.float16"),   # r=1.349 p<1e-6
+    (2048, 352,  8192, "torch.float16"),   # r=1.545 p<1e-6
+    (2048, 352, 16384, "torch.float16"),   # r=1.762 p<1e-6
+    # M=4096 (full bf16 + fp16 grid, no upstream alias overlap)
+    (4096, 352,  4096, "torch.bfloat16"),  # r=1.418 p<1e-6
+    (4096, 352,  8192, "torch.bfloat16"),  # r=1.617 p<1e-6
+    (4096, 352, 16384, "torch.bfloat16"),  # r=1.699 p<1e-6
+    (4096, 352,  4096, "torch.float16"),   # r=1.435 p<1e-6
+    (4096, 352,  8192, "torch.float16"),   # r=1.570 p<1e-6
+    (4096, 352, 16384, "torch.float16"),   # r=1.673 p<1e-6
+    # M=8192 (full bf16 + fp16 grid, no upstream alias overlap)
+    (8192, 352,  4096, "torch.bfloat16"),  # r=1.236 p<1e-6
+    (8192, 352,  8192, "torch.bfloat16"),  # r=1.419 p<1e-6
+    (8192, 352, 16384, "torch.bfloat16"),  # r=1.641 p<1e-6
+    (8192, 352,  4096, "torch.float16"),   # r=1.215 p<1e-6
+    (8192, 352,  8192, "torch.float16"),   # r=1.349 p<1e-6
+    (8192, 352, 16384, "torch.float16"),   # r=1.601 p<1e-6
+})
+# Cardinality (==17) gated by tests/test_p37_skinny_n352_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

@@ -3223,3 +3223,18 @@ _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29 = frozenset(
     (M, 64, K, dt) for M in (2048, 4096, 8192)
     for K in (2048, 4096, 8192, 16384, 32768) for dt in ("torch.bfloat16", "torch.float16")
 ) - frozenset({(2048, 64, 4096, "torch.float16")})
+
+# K-1748 P30 (21st-slot): K-1711 N-mid (N ∈ {384, 768, 1536}) K-COMPLEMENT
+# alias-stack, 34 cells (10 / 14 / 10 per N).  Audit (K-1748): post-K-1709
+# oracle had 0/34 active (K-1720 was a parallel K-1685 branch never merged).
+# Sibling-N disjoint vs P29 (N=64) and vs P16 (N=1024 covered control).
+# K-1711 paired n=30 HIP-graph hot-cache MI300X (geomean 1.456×, 1.18-1.83×).
+_K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 = frozenset(
+    (M, N, K, dt) for (M, N, K) in (
+        (2048,384,8192),(2048,384,32768),(4096,384,8192),(4096,384,32768),(8192,384,32768),
+        (2048,768,8192),(2048,768,32768),(4096,768,8192),(4096,768,32768),
+        (8192,768,2048),(8192,768,8192),(8192,768,32768),
+        (2048,1536,32768),(4096,1536,2048),(4096,1536,8192),(4096,1536,32768),(8192,1536,32768),
+    ) for dt in ("torch.bfloat16", "torch.float16")
+)
+assert len(_K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34) == 34

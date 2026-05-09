@@ -108,6 +108,9 @@ from ._route_predicate import (
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
     # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack — 29 K-1709 admit cells.
     _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29,
+    # K-1748 P30 (21st-slot): skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT
+    # alias-stack — 34 K-1711 admit cells (closes 0/34 live-oracle gap).
+    _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
 )
 
 
@@ -361,6 +364,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack (29 cells; cohort geomean tb_forced/hbl=1.93×).
     if (int(M), int(N), int(K), str(a_dtype)) in _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29: return True
+    # K-1748 P30 (21st-slot): skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT alias-stack
+    # (34 K-1711-verified cells; cohort geomean 1.456×, range 1.18×-1.83×).  Audit:
+    # post-K-1709 oracle had 0/34 cells active; K-1720 (parallel branch off K-1685) never
+    # merged into K-1709 lineage.  Ship at 21st slot per K-1709/K-1720 disjoint-N rationale.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34: return True
     return False
 
 

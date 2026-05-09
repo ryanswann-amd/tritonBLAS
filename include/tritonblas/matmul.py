@@ -22,6 +22,21 @@ current_device = torch.cuda.get_device_properties(current_device_index)
 MAX_SMS = current_device.multi_processor_count
 MAX_BLOCK_SIZE = 65536
 
+
+# K-1675: split-K=2 + LDS-double-buffer hypothesis (K-1654 F1+F3) FALSIFIED
+# on the M=N=4096 mid-K loser envelope (K in {4096, 8192} x {bf16, fp16}).
+# Hardware paired n=30 HIP-graph hot-cache bench on MI300X (gfx942, ROCm
+# 7.2 / Triton 3.6.0+rocm7.2.0): primary patch (BM=BN=256, BK=32, ns=3)
+# regressed the cohort by -16.5% (geomean hbl/tb 0.946 -> 0.790); 8/8
+# alternative (BM, BN, BK, ns) configurations explored regressed the
+# Origami baseline by 14-17%. The brief's >=0.95x geomean gate is
+# unattainable in the explored frontend-tunable knob space -- closing
+# the LDS-pipeline-bubble residual requires Tensile-only intrinsics
+# (LDSB1, MIWT4_3, PGR2_PLR1) not exposed by the Triton AMD backend.
+# Same closure pattern as K-1652 (LDS-swizzle, falsified) and the K-913
+# anti-recommendation list. No source change shipped; sweep + paired
+# bench artifacts in mc2-workspaces/K-1675/output/.
+
 _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 

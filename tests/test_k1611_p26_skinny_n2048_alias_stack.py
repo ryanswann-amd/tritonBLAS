@@ -151,16 +151,33 @@ def test_p26_inert_cell_covered_by_upstream(cell):
 
 def test_p26_new_route_out_subset_is_disjoint_from_inert_alias_subset():
     """The 22 NEW route-OUT cells (load-bearing here) and the 8 INERT alias
-    cells (alias of upstream) partition the 30-cell envelope."""
+    cells (alias of upstream) partition the 30-cell envelope.  20 of the 22
+    NEW cells live on M ∈ {4096, 8192}; the remaining 2 NEW cells are the
+    M=2048 row admit cells (2048, 2048, K, fp16) for K ∈ {4096, 8192} where
+    R_K979_P5 Clause-1 routes the K=2048 / K=16384 / K=32768 fp16 rows but
+    leaves the K ∈ {4096, 8192} fp16 cells unrouted (the bf16 siblings ARE
+    in K-1335 / K971 LDS-BC table; the fp16 mid-K mid-rect twins fall
+    through every upstream layer until this 18th-position predicate)."""
     new_route_out = (
         _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
         - _K1611_P26_INERT_ALIAS_CELLS_8
     )
     assert len(new_route_out) == 22
     assert new_route_out.isdisjoint(_K1611_P26_INERT_ALIAS_CELLS_8)
-    # All NEW cells live on M ∈ {4096, 8192}
-    for cell in new_route_out:
-        assert cell[0] in (4096, 8192)
+    # 20 NEW cells live on M ∈ {4096, 8192}; 2 NEW cells are the M=2048
+    # row K∈{4096,8192} fp16 mid-rect outliers.
+    m2048_new = {cell for cell in new_route_out if cell[0] == 2048}
+    assert m2048_new == {
+        (2048, 2048, 4096, "torch.float16"),
+        (2048, 2048, 8192, "torch.float16"),
+    }, (
+        f"unexpected M=2048 NEW cells: {m2048_new}; expected exactly the "
+        "two K∈{4096,8192} fp16 mid-rect cells that fall through every "
+        "upstream layer.")
+    m4_8_new = {cell for cell in new_route_out if cell[0] in (4096, 8192)}
+    assert len(m4_8_new) == 20, (
+        f"M ∈ {{4096, 8192}} NEW set must be exactly 20 cells; got "
+        f"{len(m4_8_new)}.")
 
 
 # ---------------------------------------------------------------------------

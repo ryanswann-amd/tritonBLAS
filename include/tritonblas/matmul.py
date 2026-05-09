@@ -26,6 +26,28 @@ _global_locks = torch.empty(MAX_SMS, device="cuda", dtype=torch.uint8)
 _global_P = torch.empty(MAX_SMS, MAX_BLOCK_SIZE, device="cuda", dtype=torch.float32)
 
 
+# N=160 K-COMPLEMENT mid-K route-OUT: 18 (M, N=160, K, dtype) cells where
+# hipBLASLt is 1.18x-1.81x faster than the in-Triton persistent kernel on
+# MI300X (paired n=30 HIP-graph hot-cache, geomean ratio hbl/tb = 0.686,
+# all 18 cells flagged at hbl >= 1.05x tb AND paired-t p < 0.05).
+_N160_KCOMPL_MIDK_ROUTE_HBL = frozenset(
+    (M, 160, K, dt)
+    for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384)
+    for dt in (torch.float16, torch.bfloat16)
+)
+
+
+def _route_n160_kcompl_midk_to_hbl(a, b, enable_streamk):
+    """Return True iff (M, N, K, dtype) is in the verified-winner set and
+    the caller did not explicitly request stream-K (which is honored)."""
+    if enable_streamk:
+        return False
+    M, K = a.shape
+    _, N = b.shape
+    return (M, N, K, a.dtype) in _N160_KCOMPL_MIDK_ROUTE_HBL
+
+
 def _maybe_wrap(fn, probe_tensor):
     # Use wrap_triton only under torch.compile tracing; otherwise direct call
     # in eager.  Can't use torch.compiler.is_compiling() here because the code
@@ -402,6 +424,9 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _route_n160_kcompl_midk_to_hbl(a, b, enable_streamk):
+        return torch.matmul(a, b)
+
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -460,6 +485,10 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    if _route_n160_kcompl_midk_to_hbl(a, b, enable_streamk):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

@@ -1084,6 +1084,163 @@ def _k1367_p13_skinny_n128_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1400 (S-002) — P14 `skinny_N256` K-COMPLEMENT route-OUT (8th-position).
+#
+# K-1400 productionises the K-1382 RETRY-winning 18-cell cohort as
+# `_K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18`, layered as the
+# 8th-position envelope in the dispatch precedence chain on top of the
+# K-1389 P13 73-cell baseline (envelope grows 73 → 91 cells; +18 admits).
+#
+# Bucket scope: K-1365's PMC re-decomposition surfaced `skinny_N256` (raw
+# aggregate gap 2.847) as the rank-#2 predicate-addressable residual after
+# the K-1389 N=128 cohort closed; sibling region with identical N-axis
+# attenuation rationale (R-1382.LDS-BC-MECHANISM-N-ATTENUATES-AT-N=256-BUT-
+# REMAINS-DISCRIMINATING-FOR-K-COMPLEMENT-CELLS).
+#
+# K-COMPLEMENT region (mirrors K-1367 with N axis bumped 128 → 256):
+#   M ∈ {2048, 4096, 8192}  (3 anchors)
+#   N = 256                  (column-narrow regime, sibling to N=128)
+#   K ∈ {4096, 8192, 16384}  (above the 30 µs wrapper-overhead ceiling)
+#   dtype ∈ {bf16, fp16}     (K-913 §3 dtype invariance for both)
+# = 3 × 1 × 3 × 2 = 18 cells.
+#
+# PMC mechanism (K-1382 inheritance from K-1367's rocprofv3 4-pass capture):
+#   TB persistent_matmul SQ_LDS_BANK_CONFLICT/inst ≈ 0.92 (attenuated from
+#                                                          1.45 at N=128 but
+#                                                          still a sharp
+#                                                          discriminator)
+#   HBL Cijk_*           SQ_LDS_BANK_CONFLICT/inst = 0    (sharp discriminator)
+#   MFMA_ISSUE_STALL/inst: TB ≈ 0.31, HBL ≈ 0.04 (8x asymmetry preserved)
+# This is the SAME K-913 §3 LDS-bank-conflict mechanism that anchored
+# K-1335 / K-1338 / K-1361 / K-1367, specialised to the N=256 column-narrow
+# regime where the LDS-BC ratio attenuates by ~37 % from N=128 but the
+# absolute HBL=0 reference still flags hipBLASLt as the lower-conflict
+# choice. The persistent_matmul tile pattern systematically conflicts on
+# bf16/fp16 N=256 LDS layouts; hipBLASLt's tile selection avoids the
+# bank-conflict geometry entirely.  Codified as
+# R-1400.K913-LDS-BC-MECHANISM-N-ATTENUATES-BUT-DISCRIMINATES-N256-KCOMPL.
+#
+# Verification (paired n=30 HIP-graph hot-cache, B=10000 vectorised paired
+# bootstrap CI95 — vectorised per R-1367.VECTORIZED-BOOTSTRAP-IS-DEFAULT-VALIDATION-GATE):
+#   18/18 ROUTE-OUT  (every cell CI95-lo > 1.0)
+#   cohort geomean tb/hbl = 1.471×        (HBL is 1.471× faster ⇒ route-OUT win)
+#   min CI95-lo            = 1.165         (worst cell still strictly route-OUT)
+#   no regressions on the 73-cell K-1389 P13 envelope (paired-arm stable)
+#
+# Projected K-1247 cohort lift: the 18-cell K-COMPLEMENT cohort is fully
+# inside the K-1247 79-cell backtest corpus (61 prior + 18 P14); cohort
+# geomean 1.471× contributes +8.12 pp realisable cohort lift on top of the
+# K-1389 7-predicate baseline (computation: exp((61·log(1.066) +
+# 18·log(1.471)) / 79) - 1.066 ≈ 0.0812 — see output/k1247_lift_projection.json).
+#
+# Why N=256 is hipBLASLt-favoured (mechanistic — answers task brief Q4):
+#   The MFMA tile efficiency threshold for the persistent_matmul kernel sits
+#   at N >= 256 for waves_per_CU >= 2; at N=256 the column-narrow tile is
+#   right at the threshold and incurs LDS-bank-conflicts on the persistent
+#   tile schedule (TB SQ_LDS_BC/inst ≈ 0.92 vs HBL = 0).  At K >= 4096 the
+#   compute time amortises the wrapper-overhead floor, so the raw HBL win
+#   (1.471× cohort geomean) is realisable end-to-end.  N=512 is expected to
+#   further attenuate per R-1382 ratio-attenuation prediction; deferred to
+#   K-1382-FOLLOW-D.
+#
+# Disjointness: P14 cells use N=256, M ∈ {2048, 4096, 8192}, K ∈ {4096, 8192,
+# 16384}.  Disjoint with:
+#   * P8 sub-frozensets — K-1219 E3 N=256 sub-frozenset uses M ≥ 4480 with
+#     K ∈ {2048, 4096}; the only on-paper collision candidates would be
+#     M ∈ {4096, 8192} K=4096 cells but K-1219 E3 uses N=256 with specific
+#     (M, K) tuples that do NOT match (M, 256, 4096); verified disjoint by
+#     frozenset.isdisjoint at module load.
+#   * K971_ROUTE_TABLE — K-905/K-971 anchors use M=N ∈ {1024, 2048};
+#     K-1335 uses M=N ∈ {1024, 2048} with K ∈ {4096, 8192}; neither has
+#     N=256, so no collision.
+#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096} with N != 256; no collision.
+#   * K-1367 P13 — uses N=128; P14 uses N=256; natural disjointness.
+# All asserted at module load.
+# ---------------------------------------------------------------------------
+_K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18 = frozenset({
+    # M=2048 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (2048, 256,  4096, "torch.bfloat16"),
+    (2048, 256,  4096, "torch.float16"),
+    (2048, 256,  8192, "torch.bfloat16"),
+    (2048, 256,  8192, "torch.float16"),
+    (2048, 256, 16384, "torch.bfloat16"),
+    (2048, 256, 16384, "torch.float16"),
+    # M=4096 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (4096, 256,  4096, "torch.bfloat16"),
+    (4096, 256,  4096, "torch.float16"),
+    (4096, 256,  8192, "torch.bfloat16"),
+    (4096, 256,  8192, "torch.float16"),
+    (4096, 256, 16384, "torch.bfloat16"),
+    (4096, 256, 16384, "torch.float16"),
+    # M=8192 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (8192, 256,  4096, "torch.bfloat16"),
+    (8192, 256,  4096, "torch.float16"),
+    (8192, 256,  8192, "torch.bfloat16"),
+    (8192, 256,  8192, "torch.float16"),
+    (8192, 256, 16384, "torch.bfloat16"),
+    (8192, 256, 16384, "torch.float16"),
+})
+assert len(_K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18) == 18, (
+    "K-1382 P14 skinny_N256 K-COMPLEMENT frozenset must be exactly 18 cells "
+    "(M ∈ {2048,4096,8192} × N=256 × K ∈ {4096,8192,16384} × {bf16,fp16}); "
+    "any deviation indicates an authoring typo against the K-1365 bucket rule "
+    "or the K-1382 K-COMPLEMENT scoping (N axis bumped 128 → 256 from K-1367).")
+# Cross-frozenset disjointness — P14 vs prior envelopes.
+_K1382_P14_VS_P8_DISJOINT = (
+    _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1382_P14_VS_P8_DISJOINT, (
+    "K-1382 P14 skinny_N256 K-COMPLEMENT cell overlaps the K-1322 51-cell P8 "
+    "envelope; P8's K-1219 E3 N=256 sub-frozenset uses M ≥ 4480 with K ∈ "
+    "{2048, 4096} — disjointness verified by frozenset intersection at "
+    "module load.")
+_K1382_P14_VS_K971_DISJOINT = (
+    _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18.isdisjoint(K971_ROUTE_TABLE))
+assert _K1382_P14_VS_K971_DISJOINT, (
+    "K-1382 P14 skinny_N256 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
+    "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ {1024, 2048}; "
+    "P14 cells all use N=256 — natural disjointness, but assert as cheap "
+    "insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
+_K1382_P14_VS_P12_DISJOINT = (
+    _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1382_P14_VS_P12_DISJOINT, (
+    "K-1382 P14 skinny_N256 K-COMPLEMENT cell overlaps K-1361 P12 square_mid; "
+    "P12 cells use M=N=K ∈ {2048, 4096}; P14 cells all use N=256 — natural "
+    "disjointness, asserted for completeness (A4 no-double-admit).")
+_K1382_P14_VS_P13_DISJOINT = (
+    _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18.isdisjoint(
+        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
+assert _K1382_P14_VS_P13_DISJOINT, (
+    "K-1382 P14 skinny_N256 K-COMPLEMENT cell overlaps K-1367 P13 skinny_N128; "
+    "P13 cells all use N=128, P14 cells all use N=256 — natural disjointness, "
+    "asserted for completeness (A4 no-double-admit / sibling-N firewall).")
+
+
+def _k1382_p14_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1382 P14 — direct hipBLASLt route-OUT for the 18-cell skinny_N256
+    K-COMPLEMENT cohort (`_K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 18 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 256 × K ∈ {4096, 8192, 16384} ×
+    dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: paired n=30 HIP-graph hot-cache benchmarks on
+    MI300X / gfx942 with B=10000 vectorised paired bootstrap (numpy
+    advanced-indexing per R-1298 / R-1367); 18/18 ROUTE-OUT, cohort geomean
+    tb/hbl = 1.471×, min CI95-lo = 1.165.  PMC mechanism inherited from
+    K-1367 7-cell rocprofv3 4-pass capture extended with N-axis attenuation
+    profile (TB SQ_LDS_BC/inst ≈ 0.92 at N=256 vs ≈ 1.45 at N=128, vs HBL = 0).
+
+    Stacked LAST (8th-position) per K-1175 stacked-predicate convention;
+    disjoint by construction with all P1–P13 sub-frozensets via the
+    cross-frozenset asserts above.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1105,6 +1262,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       5. K-905 / K-971 / K-1335 strict-equality LDS-BC anchor table -> hipBLASLt.
       6. K-1361 P12 square_mid 4-cell strict-equality -> hipBLASLt.
       7. K-1367 P13 skinny_N128 K-COMPLEMENT 18-cell strict-equality -> hipBLASLt.
+      8. K-1382 P14 skinny_N256 K-COMPLEMENT 18-cell strict-equality -> hipBLASLt.
     """
     if disable_env_set:
         return False
@@ -1146,5 +1304,11 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # the K-1308 skinny_N128 K-COMPLEMENT region (K >= 4096 above the 30 µs
     # triton_op wrapper-overhead ceiling) at cohort geomean tb/hbl = 1.678×.
     if _k1367_p13_skinny_n128_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1382 P14 (8th-position): skinny_N256 K-COMPLEMENT 18-cell route-OUT.
+    # Stacks AFTER K-1367 P13 per K-1175 stacked-predicate convention; closes
+    # the K-1365 PMC re-decomposition skinny_N256 K-COMPLEMENT region (sibling
+    # to P13 with N axis bumped 128 → 256) at cohort geomean tb/hbl = 1.471×.
+    if _k1382_p14_skinny_n256_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

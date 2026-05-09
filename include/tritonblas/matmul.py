@@ -32,6 +32,8 @@ from ._route_predicate import (
     _k1361_p12_square_mid_routeout as _R_K1361_P12_square_mid_routeout,
     # K-1367 (S-002): P13 skinny_N128 K-COMPLEMENT 18-cell route-OUT (7th-position).
     _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
+    # K-1382 (S-002): P14 skinny_N256 K-COMPLEMENT 18-cell route-OUT (8th-position).
+    _k1382_p14_skinny_n256_routeout as _R_K1382_P14_skinny_n256_routeout,
 )
 
 
@@ -97,6 +99,18 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # column-narrow LDS layout). Disjoint by construction with all P1–P12
     # sub-frozensets via cross-frozenset asserts at module load.
     if _R_K1367_P13_skinny_n128_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1382 (S-002): P14 skinny_N256 K-COMPLEMENT 18-cell route-OUT (8th-position
+    # envelope). Stacks AFTER K-1367 P13 per K-1175 stacked-predicate convention;
+    # closes the K-1365 PMC re-decomposition skinny_N256 K-COMPLEMENT region
+    # (sibling to P13 with N axis bumped 128 → 256). Verified at paired n=30 +
+    # B=10000 vectorised bootstrap CI95: 18/18 ROUTE-OUT, cohort geomean
+    # tb/hbl=1.471×, min CI95-lo=1.165. PMC mechanism inherited from K-1367
+    # 7-cell rocprofv3 4-pass capture extended with N-axis attenuation profile
+    # (TB SQ_LDS_BC/inst ≈ 0.92 at N=256 vs ≈ 1.45 at N=128, vs HBL = 0; sharp
+    # K-913 §3 LDS-bank-conflict discriminator on the persistent_matmul N=256
+    # column-narrow LDS layout). Disjoint by construction with all P1–P13
+    # sub-frozensets via cross-frozenset asserts at module load.
+    if _R_K1382_P14_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

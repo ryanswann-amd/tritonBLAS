@@ -1791,6 +1791,12 @@ def _k1478_p19_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# K-1489 P20 (13th-position): alias-stack of K-1478 P19 admit envelope per
+# K-1490 sibling-slot productionization (claims the next stack slot for the
+# K-COMPLEMENT-EXTENDED follow-up; load-bearing only if P19 is ablated).
+_K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N = _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1817,6 +1823,8 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
      11. P17 skinny_N512 K-COMPLEMENT BASE 17-cell strict-equality -> hipBLASLt.
      12. K-1478 P19 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
+     13. K-1489 P20 skinny_N16384 K-COMPLEMENT alias-stack of P19 (13th slot;
+         unreachable while P19 enabled — reserved for K-COMPLEMENT-EXTENDED).
     """
     if disable_env_set:
         return False
@@ -1907,5 +1915,8 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # (~1.36× at K=2048 → ~1.10× at K=32768).  Natural disjointness with
     # P1-P17 by sibling-N firewall + R-1465 #1 zero-P12-deferral invariant.
     if _k1478_p19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1489 P20 (13th-position): alias-stack of K-1478 P19 admit envelope.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N:
         return True
     return False

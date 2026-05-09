@@ -38,7 +38,9 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# (Re-enabled per K-1598/K-1659 so the per-shape K-aware tile override applied
+# inside OrigamiMatmulSelector amortizes to zero per-launch hot-path cost.)
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,

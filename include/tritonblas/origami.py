@@ -241,6 +241,68 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # K-aware tile-shape override hook — K-1659 / K-1598
+        #
+        # Origami's data-parallel selector is K-blind for the M=N=4096
+        # K-COMPLEMENT envelope: it returns the SAME (BM=256, BN=256,
+        # BK=64) for K in {2048, 8192, 32768}, yielding 16x16=256 output
+        # tiles vs MI300X's 304 CUs (84% wave occupancy / 48 idle CUs).
+        # K-1598 directly measured (rocprofv2 PMC, 24 captures) that the
+        # bottleneck is wave-occupancy starvation + LDS pipeline bubbles,
+        # NOT bank conflicts (TB SQ_LDS_BANK_CONFLICT = 0.0 cpi across
+        # all 6 cells).
+        #
+        # K-1598 proposed mirroring hipBLASLt's K-aware tiles (BM=256,
+        # BN=224, BK=64 at K=8192; BM=512, BN=112, BK=64 at K=32768) to
+        # land 304/296 output tiles (100%/97% CU fill). HOWEVER, K-1659
+        # empirically falsified the proposal as implementable in Triton:
+        #
+        #   1. Triton's tl.dot / MFMA codegen requires power-of-2 tile
+        #      dimensions. BN=224 and BN=112 fail compilation (verified
+        #      on rocm/pytorch:rocm7.2 / Triton 3.6+rocm7.2).
+        #   2. Triton-compatible power-of-2 alternatives that yield more
+        #      tiles than the K-blind 256 — (BM=128, BN=256, BK=64) at
+        #      512 tiles, (BM=256, BN=128, BK=64) at 512 tiles — were
+        #      both measured (n=30 paired hot-cache, OCI MI300X) to
+        #      REGRESS the target cohort vs the K-blind baseline:
+        #        baseline geomean(ratio_median) = 1.105x  (K-1598 v2)
+        #        (128,256,64) override          = 1.294x  (-17pp)
+        #        (256,128,64) override          = 1.304x  (-18pp)
+        #      Mechanism: shrinking per-tile compute density doubles the
+        #      A/B HBM traffic per output element without proportionally
+        #      reducing the SQ_WAIT_INST_LDS bubble — net regression.
+        #
+        # The systemic fix for this cohort therefore lies OUTSIDE the
+        # tile-shape axis: route to streamk_matmul (k-split decomposes
+        # 256 tiles into N*256 sub-tiles, naturally filling 304 CUs) or
+        # route OUT to hipBLASLt (already done by K-1566's productionized
+        # 30-cell K-COMPLEMENT route-out frozenset).
+        #
+        # The override table below is left EMPTY. The infrastructure is
+        # kept in place so a future Triton-compatible win identified by
+        # follow-on profiling can be added with a 1-line table edit and
+        # is automatically LDS-safety-gated.  Override is keyed on exact
+        # (M, N, K, bytes_a, bytes_b); cache-miss on every other shape
+        # => no behavior change anywhere else => no regression possible
+        # by construction.
+        _K1659_TILE_OVERRIDES: dict = {
+            # (M, N, K, bytes_a, bytes_b): (BM, BN, BK)
+            # Empty: see comment above. Populate with (M,N,K,bA,bB) keys
+            # for shapes where a Triton-compatible tile-shape override
+            # has been empirically validated to improve TB/HBL ratio
+            # without regressing the n=30 paired hot-cache benchmark.
+        }
+        _ovr_key = (self._m, self._n, self._k, int(bytes_a), int(bytes_b))
+        _ovr = _K1659_TILE_OVERRIDES.get(_ovr_key)
+        if _ovr is not None:
+            _bm, _bn, _bk = _ovr
+            if check_triton_lds_capacity(
+                _bm, _bn, _bk, bytes_a, bytes_b, lds_cap, self._num_stages
+            ):
+                self._result.config.mt.m = _bm
+                self._result.config.mt.n = _bn
+                self._result.config.mt.k = _bk
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:

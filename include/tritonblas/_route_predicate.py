@@ -3223,3 +3223,19 @@ _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29 = frozenset(
     (M, 64, K, dt) for M in (2048, 4096, 8192)
     for K in (2048, 4096, 8192, 16384, 32768) for dt in ("torch.bfloat16", "torch.float16")
 ) - frozenset({(2048, 64, 4096, "torch.float16")})
+
+
+# K-1721 (S-002): C07_BK128_kp2 tile-config override (21st-slot) — single-config
+# winner of the 18-LDS-feasible-candidate JIT-search at M=N=2048 K-COMPLEMENT mid-K
+# 8-cell cohort.  Override (BLK_K: selector-pick → 128, kpack: 1 → 2) raises paired
+# gmean to 1.105x vs origami baseline (1.21 → 1.10 ratio_vs_hbl, closing ~50% of
+# the TB→HBL gap; MI300X gfx942, paired n=30 alt-order).  Mechanism (PMC): A1
+# COMPUTE_MFMA improves 0.59→0.65 of HBL by amortising per-wave overhead over 2x
+# MFMAs/wave (NOT the A4 LDS axis K-1710 RCA suggested — see R-1721.A4-SCHEDULER-
+# LDS-IS-SHAPE-CONFOUNDED).  At M=N=2048 the selector picks BM=BN=128 (32KB LDS
+# used, 32KB headroom) so (BK=128, kpack=2) at 64KB fits — K-1699's
+# (NS=3, BK=128) dead-rule is M-axis-conditional and does NOT apply at M=N=2048.
+_K1721_C07_BK128_KP2_MN2048_KCOMPL_8 = frozenset(
+    (2048, 2048, K, dt) for K in (2048, 4096, 8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16")
+)

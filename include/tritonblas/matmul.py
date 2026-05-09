@@ -108,6 +108,10 @@ from ._route_predicate import (
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
     # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack — 29 K-1709 admit cells.
     _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29,
+    # K-1721 (21st-slot): C07_BK128_kp2 tile-config override — 8-cell M=N=2048
+    # K-COMPLEMENT mid-K cohort.  Inline override of (BLK_K, kpack) at the
+    # persistent_matmul_lt selector hook closes ~50% of the TB→HBL gap.
+    _K1721_C07_BK128_KP2_MN2048_KCOMPL_8,
 )
 
 
@@ -456,6 +460,16 @@ def persistent_matmul_lt(
     # routing for these cells; we only need to set the in-kernel knob here.
     if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a.dtype):
         waves_per_eu = 1
+
+    # K-1721 (S-002): C07_BK128_kp2 tile-config override (21st-slot).  At
+    # M=N=2048 the selector picks BM=BN=128 (32KB LDS), leaving 32KB headroom
+    # so (BK=64→128, kpack=1→2) fits at 64KB and unlocks the 18-LDS-feasible
+    # JIT-search winner — paired n=30 gmean 1.105x vs baseline (closes ~50%
+    # of TB→HBL gap).  See K-1721 KB and R-1721.BK128-CHANGE-WINS.
+    if (int(M), int(N), int(K), str(a.dtype)) in _K1721_C07_BK128_KP2_MN2048_KCOMPL_8:
+        BLK_K = 128
+        kpack = 2
+        even_k = K % BLK_K == 0
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

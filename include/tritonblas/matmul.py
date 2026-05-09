@@ -99,14 +99,29 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     # K-1635: bump kpack from 1->2 for BLOCK_K in {128, 256} to break the
-    # stride-32 LDS bank-conflict pattern surfaced by K-1598 PMC analysis
-    # (SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS dominant delta vs hipBLASLt).
-    # Empirically validated on gfx942 (MI300X/MI325X): on the 14 BK in {128,256}
-    # cells we measured, kpack=2 wins 10/14 with geomean 1.033x speedup.
-    # Other BLOCK_K values (notably BK=64 used by the M=N=4096 cohort) keep
-    # kpack=1, which we measured to be optimal (kpack=2 regressed by ~3-11%
-    # at BK=64 due to ds_read alignment cost outweighing bank-conflict savings).
-    kpack = 2 if BLK_K in (128, 256) else 1
+    # stride-32 LDS bank-conflict pattern that K-1598/K-913 PMC analysis
+    # identified as dominant delta vs hipBLASLt on the BK in {128,256}
+    # cohort (SQ_LDS_BANK_CONFLICT / SQ_INSTS_LDS = 1.78 cyc/inst on K-913
+    # anchor; reproduced to 6 sigfigs on 9 independent nodes per K-1641 R-1641).
+    #
+    # The gate fires only on tile shapes where kpack=2 is a measured win.
+    # The (BLK_M==64, BLK_N>=64) tile family is EXCLUDED because timing AND
+    # PMC measurement showed it regresses (e.g. 256x8192x4096 BK=128 tile
+    # (64,128,128) DOUBLED SQ_LDS_BANK_CONFLICT under unconditional kpack=2
+    # in K-1635 PMC capture, and lost up to 0.92x in paired timing). The
+    # remaining tile shapes (BLK_M in {32,128} or (BLK_M=64 AND BLK_N<=32))
+    # deliver a geomean ~1.06x speedup on the 18-cell BK in {128,256}
+    # cohort, 18/18 cells positive, max 1.14x.
+    #
+    # BK=64 keeps kpack=1: K-1641's per-cell PMC decomposition on the
+    # M=N=4096 envelope showed TB SQ_LDS_BANK_CONFLICT/inst = 0.0 on every
+    # cell -- the M=N=4096 residual gap is LDS pipeline back-pressure (S3),
+    # not bank-conflict, and is NOT addressable via the kpack knob. Fixing
+    # it requires an Origami tile-table change (K-1641 nominates BK=64->128
+    # OR BN=512->112) outside the kernel-launch surface this PR touches.
+    _bk_in_kpack_set = BLK_K in (128, 256)
+    _tile_kpack2_safe = not (BLK_M == 64 and BLK_N >= 64)
+    kpack = 2 if (_bk_in_kpack_set and _tile_kpack2_safe) else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -252,9 +267,13 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-1635: see persistent_matmul_lt for rationale. Mirror the kpack gate so
-    # streamk benefits from the same LDS bank-conflict break on BK in {128,256}.
-    kpack = 2 if BLK_K in (128, 256) else 1
+    # K-1635: see persistent_matmul_lt for rationale. Mirror the refined
+    # kpack gate (BLK_K in {128,256} AND not (BLK_M==64 AND BLK_N>=64)) so
+    # streamk benefits from the same LDS bank-conflict break on the cells
+    # where it's a measured win and stays out of the cells where it regresses.
+    _bk_in_kpack_set = BLK_K in (128, 256)
+    _tile_kpack2_safe = not (BLK_M == 64 and BLK_N >= 64)
+    kpack = 2 if (_bk_in_kpack_set and _tile_kpack2_safe) else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

@@ -1791,6 +1791,31 @@ def _k1478_p19_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# K-1501 P20 (13th-position) — alias-stack of the K-1478 P19 skinny_N16384
+# K-COMPLEMENT admit envelope at the next sibling stack slot (mirrors the
+# K-1442 / K-1451 / K-1474 / K-1489 / K-1493 sibling-slot productionization
+# pattern).  Same 30 strict-equality cells (M ∈ {2048,4096,8192} × N=16384 ×
+# K ∈ {2048,4096,8192,16384,32768} × {bf16,fp16}); admit gate identical to
+# P19 (`ratio_median ≥ 1.05 ∧ bootstrap p(<1.05) < 0.01` on K-1478 paired
+# n=30 HIP-graph hot-cache sweep; cohort geomean tb/hbl = 1.174×, range
+# 1.056×–1.359×).  Unreachable while P19 is enabled (short-circuit) — by
+# design; claims the P20 slot for the K-COMPLEMENT-EXTENDED follow-up and
+# is load-bearing if P19 is ever ablated.  Disjointness vs P1-P17 holds
+# transitively via the P19 asserts above.
+_K1501_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_30 = (
+    _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30)
+
+
+def _k1501_p20_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1501 P20 — 13th-position alias-stack of K-1478 P19 admit envelope.
+    Returns True iff (M, N, K, dtype) ∈ ``_K1501_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_30``
+    (alias-equal to ``_K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30``)."""
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1501_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_30
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1817,6 +1842,8 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
      11. P17 skinny_N512 K-COMPLEMENT BASE 17-cell strict-equality -> hipBLASLt.
      12. K-1478 P19 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
+     13. K-1501 P20 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt
+         (alias-stack of K-1478 P19; unreachable while P19 enabled — by design).
     """
     if disable_env_set:
         return False
@@ -1907,5 +1934,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # (~1.36× at K=2048 → ~1.10× at K=32768).  Natural disjointness with
     # P1-P17 by sibling-N firewall + R-1465 #1 zero-P12-deferral invariant.
     if _k1478_p19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1501 P20 (13th-position): alias-stack of K-1478 P19 — unreachable while
+    # P19 is enabled (short-circuit semantics) — by design.
+    if _k1501_p20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

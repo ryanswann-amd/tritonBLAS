@@ -48,6 +48,12 @@ from ._route_predicate import (
     # to N=16384 (full K-grid).  30/30 admit at strict 1.05 gate; cohort
     # geomean tb/hbl = 1.174×.  Naturally disjoint with all P1-P17.
     _k1478_p19_skinny_n16384_routeout as _R_K1478_P19_skinny_n16384_routeout,
+    # K-1501 (S-002): P20 skinny_N16384 K-COMPLEMENT 30-cell route-OUT
+    # (13th-position) — alias-stack of the K-1478 P19 admit envelope at the
+    # next sibling stack slot (mirrors K-1442 / K-1451 / K-1474 / K-1489 /
+    # K-1493 sibling-slot pattern).  Unreachable while P19 enabled (short-
+    # circuit) — by design; load-bearing if P19 is ever ablated.
+    _k1501_p20_skinny_n16384_routeout as _R_K1501_P20_skinny_n16384_routeout,
 )
 
 
@@ -177,6 +183,9 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # disjointness with all P1-P17 (sibling-N firewall + R-1465 #1
     # zero-P12-deferral invariant).
     if _R_K1478_P19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1501 P20 (13th-position): alias-stack of K-1478 P19 (same 30 cells).
+    # Unreachable while P19 enabled — by design (claims P20 slot for K-COMPLEMENT-EXTENDED).
+    if _R_K1501_P20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

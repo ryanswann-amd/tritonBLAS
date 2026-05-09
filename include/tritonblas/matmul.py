@@ -38,7 +38,11 @@ def _maybe_wrap(fn, probe_tensor):
 
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
-#@functools.lru_cache(maxsize=1024)
+# (Re-enabled per K-1659 — origami selection + workgroup mapping is pure
+# w.r.t. the cache key tuple, and amortizing it to one execution per
+# (M, N, K, dtype, device, mx_block_size, streamk, num_stages) shape
+# eliminates a measured per-launch hot-path cost on MI300X.)
+@functools.lru_cache(maxsize=1024)
 def _make_matmul_selector(
     M: int,
     N: int,

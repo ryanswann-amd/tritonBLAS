@@ -551,114 +551,27 @@ assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
 
 
 # ---------------------------------------------------------------------------
-# K-1288 / K-1283 A2 occupancy-bound sub-cohort -- LABELED CROSS-REFERENCE
-# (subset of _K1121_P8_ANCHORS_13; data-only; no dispatch-logic change).
-#
-# K-1283's per-cell classification of the K-1132 wpeu=1 13-cell residual
-# (output/iter1_findings.md + output/iter4_findings.md) partitions the
-# residual into 4 clusters by best-fit dispatch axis:
-#
-#   A. stream-K cohort {S31, S32, S37, S39}  -- this set (paired waves
-#      ratio tb/hbl in [2.014, 2.740])
-#   B. boundary / aspect-shifted {S24, S33, S34}
-#   C. clean admits {S18, S26, S35}
-#   D. correct rejects / TIEs {S25, S29, S30}
-#
-# K-1283 iter-3 hypothesised that K-1037 P6's runtime ratio gate
-# (waves_per_CU_ratio_tb_over_hbl < 1.70) might already cover Cluster A.
-# Iter-4 FALSIFIED that hypothesis (F14): the production P6 dispatch wall
-# is the strict-LT < 1.70, machine-enforced by 17 PR-CI pin tests at the
-# K-1104 (1.5320, 1.7530) feasibility band; the four Cluster A cells sit
-# at paired ratios in [2.014, 2.740], strictly above any P6-reachable
-# regime. The ratio gap [1.53, 1.70+] therefore contains no shipped
-# dispatch lever for Cluster A -- "occupancy-bound" because the regime
-# is bounded by hipBLASLt's higher waves_per_CU at large M (occupancy
-# headroom hipBLASLt's Tensile schedule unlocks at extreme M >> N).
-#
-# Operationally, the four A2 cells are nonetheless route-OUT because they
-# are part of the K-1121 13-cell anchor set (PMC-validated MFMA-issue-
-# stall route-OUT envelope, see _K1121_P8_ANCHORS_13 above) -- so P8
-# strict-equality already lifts them to hipBLASLt via the K-1144
-# productionised dispatch.  This frozenset adds NO new cells and does NOT
-# change dispatch outcomes; it is a LABELED SUBSET CROSS-REFERENCE that:
-#   (1) names the four A2 cells as the K-1283 occupancy-bound sub-cohort
-#       (was previously implicit in the K-1121 anchor block);
-#   (2) pins them as "must remain route-OUT" so any future ticket that
-#       carves them out of K-1121 (e.g. on a regression-firewall) trips
-#       a CI canary that documents the K-1283 attribution;
-#   (3) provides a focal point for the paired n=30 + B=10000 CI95
-#       hot-cache benchmark deliverable (see workspace
-#       /home/ryaswann/mc2-workspaces/K-1288/output/k1288_*).
-#
-# Paired n=30 HIP-graph hot-cache validation on rad-mi300x-1 fallback
-# (c42 SSH plane outage continued through K-1267/K-1275; rad-mi300x-1
-# is load-bearing infrastructure for the entire P8 envelope investigation
-# series per R-1205.RAD-MI300X-1-IS-LOAD-BEARING):
-#   per-cell hbl/tb (paired-bootstrap CI95 from K-1275 measurement on
-#   the K-1247 union cohort, identical dispatch as K-1288 by construction
-#   of subset cross-reference):
-#       S31 (18304, 2048, 1024)  hbl/tb = 1.154x  CI95=[1.136, 1.176]
-#       S32 (20352, 2048, 1024)  hbl/tb = 1.030x  CI95=[1.010, 1.051]
-#       S37 (25600, 2048,  256)  hbl/tb = 0.933x  CI95=[0.927, 0.938]
-#       S39 (49152, 2048,  256)  hbl/tb = 1.093x  CI95=[1.075, 1.109]
-#   A2 cohort geomean: 1.0497x (target >= 0.95x; PASS).
-#   Cluster MIN: S37 0.933x -- the K-1109 P6-allowlist carve-out cell;
-#       NOTE that P8 strict-equality intentionally overrides the K-1109
-#       carve-out (P8 takes precedence over P6) per K-1121's PMC-validated
-#       MFMA-issue-stall classification at this anchor.  The 6.7%
-#       regression on S37 is the KNOWN cost of preserving the K-1121
-#       attribution; K-1283 iter-4 concluded the trade is net-positive on
-#       the cluster (1.0497x geomean), and the alternative (carving S37
-#       out of K-1121 anchors) would change the 36-cell P8 envelope size
-#       and is out of scope for the K-1288 minimal-diff PR.
-#
-# Subset invariant (asserted at module load): the four A2 cells MUST be
-# present in _K1121_P8_ANCHORS_13.  If a future PR removes any of them,
-# this assertion fires with the K-1283 attribution narrative attached.
+# K-1288 / K-1283 A2 occupancy-bound sub-cohort -- LABELED SUBSET of
+# _K1121_P8_ANCHORS_13.  Data-only; NO dispatch-logic change.  These four
+# cells (S31, S32, S37, S39 from the K-1132 wpeu=1 13-cell residual) sit
+# at paired waves_per_CU ratio tb/hbl in [2.014, 2.740] -- strictly above
+# the K-1037 P6 strict-LT < 1.70 dispatch wall (K-1283 iter-4 F14
+# falsification).  They are already routed OUT to hipBLASLt by the
+# K-1144 P8 strict-equality envelope via _K1121_P8_ANCHORS_13; this
+# frozenset names them so any future PR that carves any out of K-1121
+# trips the CI canary `issubset` assertion below with the K-1283
+# attribution attached.
 # ---------------------------------------------------------------------------
 _K1283_A2_OCCBOUND_4 = frozenset({
-    # ----- N=2048 K=1024 cluster (2 cells; M in [18304, 20352]) -----
-    (18304, 2048, 1024, "torch.bfloat16"),  # S31  paired waves ratio 2.014  hbl/tb=1.154x
-    (20352, 2048, 1024, "torch.bfloat16"),  # S32  paired waves ratio 2.254  hbl/tb=1.030x
-    # ----- N=2048 K=256 cluster (2 cells; extreme M) -----
-    (25600, 2048,  256, "torch.bfloat16"),  # S37  paired waves ratio 2.740  hbl/tb=0.933x  (cluster MIN)
-    (49152, 2048,  256, "torch.bfloat16"),  # S39  paired waves ratio 2.122  hbl/tb=1.093x
+    (18304, 2048, 1024, "torch.bfloat16"),  # S31
+    (20352, 2048, 1024, "torch.bfloat16"),  # S32
+    (25600, 2048,  256, "torch.bfloat16"),  # S37
+    (49152, 2048,  256, "torch.bfloat16"),  # S39
 })
-assert len(_K1283_A2_OCCBOUND_4) == 4, (
-    "K-1283 A2 occupancy-bound sub-cohort must be exactly 4 cells "
-    "(S31, S32, S37, S39 from the K-1132 wpeu=1 13-cell residual); a "
-    "duplicate or stray entry has crept in.")
 assert _K1283_A2_OCCBOUND_4.issubset(_K1121_P8_ANCHORS_13), (
     "K-1283 A2 occupancy-bound sub-cohort is no longer a subset of "
-    "_K1121_P8_ANCHORS_13.  This is a CI canary: the K-1283 attribution "
-    "depends on the four A2 cells (S31, S32, S37, S39) being routed "
-    "to hipBLASLt by the K-1144 P8 strict-equality envelope.  If a "
-    "future PR carved any of them out of K-1121 anchors, the route-OUT "
-    "dispatch is silently lost on that cell and the K-1283 occupancy-"
-    "bound classification no longer holds in production.  See the "
-    "_K1283_A2_OCCBOUND_4 docstring for the full attribution narrative.")
-
-
-def R_K1283_A2_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
-    """K-1288 / K-1283 A2 occupancy-bound sub-cohort route-OUT helper.
-
-    Returns True iff (M, N, K, dtype) is one of the four K-1283 A2
-    occupancy-bound cells (S31, S32, S37, S39 from the K-1132 wpeu=1
-    13-cell residual).  This is a LABELED CROSS-REFERENCE helper that
-    mirrors _p8_mfma_issue_stall_routeout's verdict on the A2 subset --
-    it is NOT consulted by k971_route_decision (P8 strict-equality
-    already routes these cells via _K1121_P8_ANCHORS_13).
-
-    Provided so downstream tooling (audit scripts, dispatch-coverage
-    dashboards, K-1283 attribution reports) can ask "is this cell the
-    K-1283 A2 cohort?" without re-deriving the four-cell list from the
-    iter-1/iter-4 findings markdown.
-
-    bf16-only by design (K-1132 / K-1283 measurement scope is bf16).
-    """
-    if not _dtype_is_bf16(dtype):
-        return False
-    return (int(M), int(N), int(K), str(dtype)) in _K1283_A2_OCCBOUND_4
+    "_K1121_P8_ANCHORS_13; the K-1144 P8 route-OUT for these four cells "
+    "would be silently lost.")
 
 
 # ---------------------------------------------------------------------------
@@ -701,13 +614,6 @@ def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     route-OUT for the quadruply-validated MFMA-issue-stall cohort
     (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits +
     K-1231/K-1205 E_N3 N-axis admits at N=128).
-
-    K-1288 / K-1283 A2 attribution: the four occupancy-bound cells
-    {S31, S32, S37, S39} (paired waves ratio tb/hbl in [2.014, 2.740];
-    above the K-1037 P6 strict-LT < 1.70 dispatch wall per K-1283 F14)
-    are part of the K-1121 anchor block and thus already routed by this
-    predicate; see :data:`_K1283_A2_OCCBOUND_4` for the labeled subset
-    and the K-1283 iter-1/iter-4 mechanistic narrative.
 
     Returns True iff (M, N, K, dtype) matches one of the 36 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design

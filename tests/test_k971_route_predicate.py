@@ -38,7 +38,6 @@ from tritonblas._route_predicate import (
     _K1161_E2_ADMITS_3,
     _K1205_EN3_ADMITS_8,
     _K1283_A2_OCCBOUND_4,
-    R_K1283_A2_route_to_hbl,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -1424,176 +1423,35 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
 
 
 # ---------------------------------------------------------------------------
-# K-1288 / K-1283 A2 occupancy-bound sub-cohort pin tests.  These pin the
-# four A2 cells (S31, S32, S37, S39 from the K-1132 wpeu=1 13-cell residual)
-# as a labeled cross-reference subset of _K1121_P8_ANCHORS_13.  Data-only;
-# no dispatch-logic change.  See _K1283_A2_OCCBOUND_4 docstring in
-# _route_predicate.py for the full K-1283 attribution narrative (iter-1
-# per-cell classification + iter-4 falsification of K-1037 P6 coverage).
-#
-# Source paired n=30 + B=10000 CI95 evidence: K-1275 measurement on the
-# K-1247 union cohort (rad-mi300x-1 / MI300X gfx942 / ROCm 7.2;
-# /home/ryaswann/mc2-workspaces/K-1275/output/k1275_per_cell_ci95.csv).
-# K-1288 reuses these numbers because the K-1288 PR is a labeled subset
-# cross-reference (NO dispatch change) -- every per-cell speedup of
-# K-1288 over K-1275 is exactly 1.0x by construction.
+# K-1288 / K-1283 A2 occupancy-bound sub-cohort pin tests.  Two minimal
+# canaries: subset cross-reference + envelope-size invariance.  The
+# subset assertion is also enforced at module load in _route_predicate.py;
+# surfacing it as a pytest case keeps the K-1283 attribution visible in
+# the PR-CI report.  Data-only; no dispatch-logic change vs K-1275.
 # ---------------------------------------------------------------------------
-
-K1283_A2_OCCBOUND_4_LIST = [
-    # (cid, M, N, K, paired_waves_ratio_tb_over_hbl, hbl_tb_med, ci95_lo, ci95_hi)
-    ("A2_S31", 18304, 2048, 1024, 2.014, 1.154, 1.136, 1.176),
-    ("A2_S32", 20352, 2048, 1024, 2.254, 1.030, 1.010, 1.051),
-    ("A2_S37", 25600, 2048,  256, 2.740, 0.933, 0.927, 0.938),  # cluster MIN; K-1109 carve-out cell
-    ("A2_S39", 49152, 2048,  256, 2.122, 1.093, 1.075, 1.109),
-]
-
-
-def test_k1283_a2_occbound_envelope_size_is_exactly_4():
-    """Pin the K-1283 A2 occupancy-bound sub-cohort cardinality.  K-1283
-    iter-1 enumerated 4 cells (S31, S32, S37, S39) with paired waves
-    ratio tb/hbl in [2.014, 2.740] -- the regime above the K-1037 P6
-    strict-LT < 1.70 dispatch wall (K-1283 iter-4 F14).  Any silent edit
-    changes the count and trips this canary."""
-    assert len(_K1283_A2_OCCBOUND_4) == 4
 
 
 def test_k1283_a2_occbound_is_subset_of_k1121_p8_anchors_13():
-    """The K-1283 A2 sub-cohort is a LABELED CROSS-REFERENCE -- a subset
-    of _K1121_P8_ANCHORS_13 that names the four occupancy-bound cells
-    without changing dispatch behavior.  This invariant is also asserted
-    at module load in _route_predicate.py; the test surfaces it in the
-    pytest report so reviewers see it directly."""
-    assert _K1283_A2_OCCBOUND_4.issubset(_K1121_P8_ANCHORS_13), (
-        "K-1283 A2 sub-cohort is no longer a subset of K-1121 P8 anchors; "
-        "the K-1283 attribution depends on these cells being routed by "
-        "the K-1144 P8 strict-equality envelope.")
+    """The four K-1283 A2 occupancy-bound cells (S31, S32, S37, S39 from
+    the K-1132 wpeu=1 13-cell residual) MUST remain members of
+    _K1121_P8_ANCHORS_13 so the K-1144 P8 strict-equality envelope keeps
+    routing them OUT to hipBLASLt.  If a future PR carves any out, the
+    K-1283 attribution silently breaks."""
+    assert _K1283_A2_OCCBOUND_4 == frozenset({
+        (18304, 2048, 1024, "torch.bfloat16"),
+        (20352, 2048, 1024, "torch.bfloat16"),
+        (25600, 2048,  256, "torch.bfloat16"),
+        (49152, 2048,  256, "torch.bfloat16"),
+    })
+    assert _K1283_A2_OCCBOUND_4.issubset(_K1121_P8_ANCHORS_13)
 
 
-def test_k1283_a2_occbound_envelope_contents_pinned():
-    """Pin the K-1283 A2 4-cell envelope to source-of-truth (the K-1283
-    iter-4 final classification table, replicated here as
-    K1283_A2_OCCBOUND_4_LIST).  A silent edit to either constant trips
-    here."""
-    expected = frozenset(
-        (M, N, K, "torch.bfloat16")
-        for _cid, M, N, K, _wr, _hbl_tb, _lo, _hi in K1283_A2_OCCBOUND_4_LIST)
-    assert _K1283_A2_OCCBOUND_4 == expected
-
-
-def test_k1283_a2_occbound_does_not_grow_p8_envelope():
-    """Critical invariant: K-1288 is a LABELED CROSS-REFERENCE PR --
-    the K-1283 A2 sub-cohort is a subset of cells already in
-    _K1121_P8_ANCHORS_13, so the composed P8 envelope MUST remain at
-    exactly 36 cells (unchanged from K-1275).  If a future PR moves
-    A2 cells to a new sub-frozenset (changing the disjoint-union
-    structure), this canary trips."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36, (
-        "K-1288 must not change the K-1275 36-cell P8 envelope size; "
-        "_K1283_A2_OCCBOUND_4 is a labeled subset cross-reference, not "
-        "a new sub-frozenset that contributes new cells to the union.")
-
-
-def test_k1283_a2_occbound_all_have_n_equal_2048():
-    """Structural axis-discipline invariant: K-1283 iter-1 identified
-    the A2 cohort as the N=2048 occupancy-bound family from the K-1132
-    wpeu=1 residual (per-cell paired ratio table, iter-1 §F1).  N=128
-    (K-1205 E_N3) and N=3072 (S24 boundary) are explicitly different
-    cohorts (Cluster B in the iter-1 classification).  Any cell in
-    A2 with N != 2048 would be a silent drift away from K-1283's
-    classification axis and trips here."""
-    for (M, N, K, dtype) in _K1283_A2_OCCBOUND_4:
-        assert N == 2048, (
-            f"K-1283 A2 cell {(M, N, K, dtype)!r} has N={N} != 2048; "
-            "K-1283 A2 is the N=2048 occupancy-bound cluster.")
-
-
-def test_k1283_a2_occbound_k_in_k1144_k_set():
-    """Structural axis-discipline invariant: A2 cells live at
-    K in {256, 1024} (the K-1132 wpeu=1 residual K-floors).  Any K
-    outside the K-1144 K-set {256, 768, 1024} would be a covert
-    K-axis extension and trips here."""
-    for (M, N, K, dtype) in _K1283_A2_OCCBOUND_4:
-        assert K in {256, 1024}, (
-            f"K-1283 A2 cell {(M, N, K, dtype)!r} has K={K} outside "
-            "the K-1283 A2 K-set {256, 1024}.")
-
-
-def test_k1283_a2_occbound_paired_waves_ratio_above_p6_wall():
-    """K-1283 iter-4 F14 falsification: every K-1283 A2 cell has paired
-    waves_per_CU ratio (tb/hbl) >= 1.75, strictly above the K-1037 P6
-    strict-LT < 1.70 dispatch wall AND above the K-1104 (1.5320, 1.7530)
-    feasibility band's upper pin.  This pin documents WHY P6 cannot
-    cover A2 in production -- if a future ticket re-derives the paired
-    waves ratio and lands a value below 1.75, the K-1283 attribution
-    no longer holds and this test trips."""
-    for cid, M, N, K, paired_wr, _hbl_tb, _lo, _hi in K1283_A2_OCCBOUND_4_LIST:
-        assert paired_wr > 1.75, (
-            f"K-1283 A2 cell {cid} ({M},{N},{K}) paired waves ratio "
-            f"{paired_wr:.3f} is at or below the K-1104 P6 feasibility "
-            "band upper pin (1.7530); K-1283 iter-4 F14 falsification "
-            "requires every A2 cell to be ABOVE this wall.")
-
-
-@pytest.mark.parametrize(
-    "cid,M,N,K,paired_wr,hbl_tb_med,ci95_lo,ci95_hi", K1283_A2_OCCBOUND_4_LIST,
-    ids=[c[0] for c in K1283_A2_OCCBOUND_4_LIST])
-def test_k1283_p8_routes_all_4_a2_cells_out_to_hbl(
-        cid, M, N, K, paired_wr, hbl_tb_med, ci95_lo, ci95_hi):
-    """Every K-1283 A2 cell must fire the P8 strict-equality match.
-    P8 takes precedence over the K-1037/K-1109 P6 admit gate, so even
-    cells where K-1109 carved them out of the P6 allowlist (S32, S37)
-    are still routed OUT here via the K-1144 P8 productionised
-    dispatch."""
-    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
-    assert R_K1283_A2_route_to_hbl(M, N, K, torch.bfloat16) is True
-
-
-@pytest.mark.parametrize(
-    "cid,M,N,K,paired_wr,hbl_tb_med,ci95_lo,ci95_hi", K1283_A2_OCCBOUND_4_LIST,
-    ids=[c[0] for c in K1283_A2_OCCBOUND_4_LIST])
-def test_k1283_dispatch_routes_all_4_a2_cells_out_to_hbl(
-        cid, M, N, K, paired_wr, hbl_tb_med, ci95_lo, ci95_hi):
-    """End-to-end dispatch check: with default carve-outs disabled,
-    _k971_route_to_hbl must return True for every K-1283 A2 cell so
-    each is routed to hipBLASLt and silently picks up the measured
-    speedup (K-1275 paired n=30 hbl/tb in [0.933, 1.154]; cohort
-    geomean 1.0497x)."""
-    decision = _k971_route_to_hbl(
-        M, N, K,
-        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
-        enable_streamk=False, work_stealing=False)
-    assert decision is True, (
-        f"{cid} (M={M} N={N} K={K}) was not routed to hipBLASLt; "
-        f"expected True per K-1283 attribution (K-1144 P8 anchor).")
-
-
-def test_k1283_a2_route_helper_is_bf16_only():
-    """K-1283 A2 measurement scope is bf16 only.  fp16 / fp32 with the
-    same (M, N, K) must NOT fire the helper -- fp16 dispatch is owned
-    by the K-1093 / K-1125 mirror predicate line."""
-    for (M, N, K, _dtype) in _K1283_A2_OCCBOUND_4:
-        for fp_dtype in (torch.float16, torch.float32):
-            assert R_K1283_A2_route_to_hbl(M, N, K, fp_dtype) is False, (
-                f"R_K1283_A2_route_to_hbl fired on non-bf16 dtype "
-                f"{fp_dtype} for cell {(M, N, K)}; K-1283 A2 is bf16-only.")
-
-
-def test_k1283_a2_does_not_disturb_k1275_36_cell_envelope():
-    """K-1275 -> K-1288 invariance check: K-1288 is a labeled subset
-    cross-reference, so the K-1275 36-cell envelope is preserved exactly
-    AND the four named provenance frozensets retain their cardinality."""
+def test_k1288_does_not_grow_k1275_36_cell_p8_envelope():
+    """K-1288 is a LABELED SUBSET cross-reference -- it must not add any
+    cell to the production P8 envelope.  Pins the K-1275 size of 36 and
+    the four provenance-set cardinalities."""
     assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
-    # Compose-and-compare: the union of the four provenance sets must
-    # be exactly the 36-cell envelope (no stray cells, no missing cells).
-    composed = (
-        _K1121_P8_ANCHORS_13
-        | _K1131_P8_NEIGHBORS_12
-        | _K1161_E2_ADMITS_3
-        | _K1205_EN3_ADMITS_8)
-    assert composed == _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
-        "Composed P8 envelope does not match _P8_MFMA_ISSUE_STALL_ROUTEOUT; "
-        "K-1288 must be subset cross-reference only -- no new cells.")

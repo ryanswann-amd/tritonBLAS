@@ -36,6 +36,7 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1205_EN3_ADMITS_8,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -685,18 +686,22 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
-    Any silent edit changes this count and trips this canary.
+def test_k1144_p8_envelope_size_is_exactly_36_after_k1205_extension():
+    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 +
+    8 K-1205/E_N3 = 36 cells. Any silent edit changes this count and
+    trips this canary.
 
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
-    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
-    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+    K-1144 originally pinned 25; K-1175 extended by 3 K-1161-validated cells
+    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024) → 28.
+    K-1205 / K-1227 then extended by 8 N=128 N-axis cells (the orthogonal
+    N-axis envelope where K-axis NEGATIVE_AXIS_PIVOT does NOT apply) → 36.
+    See the _K1161_E2_ADMITS_3 and _K1205_EN3_ADMITS_8 docstrings in
+    _route_predicate.py for the per-axis mechanism notes."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
+    assert len(_K1205_EN3_ADMITS_8) == 8
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1084,6 +1089,111 @@ def test_k1175_p8_e2_admits_m_axis_cells_at_k1024_anchor_k():
         assert N == 2048  # K-1121 anchor N
         # M is interior to the K-1121 anchor M-range:
         assert 8064 < M < 14208
+
+
+# ===========================================================================
+# K-1205 / K-1227 — N-axis P8 envelope extension pin tests.
+# E_N3 := N=128 ∧ K∈{256,768,1024} ∧ M∈K-1121-anchor-M-set ∧ bf16.
+# 8/9 admit verdict. Mirror of the K-1175 block, but on the N-axis where
+# the K-axis K-1161 NEGATIVE_AXIS_PIVOT does NOT apply (R-1205 divergence).
+# ===========================================================================
+
+K1205_EN3_ADMITS_8_LIST = [
+    # (cid, M, N, K)
+    ("EN_K1024_S25",  6016,  128, 1024),  # 1.370x
+    ("EN_K1024_S26",  8064,  128, 1024),  # 1.402x
+    ("EN_K1024_S29", 14208,  128, 1024),  # 3.254x (cohort MAX)
+    ("EN_K1024_S30", 16256,  128, 1024),  # 3.024x
+    ("EN_K1024_S33", 22400,  128, 1024),  # 2.258x
+    ("EN_K256_S37",  25600,  128,  256),  # 1.144x (cohort MIN admit)
+    ("EN_K256_S39",  49152,  128,  256),  # 1.781x
+    ("EN_K768_S18",   5972,  128,  768),  # 1.227x
+]
+
+# K-1205 NO-LEAK pin: EN_K768_S24 (M=4480 N=128 K=768) measured TB-WIN at 0.967x
+# and was REJECTED from the admit set; must NOT trigger P8 route-OUT.
+K1205_EN3_REJECTED_1_LIST = [
+    ("EN_K768_S24", 4480, 128, 768),
+]
+
+
+def test_k1227_e_n3_admits_envelope_size_is_exactly_8():
+    """The K-1205/E_N3 N-axis extension is exactly 8 cells.
+    Sub-set size pin so a silent edit to either constant trips here."""
+    assert len(_K1205_EN3_ADMITS_8) == 8
+
+
+def test_k1227_e_n3_admits_disjoint_from_k1121_k1131_k1161():
+    """K-1205 candidates are constructed at N=128 (one tier below the
+    natural sub-1024 N floor) — no prior P8 cell has N < 896, so the
+    sub-set is structurally disjoint from each of the three earlier
+    sub-sets."""
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+def test_k1227_e_n3_admits_envelope_contents_pinned_to_k1205_manifest():
+    """Pin the K-1205 8-cell N-axis envelope to source-of-truth (the
+    K-1205 paired n=30 manifest). A silent edit to either constant
+    trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1205_EN3_ADMITS_8_LIST)
+    assert _K1205_EN3_ADMITS_8 == expected
+
+
+def test_k1227_e_n3_admits_axis_discipline_n_equals_128():
+    """Structural invariant: every K-1205 admit cell must have N=128
+    (the N-floor under test). Any cell with N != 128 belongs in a
+    different sub-set."""
+    for (M, N, K, dtype) in _K1205_EN3_ADMITS_8:
+        assert N == 128, f"K-1205 cell {(M, N, K)} violates N=128 axis discipline"
+        assert K in (256, 768, 1024), (
+            f"K-1205 cell {(M, N, K)} violates K-1144 K-set discipline")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST,
+                         ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1227_p8_admits_all_8_k1205_e_n3_cells(cid, M, N, K):
+    """The 8-cell K-1205 E_N3 admit set must be matched by the P8
+    strict-equality predicate _p8_mfma_issue_stall_routeout. Mirror of
+    test_k1175_p8_admits_all_3_k1161_e2_cells."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST,
+                         ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1227_p8_dispatch_routes_all_8_k1205_e_n3_cells_out_to_hbl(cid, M, N, K):
+    """End-to-end dispatch pin: the 8 K-1205 E_N3 admits must be routed
+    OUT to hipBLASLt by _k971_route_to_hbl (i.e. the K-1216 stacked
+    chain ranks P8 above E1/P6/P5 so these cells exit on the P8 match
+    and never reach a downstream override)."""
+    assert _k971_route_to_hbl(M, N, K, torch.bfloat16) is True
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_REJECTED_1_LIST,
+                         ids=[c[0] for c in K1205_EN3_REJECTED_1_LIST])
+def test_k1227_p8_does_not_leak_into_k1205_rejected_cells(cid, M, N, K):
+    """NO-LEAK pin: EN_K768_S24 (M=4480 N=128 K=768) measured TB-WIN
+    at 0.967x in K-1205. Re-admitting this cell silently re-introduces
+    a paired-n=30 false positive at the M-floor of the K-1121 anchor
+    M-set."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False
+    # Note: this cell may still be route-OUT'd via a downstream predicate
+    # (E1 does NOT cover N=128 since 128 ∉ {1792, 2048, 3072}); the pin
+    # here is specifically that P8 itself does NOT match.
+
+
+def test_k1227_p8_e_n3_admits_are_bf16_only():
+    """P8 is bf16-only by design (consistent with K-1121/K-1131 source
+    measurement scope). Any non-bf16 dtype must short-circuit even on
+    a strict-equality match in the bf16 admit set."""
+    for (M, N, K, _dt) in _K1205_EN3_ADMITS_8:
+        # bf16: admits (positive control)
+        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+        # fp16/fp32: short-circuit
+        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float16) is False
+        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float32) is False
 
 
 # ===========================================================================

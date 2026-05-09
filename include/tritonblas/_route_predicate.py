@@ -456,21 +456,65 @@ _K1161_E2_ADMITS_3 = frozenset({
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x CI95=[1.496, 1.504]
 })
 
-# Composed 28-cell P8 envelope.  Anchors, neighbors, and K-1175/K-1161 E2
-# admits are deliberately kept as separate constants so reviewers (and
-# the manifest auditors) can see provenance at a glance; the dispatch
-# path consults the union.
+# K-1205 / E_N3 N-axis extension admits.  Paired n=30 HIP-graph hot-cache
+# validation (per K-1227 productionisation) of the N-floor relaxation envelope:
+#   E_N3 := N = 128 (one power-of-2 tier below the natural sub-1024 N floor)
+#           AND K in {256, 768, 1024} (held fixed at K-1144 K-set)
+#           AND M in K-1121 anchor M-set
+#           AND bf16
+# returned a clean POSITIVE landing verdict: 8/9 = 88.9% admit, well above
+# the 75% landing threshold and *decisively diverging* from K-1161's K-axis
+# NEGATIVE result (1/6 = 16.7% K-axis admit; K-1176 confirmed arch-agnostic).
+#
+# Mechanistic reading: at extreme aspect ratios with M >> N=128, hipBLASLt's
+# Tensile schedule (wide unroll + many waves) hides the same MFMA-issue-stall
+# bottleneck that K-1121 anchors expose at N=2048; tritonblas's wpeu=1
+# in-kernel admit is *worse* at small-N skinny-rectangle tiles than at the
+# original K-1121 mid-square tiles (per-cell speedups widen 1.14x-3.25x at
+# N=128 vs 1.16x-1.27x at N=2048).  The single rejection EN_K768_S24
+# (M=4480 K=768) is the smallest-M cell in the candidate set; the same
+# small-M Triton-favoured tail surfaced by K-1161 along the K-axis is
+# active here at the M-floor of the K-1121 anchor M-set.
+#
+# Strict-equality only (R-1131 / R-1175): no parametric envelope -- each cell
+# was directly measured at paired n=30 with hbl/tb >= 1.144x and CI95-lo > 1.05x.
+_K1205_EN3_ADMITS_8 = frozenset({
+    # ----- N=128 K=1024 cluster (5 admits; speedups 1.37x-3.25x) -----
+    ( 6016,  128, 1024, "torch.bfloat16"),  # EN_K1024_S25 hbl/tb=1.370x CI95=[1.362, 1.374] (mirror of S25)
+    ( 8064,  128, 1024, "torch.bfloat16"),  # EN_K1024_S26 hbl/tb=1.402x CI95=[1.396, 1.415] (mirror of S26)
+    (14208,  128, 1024, "torch.bfloat16"),  # EN_K1024_S29 hbl/tb=3.254x CI95=[3.234, 3.267] (mirror of S29; cohort MAX)
+    (16256,  128, 1024, "torch.bfloat16"),  # EN_K1024_S30 hbl/tb=3.024x CI95=[3.011, 3.056] (mirror of S30)
+    (22400,  128, 1024, "torch.bfloat16"),  # EN_K1024_S33 hbl/tb=2.258x CI95=[2.234, 2.269] (mirror of S33)
+    # ----- N=128 K=256 cluster (2 admits; extreme-M; speedups 1.14x-1.78x) -----
+    (25600,  128,  256, "torch.bfloat16"),  # EN_K256_S37  hbl/tb=1.144x CI95=[1.140, 1.149] (mirror of S37; cohort MIN admit)
+    (49152,  128,  256, "torch.bfloat16"),  # EN_K256_S39  hbl/tb=1.781x CI95=[1.768, 1.803] (mirror of S39)
+    # ----- N=128 K=768 cluster (1 admit; speedup 1.23x; M=4480 rejected) -----
+    ( 5972,  128,  768, "torch.bfloat16"),  # EN_K768_S18  hbl/tb=1.227x CI95=[1.226, 1.227] (mirror of S18)
+})
+
+# Composed 36-cell P8 envelope.  Four named provenance frozensets (anchors,
+# neighbors, K-1175/K-1161 E2 admits, K-1205 E_N3 admits) -- the dispatch
+# path consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE rule and
+# its K-1175 / K-1205 extensions, source-ticket lineage is load-bearing for
+# future reviewers (precedence-inversion debugging, PMC re-classifier work,
+# ADR audits) so each measurement campaign keeps its own named set with a
+# runtime size + disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
-    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_E2_ADMITS_3
+    _K1121_P8_ANCHORS_13
+    | _K1131_P8_NEIGHBORS_12
+    | _K1161_E2_ADMITS_3
+    | _K1205_EN3_ADMITS_8
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
-    "K-1175 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate or stray "
-    "entry has crept in.")
-# Cross-check: the three sub-sets must be disjoint by construction.
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36, (
+    "K-1205 P8 envelope must be exactly 36 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 admits); "
+    "a duplicate or stray entry has crept in.")
+# Cross-check: the four sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
-# K-1121 anchors and minus all K-1131 neighbors.
+# K-1121 anchors and minus all K-1131 neighbors; K-1205 E_N3 admits use
+# N=128 (which is in NO K-1121/K-1131/K-1161 cell -- prior P8 cells all
+# have N >= 896).
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
     "rules require strict disjointness from the 13 K-1121 anchors.")
@@ -480,6 +524,15 @@ assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
 assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1131 neighbors; the K-1161 "
     "candidate generator excluded all K-1131 neighbors by construction.")
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1205 E_N3 admits overlap with K-1121 anchors; E_N3 candidates have "
+    "N=128 by construction and no K-1121 anchor has N=128.")
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1205 E_N3 admits overlap with K-1131 neighbors; E_N3 candidates have "
+    "N=128 by construction and no K-1131 neighbor has N=128.")
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates have "
+    "N=128 by construction and no K-1161 E2 admit has N=128.")
 
 
 # ---------------------------------------------------------------------------
@@ -518,11 +571,11 @@ def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
-    triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
-    neighbors + K-1175/K-1161 E2 admits).
+    """K-1144 P8 (extended by K-1175 / K-1205) — direct hipBLASLt route-OUT
+    for the quadruply-validated MFMA-issue-stall cohort (K-1121 anchors +
+    K-1131 neighbors + K-1175/K-1161 E2 admits + K-1205 E_N3 N=128 admits).
 
-    Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 36 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

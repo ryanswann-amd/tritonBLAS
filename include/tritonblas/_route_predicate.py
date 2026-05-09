@@ -1241,137 +1241,21 @@ def _k1382_p14_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# K-1412 (S-002) — P15 `skinny_N512` K-COMPLEMENT route-OUT (9th-position).
-#
-# K-1425 productionises the K-1412-validated 12-cell `skinny_N512` K-axis
-# EXTREMES cohort as `_K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12`, layered as
-# the 9th-position envelope in the dispatch precedence chain on top of the
-# K-1400 P14 91-cell baseline (envelope grows 91 → 103 cells; +12 admits).
-#
-# Bucket scope: this is the N=512 sibling of K-1402's K-1397 P13/P14 N=256
-# K-axis-extremes productionisation (K-1406).  K-1409 already productionised
-# the N=512 K-COMPLEMENT mid-K band (K ∈ {4096, 8192, 16384}); K-1412 closes
-# the residual K-axis EXTREMES band (K ∈ {2048, 32768}) identified in
-# K-1404's post-P14 decomposition for the skinny_N512 bucket and silently
-# dropped by the K-1409 sweep (per the K-1409 SKEPTIC FLAG documented in the
-# K-1409 KB note).
-#
-# K-COMPLEMENT region (mirrors K-1397 with N axis bumped 256 → 512):
-#   M ∈ {2048, 4096, 8192}   (3 anchors, same as K-1367 / K-1397 row)
-#   N = 512                   (column-narrow regime, +1 column step from N=256)
-#   K ∈ {2048, 32768}         (extremes — small-K starvation + large-K LDS-BC)
-#   dtype ∈ {bf16, fp16}      (K-913 §3 dtype invariance preserved)
-# = 3 × 1 × 2 × 2 = 12 cells.
-#
-# PMC mechanism (consistent with K-913 longK_smallSquare findings, inherited
-# from K-1397/K-1402 with N-axis attenuation per K-1409 R-1409):
-#   * K=2048: too few K-tiles per CU starves persistent_matmul tile parallelism
-#     (small-K starvation regime — same root cause as K-1397 N=256)
-#   * K=32768: persistent N=512 tile width overflows LDS bank-conflict
-#     capacity (large-K saturation — same as K-1397 N=256 with LDS pressure
-#     attenuated by N-axis monotonic decline 1.45 → 0.92 → ~0.7 at N=128/256/512
-#     but still discriminating per R-1409.LDS-BC-DISCRIMINATOR-ATTENUATES-WITH-N-
-#     BUT-REMAINS-PER-CELL-ADMIT-CLEAN).
-# The complementary mid-K band (K ∈ {4096, 8192, 16384}) is already routed by
-# the K-1409 P15 9th-position frozenset variant (parallel productionisation);
-# K-1412 closes the K-axis extremes left open by K-1409 (codified as
-# R-1412.SKINNY-N512-K-COMPLEMENT-EXTREMES-MIRROR-K1397-N256-WITH-N-ATTENUATION).
-#
-# Disjointness rationale (verified by frozenset.isdisjoint at module load):
-#   * P8 sub-frozensets — K-1219 E3 N=256 sub-frozenset uses N=256 only; no
-#     N=512 cell anywhere in P8.
-#   * K971_ROUTE_TABLE — K-905/K-971 + K-1335 use M=N ∈ {1024, 2048};
-#     neither has N=512.
-#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096}; N != 512.
-#   * K-1367 P13 — uses N=128.
-#   * K-1382 P14 — uses N=256 (mid-K band K ∈ {4096, 8192, 16384}).
-# All asserted at module load.  The P15 K-axis-extremes scoping (K ∈ {2048,
-# 32768}) is also disjoint from any future P15 mid-K-band frozenset (which
-# would use K ∈ {4096, 8192, 16384}); the two N=512 productionisations
-# partition the P15 admit set by K-axis band.
-# ---------------------------------------------------------------------------
+# K-1412 (S-002) — P15 skinny_N512 K-COMPLEMENT route-OUT (9th-position).
+# 12 cells: M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,32768} × {bf16,fp16}.
+# Closes the K-1404 post-P14 4-bucket decomposition residual at the
+# skinny_N512 K-axis extremes (sibling to K-1397 N=256 with N bumped 256→512).
+# Naturally disjoint from P1–P14 (no prior sub-frozenset uses N=512).
 _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12 = frozenset({
-    # M=2048 row × K ∈ {2048, 32768} × {bf16, fp16}
-    (2048, 512,  2048, "torch.bfloat16"),
-    (2048, 512,  2048, "torch.float16"),
-    (2048, 512, 32768, "torch.bfloat16"),
-    (2048, 512, 32768, "torch.float16"),
-    # M=4096 row × K ∈ {2048, 32768} × {bf16, fp16}
-    (4096, 512,  2048, "torch.bfloat16"),
-    (4096, 512,  2048, "torch.float16"),
-    (4096, 512, 32768, "torch.bfloat16"),
-    (4096, 512, 32768, "torch.float16"),
-    # M=8192 row × K ∈ {2048, 32768} × {bf16, fp16}
-    (8192, 512,  2048, "torch.bfloat16"),
-    (8192, 512,  2048, "torch.float16"),
-    (8192, 512, 32768, "torch.bfloat16"),
-    (8192, 512, 32768, "torch.float16"),
+    (M, 512, K, dt)
+    for M in (2048, 4096, 8192)
+    for K in (2048, 32768)
+    for dt in ("torch.bfloat16", "torch.float16")
 })
-assert len(_K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12) == 12, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT frozenset must be exactly 12 cells "
-    "(M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,32768} × {bf16,fp16}); "
-    "any deviation indicates an authoring typo against the K-1404 post-P14 "
-    "decomposition or the K-1412 K-COMPLEMENT extremes scoping (mirrors "
-    "K-1397 N=256 with N axis bumped 256 → 512).")
-# Cross-frozenset disjointness — K-1412 P15 vs prior envelopes (5-way).
-_K1412_P15_VS_P8_DISJOINT = (
-    _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1412_P15_VS_P8_DISJOINT, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT cell overlaps the K-1322 51-cell P8 "
-    "envelope; P8's K-1219 E3 N=256 sub-frozenset uses N=256 — P15 uses "
-    "N=512, natural disjointness, asserted as cheap insurance per "
-    "R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
-_K1412_P15_VS_K971_DISJOINT = (
-    _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(K971_ROUTE_TABLE))
-assert _K1412_P15_VS_K971_DISJOINT, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
-    "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ {1024, 2048}; "
-    "P15 cells all use N=512 — natural disjointness, asserted insurance.")
-_K1412_P15_VS_P12_DISJOINT = (
-    _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1412_P15_VS_P12_DISJOINT, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT cell overlaps K-1361 P12 square_mid; "
-    "P12 cells use M=N=K ∈ {2048, 4096}; P15 cells all use N=512 — natural "
-    "disjointness, asserted for completeness (A4 no-double-admit).")
-_K1412_P15_VS_P13_DISJOINT = (
-    _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(
-        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
-assert _K1412_P15_VS_P13_DISJOINT, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT cell overlaps K-1367 P13 skinny_N128; "
-    "P13 cells all use N=128, P15 cells all use N=512 — natural disjointness, "
-    "asserted for completeness (A4 sibling-N firewall).")
-_K1412_P15_VS_P14_DISJOINT = (
-    _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12.isdisjoint(
-        _K1382_P14_SKINNY_N256_KCOMPL_ROUTEOUT_18))
-assert _K1412_P15_VS_P14_DISJOINT, (
-    "K-1412 P15 skinny_N512 K-COMPLEMENT cell overlaps K-1382 P14 skinny_N256; "
-    "P14 cells all use N=256, P15 cells all use N=512 — natural disjointness, "
-    "asserted for completeness (A4 sibling-N firewall).")
 
 
 def _k1412_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1412 P15 — direct hipBLASLt route-OUT for the 12-cell skinny_N512
-    K-COMPLEMENT cohort (`_K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12`).
-
-    Returns True iff (M, N, K, dtype) matches one of the 12 strict-equality
-    keys: M ∈ {2048, 4096, 8192} × N = 512 × K ∈ {2048, 32768} ×
-    dtype ∈ {torch.bfloat16, torch.float16}.
-
-    Source measurement: K-1412 paired n=30 HIP-graph hot-cache benchmarks
-    on MI300X / gfx942 with B=10000 vectorised paired bootstrap (numpy
-    advanced-indexing per R-1298 / R-1367); 12/12 ROUTE-OUT, geomean
-    cohort speedup ≥ 1.0× vs hipBLASLt.  Mechanism is hipBLASLt's split-K
-    kernel selection winning over tritonblas persistent_matmul at extreme
-    aspect ratios where (a) K=2048 starves persistent_matmul tile
-    parallelism with too few K-tiles per CU and (b) K=32768 overflows the
-    persistent N=512 tile LDS bank-conflict capacity (consistent with
-    K-913 longK_smallSquare PMC findings and R-1409 N-axis attenuation).
-
-    Stacked at 9th-position per K-1175 stacked-predicate convention;
-    disjoint by construction with all P1–P14 sub-frozensets via the
-    cross-frozenset asserts above.
-    """
+    """K-1412 P15 — hipBLASLt route-OUT for skinny_N512 K-COMPL extremes."""
     return (
         (int(M), int(N), int(K), str(dtype))
         in _K1412_P15_SKINNY_N512_KCOMPL_ROUTEOUT_12

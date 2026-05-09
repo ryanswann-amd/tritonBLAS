@@ -2447,6 +2447,32 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
+    # K-1717 P29 (20th-position): NIB (N-In-Between) envelope alias-stack
+    # 65-cell route-OUT.  Stacks AFTER P28 per the K-1175 stacked-
+    # predicate convention; closes the in-between-N stitching gaps at
+    # N ∈ {80, 112, 144, 176, 208, 240} that the K-1685 P28 alias-stack
+    # left exposed because P28 (and every prior K-COMPLEMENT frozenset)
+    # is N-pinned to the productionised N-ladder {128, 256, 512, 1024,
+    # 2048, 4096, 8192, 16384, 32768}.  K-1704 paired n=30 HIP-graph
+    # hot-cache MI300X gfx942 audit (108 cells) against the LIVE post-
+    # K-1685 P28 oracle: 65/108 cells cleared the strict 5% admit gate
+    # (oracle/hbl speedup_ci95_hi < 1/1.05 = 0.95238 — forced-hipBLASLt
+    # is reliably ≥5% faster than the live oracle with non-overlapping
+    # bootstrap CIs); cohort oracle/hbl geomean 0.678 → 1.475× hbl-
+    # route lift; per-N range 1.38×-1.70×.  Six per-N frozensets
+    # partitioned by N (per the K-1175 stacked-predicate audit-handle
+    # convention): N=80 / N=112 / N=144 / N=176 (8/8/9/8 fp16-only
+    # cells), N=208 / N=240 (15/17 cells; bf16 reappears because R-K979
+    # P5 Clause-3's minMN > 192 ceiling excludes bf16 from upstream
+    # route-OUT).  Disjoint by N-projection from every P1-P28
+    # sub-frozenset (P29 uses N ∈ {80, 112, 144, 176, 208, 240} which
+    # fall BETWEEN the productionised N-ladder rungs — the K-1704
+    # audit-pattern lesson; K-1687.STITCHING-GAPS-ARE-ROUTE-OUT-
+    # FAILURES rule applies, NOT the naive "widen the existing alias
+    # bin" fix).
+    if _k1704_p29_nib_envelope_aliasstack_routeout(
+            int(M), int(N), int(K), a_dtype):
+        return True
     return False
 
 
@@ -3212,3 +3238,320 @@ def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
         (int(M), int(N), int(K), str(dtype))
         in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
     )
+
+
+# ===========================================================================
+# K-1717 (S-002) — P29 NIB (N-In-Between) ENVELOPE ALIAS-STACK 65-cell
+# route-OUT extension at the 20th+ position, productionising the K-1704
+# paired n=30 hot-cache HIP-graph audit (108 cells: N ∈ {80, 112, 144, 176,
+# 208, 240} × M ∈ {2048, 4096, 8192} × K ∈ {2048, 8192, 32768} ×
+# {bf16, fp16}) measured against the LIVE post-K-1685 P28 routing oracle
+# (fork branch fix/K-1685-p28-skinny-n128-kcompl-aliasstack tip 6785fcd).
+#
+# Of the 108 audit cells, 65 cleared the strict 5% admit gate (oracle/hbl
+# speedup CI95-hi < 1/1.05 = 0.95238 — i.e. forced-hipBLASLt is reliably
+# ≥5% faster than the live oracle with non-overlapping bootstrap CIs);
+# the remaining 43 cells either had CIs straddling the gate boundary or
+# were already at parity with hipBLASLt (the bf16 cohort at N ∈ {80, 112,
+# 144, 176} is essentially indistinguishable from hbl because R-K979 P5
+# Clause-3 already routes-OUT bf16 small-M small-N long-K cells
+# upstream).  Per-N admit cardinalities and oracle/hbl geomeans:
+#
+#   N= 80:  8 cells (all fp16); oracle/hbl geomean 0.670 →  1.49× lift
+#   N=112:  8 cells (all fp16); oracle/hbl geomean 0.623 →  1.61× lift
+#   N=144:  9 cells (all fp16); oracle/hbl geomean 0.588 →  1.70× lift
+#   N=176:  8 cells (all fp16); oracle/hbl geomean 0.707 →  1.41× lift
+#   N=208: 15 cells (8 fp16 + 7 bf16); oracle/hbl geomean 0.707 → 1.41×
+#   N=240: 17 cells (8 fp16 + 9 bf16); oracle/hbl geomean 0.723 → 1.38×
+#   ──────────────────────────────────────────────────────────────────
+#   Total: 65 cells; cohort oracle/hbl geomean 0.678 → 1.475× lift
+#
+# Mechanism (K-1704 audit findings, source `output/k1704_FINAL_REPORT.md`):
+# the in-between N values (N ∉ productionised N-ladder
+# {64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}) fall through
+# every existing alias-stack frozenset; the Origami selector picks a
+# triton persistent_matmul tile whose BLOCK_N (16/32/64) does not divide
+# N and whose K-mid LDS-bank-conflict signature dominates at K ≥ 8192
+# (worst at K=32768).  The fix is purely a routing extension — the
+# winning kernel for every flagged cell is the same hipBLASLt path that
+# the nearest productionised N alias (N ∈ {64, 128, 256}) already routes
+# to.  This mirrors the K-1685 P28 mechanism extended along the
+# N-direction instead of the K-direction.
+#
+# Dtype asymmetry: bf16 is largely route-OUT'd upstream by R-K979 P5
+# Clause-3 (`min(M, N) ≤ 192 ∧ K ≥ 2048`, bf16-only) for N ∈ {80, 112,
+# 144, 176}, leaving fp16 as the load-bearing dtype at those N values.
+# At N ∈ {208, 240} the P5 minMN-ceiling (≤ 192) excludes both dtypes so
+# bf16 reappears as a route-OUT candidate (alongside fp16) — this is
+# exactly the same dtype-mirror gap shape that K-1685 P28 closed at
+# N=128 along the K-axis.
+#
+# ALIAS-STACK structure: the K-1704 admit set is partitioned by N into
+# six per-N frozensets (`_K1704_P29_NIB_ENVELOPE_ALIASSTACK_<N>`) so the
+# cardinality assert at each N stays a single audit handle (any future
+# K-1704 re-audit at one N value can roll the corresponding frozenset
+# forward without disturbing the other five).  The membership test
+# `_k1704_p29_nib_envelope_aliasstack_routeout` checks the union by
+# dispatching on N first (constant-time switch) and then per-frozenset
+# O(1) membership; cohort cardinality assertion (65 = 8+8+9+8+15+17) is
+# enforced at module load.
+#
+# Why per-N frozensets rather than a single 65-cell set: each in-between
+# N is a separate audit unit (different Origami tile choice per N — see
+# K-1704 worst-cell decomposition by N), so per-N grouping preserves the
+# K-1175 stacked-predicate audit-handle convention.  Per-N geomean lift
+# also varies meaningfully (1.38× – 1.70×); a per-N rollup makes future
+# regression triage straightforward.
+#
+# Why not override / extend P28: P28 is restricted to N=128 (single-point
+# frozenset per K-1687.STITCHING-GAPS-ARE-ROUTE-OUT-FAILURES-NOT-MISSING-
+# TILE-FAILURES-WIDENING-ALIAS-BIN-IS-WRONG-MECHANISM); widening P28's
+# N-axis would (a) break sibling-N firewall asserts and (b) couple the
+# N=128 audit handle to N ∈ {80, 112, 144, 176, 208, 240} which were
+# never measured against P28.  The P29 NIB envelope is the correct
+# mechanism — a NEW route-OUT predicate over the in-between-N cohort,
+# disjoint by N-axis projection from P28.
+#
+# Why 20th+ position: P28 (K-1673) sits at the 19th slot.  P29 takes the
+# next reachable predicate slot at the 20th.  The dispatch chain order
+# is preserved.  Disjoint by N-axis projection from every P1–P28
+# sub-frozenset (P29 uses N ∈ {80, 112, 144, 176, 208, 240}; all prior
+# K-COMPLEMENT N-ladder values are in {128, 256, 512, 1024, 2048, 4096,
+# 8192, 16384, 32768}); R-K979 P5 Clause-3 is a closed-form predicate so
+# the bf16 cells at N ∈ {208, 240} are reachable in P29 only because P5
+# excludes them at minMN > 192 (verified explicitly via the
+# `_K1704_P29_VS_P5_DISJOINT_BF16` assert below).
+# ===========================================================================
+
+# Per-N audit-cohort frozensets.  Source-of-truth measurements at
+# `/home/ryaswann/mc2-workspaces/K-1704/output/k1704_per_cell_gaps.csv`;
+# extraction gate documented at
+# `/home/ryaswann/mc2-workspaces/K-1717/output/k1717_admitted_cells.json`.
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_80 = frozenset({
+    # 8 fp16 cells; oracle/hbl geomean 0.670 (1.49× hbl-route lift)
+    (2048,  80,  2048, "torch.float16"),  # speedup=0.892 CI=[0.880,0.899]
+    (2048,  80,  8192, "torch.float16"),  # speedup=0.645 CI=[0.643,0.649]
+    (2048,  80, 32768, "torch.float16"),  # speedup=0.440 CI=[0.426,0.461]
+    (4096,  80,  8192, "torch.float16"),  # speedup=0.863 CI=[0.859,0.866]
+    (4096,  80, 32768, "torch.float16"),  # speedup=0.587 CI=[0.569,0.675]
+    (8192,  80,  2048, "torch.float16"),  # speedup=0.868 CI=[0.864,0.871]
+    (8192,  80,  8192, "torch.float16"),  # speedup=0.689 CI=[0.678,0.738]
+    (8192,  80, 32768, "torch.float16"),  # speedup=0.533 CI=[0.525,0.538]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_80) == 8, (
+    "K-1704 P29 NIB N=80 frozenset must be exactly 8 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_112 = frozenset({
+    # 8 fp16 cells; oracle/hbl geomean 0.623 (1.61× hbl-route lift)
+    (2048, 112,  2048, "torch.float16"),  # speedup=0.858 CI=[0.855,0.862]
+    (2048, 112,  8192, "torch.float16"),  # speedup=0.582 CI=[0.579,0.586]
+    (2048, 112, 32768, "torch.float16"),  # speedup=0.415 CI=[0.401,0.446]
+    (4096, 112,  8192, "torch.float16"),  # speedup=0.730 CI=[0.719,0.742]
+    (4096, 112, 32768, "torch.float16"),  # speedup=0.573 CI=[0.571,0.626]
+    (8192, 112,  2048, "torch.float16"),  # speedup=0.835 CI=[0.830,0.840]
+    (8192, 112,  8192, "torch.float16"),  # speedup=0.639 CI=[0.614,0.653]
+    (8192, 112, 32768, "torch.float16"),  # speedup=0.489 CI=[0.481,0.494]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_112) == 8, (
+    "K-1704 P29 NIB N=112 frozenset must be exactly 8 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_144 = frozenset({
+    # 9 fp16 cells; oracle/hbl geomean 0.588 (1.70× hbl-route lift)
+    (2048, 144,  2048, "torch.float16"),  # speedup=0.628 CI=[0.626,0.633]
+    (2048, 144,  8192, "torch.float16"),  # speedup=0.419 CI=[0.410,0.428]
+    (2048, 144, 32768, "torch.float16"),  # speedup=0.274 CI=[0.271,0.276]
+    (4096, 144,  2048, "torch.float16"),  # speedup=0.783 CI=[0.780,0.787]
+    (4096, 144,  8192, "torch.float16"),  # speedup=0.589 CI=[0.583,0.600]
+    (4096, 144, 32768, "torch.float16"),  # speedup=0.570 CI=[0.551,0.591]
+    (8192, 144,  2048, "torch.float16"),  # speedup=0.915 CI=[0.911,0.921]
+    (8192, 144,  8192, "torch.float16"),  # speedup=0.761 CI=[0.751,0.769]
+    (8192, 144, 32768, "torch.float16"),  # speedup=0.635 CI=[0.631,0.661]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_144) == 9, (
+    "K-1704 P29 NIB N=144 frozenset must be exactly 9 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_176 = frozenset({
+    # 8 fp16 cells; oracle/hbl geomean 0.707 (1.41× hbl-route lift)
+    (2048, 176,  8192, "torch.float16"),  # speedup=0.715 CI=[0.705,0.735]
+    (2048, 176, 32768, "torch.float16"),  # speedup=0.494 CI=[0.479,0.516]
+    (4096, 176,  2048, "torch.float16"),  # speedup=0.930 CI=[0.920,0.933]
+    (4096, 176,  8192, "torch.float16"),  # speedup=0.723 CI=[0.715,0.757]
+    (4096, 176, 32768, "torch.float16"),  # speedup=0.538 CI=[0.525,0.554]
+    (8192, 176,  2048, "torch.float16"),  # speedup=0.938 CI=[0.934,0.942]
+    (8192, 176,  8192, "torch.float16"),  # speedup=0.774 CI=[0.734,0.835]
+    (8192, 176, 32768, "torch.float16"),  # speedup=0.670 CI=[0.667,0.680]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_176) == 8, (
+    "K-1704 P29 NIB N=176 frozenset must be exactly 8 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_208 = frozenset({
+    # 15 cells (8 fp16 + 7 bf16); oracle/hbl geomean 0.707 (1.41× lift).
+    # bf16 cells are reachable here only because R-K979 P5 Clause-3
+    # (min(M,N) ≤ 192 ∧ K ≥ 2048) excludes N=208 at the minMN-ceiling.
+    (2048, 208,  8192, "torch.bfloat16"), # speedup=0.755 CI=[0.752,0.760]
+    (2048, 208,  8192, "torch.float16"),  # speedup=0.758 CI=[0.755,0.770]
+    (2048, 208, 32768, "torch.bfloat16"), # speedup=0.574 CI=[0.520,0.591]
+    (2048, 208, 32768, "torch.float16"),  # speedup=0.536 CI=[0.507,0.558]
+    (4096, 208,  2048, "torch.float16"),  # speedup=0.937 CI=[0.933,0.942]
+    (4096, 208,  8192, "torch.bfloat16"), # speedup=0.747 CI=[0.712,0.762]
+    (4096, 208,  8192, "torch.float16"),  # speedup=0.711 CI=[0.706,0.764]
+    (4096, 208, 32768, "torch.bfloat16"), # speedup=0.601 CI=[0.584,0.615]
+    (4096, 208, 32768, "torch.float16"),  # speedup=0.617 CI=[0.607,0.627]
+    (8192, 208,  2048, "torch.bfloat16"), # speedup=0.882 CI=[0.873,0.886]
+    (8192, 208,  2048, "torch.float16"),  # speedup=0.879 CI=[0.875,0.883]
+    (8192, 208,  8192, "torch.bfloat16"), # speedup=0.749 CI=[0.718,0.761]
+    (8192, 208,  8192, "torch.float16"),  # speedup=0.733 CI=[0.726,0.744]
+    (8192, 208, 32768, "torch.bfloat16"), # speedup=0.626 CI=[0.607,0.651]
+    (8192, 208, 32768, "torch.float16"),  # speedup=0.639 CI=[0.622,0.660]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_208) == 15, (
+    "K-1704 P29 NIB N=208 frozenset must be exactly 15 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+_K1704_P29_NIB_ENVELOPE_ALIASSTACK_240 = frozenset({
+    # 17 cells (8 fp16 + 9 bf16); oracle/hbl geomean 0.723 (1.38× lift).
+    # bf16 cells are reachable here only because R-K979 P5 Clause-3
+    # (min(M,N) ≤ 192 ∧ K ≥ 2048) excludes N=240 at the minMN-ceiling.
+    (2048, 240,  2048, "torch.bfloat16"), # speedup=0.945 CI=[0.941,0.950]
+    (2048, 240,  8192, "torch.bfloat16"), # speedup=0.717 CI=[0.713,0.721]
+    (2048, 240,  8192, "torch.float16"),  # speedup=0.739 CI=[0.723,0.745]
+    (2048, 240, 32768, "torch.bfloat16"), # speedup=0.545 CI=[0.515,0.554]
+    (2048, 240, 32768, "torch.float16"),  # speedup=0.518 CI=[0.495,0.529]
+    (4096, 240,  2048, "torch.bfloat16"), # speedup=0.922 CI=[0.918,0.928]
+    (4096, 240,  2048, "torch.float16"),  # speedup=0.911 CI=[0.905,0.918]
+    (4096, 240,  8192, "torch.bfloat16"), # speedup=0.729 CI=[0.710,0.733]
+    (4096, 240,  8192, "torch.float16"),  # speedup=0.720 CI=[0.708,0.773]
+    (4096, 240, 32768, "torch.bfloat16"), # speedup=0.585 CI=[0.579,0.615]
+    (4096, 240, 32768, "torch.float16"),  # speedup=0.597 CI=[0.587,0.619]
+    (8192, 240,  2048, "torch.bfloat16"), # speedup=0.878 CI=[0.874,0.883]
+    (8192, 240,  2048, "torch.float16"),  # speedup=0.874 CI=[0.869,0.880]
+    (8192, 240,  8192, "torch.bfloat16"), # speedup=0.784 CI=[0.756,0.807]
+    (8192, 240,  8192, "torch.float16"),  # speedup=0.769 CI=[0.761,0.776]
+    (8192, 240, 32768, "torch.bfloat16"), # speedup=0.622 CI=[0.609,0.628]
+    (8192, 240, 32768, "torch.float16"),  # speedup=0.639 CI=[0.610,0.661]
+})
+assert len(_K1704_P29_NIB_ENVELOPE_ALIASSTACK_240) == 17, (
+    "K-1704 P29 NIB N=240 frozenset must be exactly 17 cells; deviation "
+    "indicates an authoring typo against the K-1704 admit set.")
+
+# Per-N → frozenset switch table (constant-time N dispatch in the
+# membership predicate).  Keyed on int N to avoid any tuple-of-N
+# look-up overhead.
+_K1704_P29_NIB_ENVELOPE_BY_N = {
+     80: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_80,
+    112: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_112,
+    144: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_144,
+    176: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_176,
+    208: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_208,
+    240: _K1704_P29_NIB_ENVELOPE_ALIASSTACK_240,
+}
+
+# Cohort union (audit handle for the full 65-cell P29 admit set).  Pinned
+# at exactly 65 cells (8 + 8 + 9 + 8 + 15 + 17); any deviation indicates
+# an authoring typo against the K-1704 admit set.
+_K1704_P29_NIB_ENVELOPE_UNION_65 = frozenset().union(
+    *_K1704_P29_NIB_ENVELOPE_BY_N.values())
+assert len(_K1704_P29_NIB_ENVELOPE_UNION_65) == 65, (
+    "K-1704 P29 NIB envelope union must be exactly 65 cells "
+    "(8 + 8 + 9 + 8 + 15 + 17); deviation indicates either a per-N "
+    "frozenset typo or accidental cross-N collision.")
+
+# Sibling-N firewall: the P29 N-projection must be disjoint from every
+# prior K-COMPLEMENT N-ladder value used by P1–P28 (those use N ∈
+# {128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}; P29 uses N ∈
+# {80, 112, 144, 176, 208, 240}).  No cell-level isdisjoint loop is
+# needed beyond the convention because the N-axis projection is
+# trivially disjoint, but we pin the N-projection itself so an N typo
+# (e.g. 128 → 12 8) trips the assert at module load.
+assert {n for (_M, n, _K, _dt) in _K1704_P29_NIB_ENVELOPE_UNION_65} == {
+    80, 112, 144, 176, 208, 240}, (
+    "K-1704 P29 NIB envelope N-projection must be exactly {80, 112, "
+    "144, 176, 208, 240}; deviation indicates an N-axis typo and "
+    "potentially a sibling-N firewall violation against the existing "
+    "K-COMPLEMENT N-ladder.")
+
+# Cross-frozenset disjointness against the K-1685 P28 envelope (N=128)
+# — trivially holds via the N-projection assert above but pinned for the
+# K-1175 stacked-predicate convention.
+assert _K1704_P29_NIB_ENVELOPE_UNION_65.isdisjoint(
+    _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30), (
+    "K-1704 P29 NIB envelope must be disjoint from K-1685 P28 envelope "
+    "(P28 is N=128-only; P29 N-axis is {80, 112, 144, 176, 208, 240}).  "
+    "Any overlap indicates either a P28 N-axis widening (which K-1687 "
+    "explicitly invalidated) or a P29 authoring typo.")
+
+# bf16 cells in P29 (at N ∈ {208, 240}) must be DISJOINT from R-K979 P5
+# Clause-3 — P5 catches bf16 only at minMN ≤ 192, so any bf16 P29 cell
+# at N ∈ {208, 240} (where minMN = min(M, N) > 192 because all M ≥ 2048
+# and N ≥ 208) is structurally outside P5's gate.  Verified dynamically
+# so a future P5 ceiling change (e.g. minMN ≤ 256) trips the assert.
+_K1704_P29_VS_P5_DISJOINT_BF16 = frozenset({
+    cell for cell in _K1704_P29_NIB_ENVELOPE_UNION_65
+    if cell[3] == "torch.bfloat16"
+    and R_K979_P5_route_to_hbl(cell[0], cell[1], cell[2], cell[3])
+})
+assert _K1704_P29_VS_P5_DISJOINT_BF16 == frozenset(), (
+    "K-1704 P29 bf16 cells (at N ∈ {208, 240}) must be DISJOINT from "
+    "R-K979 P5 Clause-3 (which gates on min(M,N) ≤ 192 ∧ K ≥ 2048, "
+    "bf16-only).  P5 currently excludes all P29 bf16 cells via the "
+    "minMN-ceiling (208 > 192).  Any non-empty overlap means P5's "
+    "ceiling has been widened above 192 — re-audit the P29 bf16 cells "
+    "to confirm they still need a NEW route-OUT slot at the 20th "
+    f"position (overlap = {_K1704_P29_VS_P5_DISJOINT_BF16!r}).")
+
+
+def _k1704_p29_nib_envelope_aliasstack_routeout(
+    M: int, N: int, K: int, dtype) -> bool:
+    """K-1717 P29 — direct hipBLASLt route-OUT for the K-1704-verified
+    65-cell N-in-between (NIB) envelope at N ∈ {80, 112, 144, 176, 208,
+    240} (`_K1704_P29_NIB_ENVELOPE_UNION_65`, partitioned per-N into the
+    six `_K1704_P29_NIB_ENVELOPE_ALIASSTACK_<N>` frozensets).
+
+    Returns True iff (M, N, K, dtype) matches one of the 65
+    strict-equality keys.  Constant-time N switch (dict lookup) followed
+    by per-N frozenset O(1) membership.
+
+    Source measurement: K-1704 paired n=30 hot-cache HIP-graph audit on
+    MI300X / gfx942 (rad-mi300x-1, c42 outage fallback to radha mi300x
+    partition) against the LIVE post-K-1685
+    P28 routing oracle (fork branch
+    `fix/K-1685-p28-skinny-n128-kcompl-aliasstack` tip 6785fcd); 65 of
+    108 cells cleared the strict 5% admit gate (oracle/hbl
+    speedup_ci95_hi < 1/1.05 = 0.95238 — i.e. forced-hipBLASLt is
+    reliably ≥5% faster than the live oracle with non-overlapping
+    bootstrap CIs); cohort oracle/hbl geomean = 0.678 → expected hbl-
+    route lift 1.475× across the 65-cell NIB cohort; per-N geomean lift
+    range 1.38× – 1.70×.
+
+    Stacked at the 20th-position predicate slot per the K-1175 stacked-
+    predicate convention after K-1673 P28 (19th slot).  Disjoint by N-
+    projection from every P1–P28 sub-frozenset (those use the
+    productionised N-ladder {128, 256, 512, 1024, 2048, 4096, 8192,
+    16384, 32768}; P29 uses N ∈ {80, 112, 144, 176, 208, 240} which fall
+    BETWEEN those rungs — the K-1704 audit-pattern lesson).
+
+    Mechanism (K-1704 RCA): in-between N values fall through every
+    productionised alias-stack frozenset; the Origami selector picks a
+    triton persistent_matmul tile whose BLOCK_N (16/32/64) does not
+    divide N and whose K-mid LDS-bank-conflict signature dominates at
+    K ≥ 8192.  The fix is purely a routing extension — the winning
+    kernel for every flagged cell is the same hipBLASLt path that the
+    nearest productionised N alias (N ∈ {64, 128, 256}) already routes
+    to.  This mirrors the K-1685 P28 mechanism extended along the
+    N-direction.
+
+    Why per-N frozensets rather than a single 65-cell set: each in-
+    between N is a separate audit unit (different Origami tile choice
+    per N), so per-N grouping preserves the K-1175 stacked-predicate
+    audit-handle convention and keeps per-N geomean rollups direct.
+    """
+    n_int = int(N)
+    bucket = _K1704_P29_NIB_ENVELOPE_BY_N.get(n_int)
+    if bucket is None:
+        return False
+    return (int(M), n_int, int(K), str(dtype)) in bucket

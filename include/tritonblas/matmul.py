@@ -106,6 +106,29 @@ from ._route_predicate import (
     # chain.
     _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # K-1717 (S-002): P29 NIB (N-In-Between) envelope alias-stack 65-cell
+    # route-OUT (20th-position, load-bearing).  Closes the in-between-N
+    # stitching gaps at N ∈ {80, 112, 144, 176, 208, 240} that the
+    # K-1685 P28 alias-stack left exposed because P28 (and every prior
+    # K-COMPLEMENT frozenset) is N-pinned to the productionised N-ladder
+    # {128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768}.  K-1704
+    # paired n=30 HIP-graph hot-cache MI300X gfx942 audit (108 cells)
+    # against the LIVE post-K-1685 P28 oracle: 65/108 cleared the strict
+    # 5% admit gate (oracle/hbl speedup CI95-hi < 1/1.05 with non-
+    # overlapping bootstrap CIs); cohort oracle/hbl geomean 0.678 →
+    # 1.475× hbl-route lift.  Per-N geomean lift range 1.38× – 1.70×.
+    # Six per-N frozensets:
+    #   N= 80  (8 fp16 cells)   1.49× lift
+    #   N=112  (8 fp16 cells)   1.61× lift
+    #   N=144  (9 fp16 cells)   1.70× lift
+    #   N=176  (8 fp16 cells)   1.41× lift
+    #   N=208 (15 cells, 8 fp16 + 7 bf16) 1.41× lift
+    #   N=240 (17 cells, 8 fp16 + 9 bf16) 1.38× lift
+    # bf16 cells reappear at N ∈ {208, 240} because R-K979 P5 Clause-3
+    # excludes them at the minMN > 192 ceiling.  Disjoint by N-axis
+    # projection from every P1–P28 sub-frozenset (no overlap with P28).
+    _k1704_p29_nib_envelope_aliasstack_routeout
+        as _R_K1704_P29_nib_envelope_aliasstack_routeout,
 )
 
 
@@ -357,6 +380,31 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
     # handles per the K-1175 stacked-predicate convention.
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1717 (S-002): P29 NIB envelope route-OUT (20th-position, load-
+    # bearing).  Productionises the K-1704 paired n=30 HIP-graph hot-
+    # cache MI300X audit on the LIVE post-K-1685 P28 oracle: 65 cells
+    # across N ∈ {80, 112, 144, 176, 208, 240} × M ∈ {2048, 4096, 8192}
+    # × K ∈ {2048, 8192, 32768} cleared the strict 5% admit gate
+    # (CI95-hi < 1/1.05 = 0.95238 — forced-hipBLASLt is reliably ≥5%
+    # faster than the live oracle with non-overlapping bootstrap CIs).
+    # Cohort oracle/hbl geomean 0.678 → 1.475× hbl-route lift; per-N
+    # range 1.38×-1.70×.  Mechanism: the in-between N values fall
+    # through every productionised alias-stack frozenset (P1–P28 use
+    # the productionised N-ladder); the Origami selector picks a triton
+    # persistent_matmul tile whose BLOCK_N (16/32/64) does not divide N
+    # and whose K-mid LDS-bank-conflict signature dominates at K ≥ 8192
+    # (worst at K=32768).  The fix is purely a routing extension — the
+    # winning kernel for every flagged cell is the same hipBLASLt path
+    # that the nearest productionised N alias (N ∈ {64, 128, 256})
+    # already routes to (verified per-cell at K-1704; K-1687.STITCHING-
+    # GAPS-ARE-ROUTE-OUT-FAILURES rule applies).  Six per-N frozensets
+    # per the K-1175 stacked-predicate convention; bf16 cells at N ∈
+    # {208, 240} are reachable here only because R-K979 P5 Clause-3
+    # excludes them at the minMN > 192 ceiling (asserted via
+    # `_K1704_P29_VS_P5_DISJOINT_BF16` at module load).  Disjoint by
+    # N-projection from K-1685 P28 (P28 is N=128-only) — K-1687 already
+    # invalidated the naive "widen the N=128 alias bin" fix.
+    if _R_K1704_P29_nib_envelope_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

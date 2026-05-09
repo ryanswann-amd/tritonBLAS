@@ -3282,3 +3282,45 @@ _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9 = frozenset(
 )
 # Cardinality (==9) gated by tests/test_k1800_p32_skinny_n192_fp16_kcompl_aliasstack.py
 # per the K-1748 minimalist split: src holds data, tests hold invariants.
+
+
+# K-1811 P33 (24th-slot): N∈{96,160,224} K-COMPLEMENT alias-stack — extends
+# the K-1800 P32 (N=192) dtype-mirror productionization to the wave-misaligned
+# skinny-N cohort surveyed by K-1794.  34 cells total spanning
+# M∈{2048,4096,8192} × K∈{4096,8192,16384}:
+#   - N=224 fp16+bf16 (18): full uncovered cohort, no upstream slot catches.
+#   - N=160 fp16      ( 9): bf16 sibling already routed by R-K979 P5 Clause-3.
+#   - N=96  fp16      ( 7): bf16 sibling already routed; 2 K=8192 fp16 cells
+#                           at M ∈ {2048, 8192} EXCLUDED — TB wins decisively
+#                           there (K-1794 r=1.715/2.683; K-1811 prepatch
+#                           r=1.758/2.773).  M=4096 K=8192 fp16 IS included
+#                           (HBL wins r=0.734, p=0 per K-1811 prepatch).
+# Audit (K-1811 paired n=30 HIP-graph hot-cache, MI300X gfx942 OCI fallback
+# per INFRA-0048): 34/34 cells satisfy the strict K-1800 ship
+# gate (HBL median ≥ 1.05× TB AND paired t-test p < 0.05); cohort prepatch
+# ratio_oracle geomean ≈ 0.696× (HBL ≈ 1.44× faster).  Mechanism per K-1795
+# wave-alignment finding: N∈{96,160,224} are wave-misaligned against the
+# MI300X 64-lane wave-front and accumulate LDS-bank-conflict + MFMA tail
+# inefficiency vs the wave-aligned siblings N∈{64,128,192} (which are
+# already routed by P29/P28/P32 respectively).  Sibling-N disjoint vs P28
+# (N=128), P29 (N=64), P30 (N∈{384,768,1536}), P31 (N∈{32,48,80}), P32
+# (N=192) by N-axis projection (verified by 6-cell adjacency guard band).
+_K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34 = (
+    frozenset(  # N=224 — both dtypes uncovered (18 cells)
+        (M, 224, K, dt)
+        for M in (2048, 4096, 8192)
+        for K in (4096, 8192, 16384)
+        for dt in ("torch.float16", "torch.bfloat16")
+    ) | frozenset(  # N=160 fp16 — bf16 sibling already routed (9 cells)
+        (M, 160, K, "torch.float16")
+        for M in (2048, 4096, 8192)
+        for K in (4096, 8192, 16384)
+    ) | frozenset(  # N=96 fp16 minus 2 K=8192 TB-win cells (7 cells)
+        (M, 96, K, "torch.float16")
+        for M in (2048, 4096, 8192)
+        for K in (4096, 8192, 16384)
+        if not (K == 8192 and M in (2048, 8192))  # K-1794/K-1811: TB r>1.7×
+    )
+)
+# Cardinality (==34) gated by tests/test_k1811_p33_skinny_n96_n160_n224_kcompl_aliasstack.py
+# per the K-1748 minimalist split: src holds data, tests hold invariants.

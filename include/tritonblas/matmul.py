@@ -118,6 +118,9 @@ from ._route_predicate import (
     # K-1800 P32 (23rd-slot): N=192 fp16 K-COMPLEMENT alias-stack — 9 cells
     # closing the dtype-mirror gap left by R-K979 P5 Clause-3's bf16-only gate.
     _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9,
+    # K-1811 P33 (24th-slot): N∈{96,160,224} K-COMPLEMENT alias-stack — 34
+    # cells extending P32 to the wave-misaligned skinny-N cohort (K-1794 / K-1795).
+    _K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34,
 )
 
 
@@ -388,6 +391,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # already routed-OUT upstream at chain pos 4).  Verified by K-1800 paired
     # n=30 HIP-graph hot-cache + 6-cell N∈{128,256} adjacency guard band.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9: return True
+    # K-1811 P33 (24th-slot): N∈{96,160,224} K-COMPLEMENT alias-stack (34 cells;
+    # cohort prepatch geomean 0.696× → ≈1.0× post-route).  Extends P32 to the
+    # wave-misaligned skinny-N cohort (K-1794 54-cell sweep, K-1795 wave-
+    # alignment RCA).  18 N=224 (both dtypes) + 9 N=160 fp16 + 7 N=96 fp16
+    # (excludes the 2 K=8192 cells where TB wins r>1.7×).  Verified by K-1811
+    # paired n=30 HIP-graph hot-cache + 6-cell N∈{128,192} adjacency guard band.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1811_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34: return True
     return False
 
 

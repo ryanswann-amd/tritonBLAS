@@ -456,17 +456,70 @@ _K1161_E2_ADMITS_3 = frozenset({
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x CI95=[1.496, 1.504]
 })
 
-# Composed 28-cell P8 envelope.  Anchors, neighbors, and K-1175/K-1161 E2
-# admits are deliberately kept as separate constants so reviewers (and
-# the manifest auditors) can see provenance at a glance; the dispatch
-# path consults the union.
-_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
-    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_E2_ADMITS_3
+# K-1199 / E3 N-floor=256 relaxation candidates (7 cells).  K-1131-style
+# +/-1-power-of-2 N-axis projection of K-1121 PMC anchors + K-1175 E2_M1
+# admit, projected to N=256 (one tier below K-1131 N09 N=896 natural
+# floor).  Brief K-1219 example: "lower N-floor in _p8_mfma_issue_stall_
+# routeout from 512 to 256", testing whether the N-axis admit pattern is
+# arch-specific (like K-1175 E2 K-floor=128, MI300X-only) or portable
+# (like the M-axis K-1176 result).  Per K-1142 carve-out, M >= 4480.
+#
+# IMPORTANT: this set is GATED behind the TRITONBLAS_ENABLE_K1199_P8_NFLOOR256
+# feature flag.  Default (flag unset) -> envelope is byte-identical to
+# K-1175 (28 cells); production behaviour unchanged.  Set the flag to 1
+# (e.g., A/B test on a single arch) to extend the envelope to 28 + admits.
+# Per-arch admit list is finalized post-cross-arch backtest by intersecting
+# the per-arch route-OUT-safe sets (cells admitted on every arch tested).
+_K1199_E3_NFLOOR256_CANDIDATES_7 = frozenset({
+    # ----- E3 N=256 candidates: K-1131-style anchor projections -----
+    # M ranges 4480..49152 (K-1142 floor enforced); K in {256, 768, 1024}
+    ( 5972,  256,  768, "torch.bfloat16"),  # E3_S18_N256
+    ( 4480,  256,  768, "torch.bfloat16"),  # E3_S24_N256
+    ( 6016,  256, 1024, "torch.bfloat16"),  # E3_S25_N256
+    (16256,  256, 1024, "torch.bfloat16"),  # E3_S30_N256
+    (25600,  256,  256, "torch.bfloat16"),  # E3_S37_N256
+    (49152,  256,  256, "torch.bfloat16"),  # E3_S39_N256 (highest a-priori prob)
+    (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256
+})
+
+# K-1199 feature flag (default off): set TRITONBLAS_ENABLE_K1199_P8_NFLOOR256=1
+# to admit the 7 N=256 candidates into the P8 route-OUT envelope.  Read at
+# import time; rebound only by re-importing the module.  Gate is a single
+# assignment so static analyzers can see both branches.  Production deploy
+# strategy after K-1219 cross-arch backtest:
+#   * N=256 cells admitted on ALL backtested arches (MI300X / MI325X / MI350X)
+#     -> default-on (drop the gate, union into _P8_MFMA_ISSUE_STALL_ROUTEOUT)
+#   * N=256 cells admitted on a STRICT SUBSET (e.g., MI300X only, like
+#     K-1175 E2 K-floor=128) -> keep gate, document arch-specificity
+#   * N=256 cells admit on NO arch -> revert this diff (revert PR or set
+#     _K1199_E3_NFLOOR256_CANDIDATES_7 = frozenset())
+_K1199_NFLOOR256_FLAG = (
+    os.environ.get("TRITONBLAS_ENABLE_K1199_P8_NFLOOR256", "0") in ("1", "true", "True", "TRUE")
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
-    "K-1175 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate or stray "
-    "entry has crept in.")
+_K1199_E3_NFLOOR256_ADMITS = (
+    _K1199_E3_NFLOOR256_CANDIDATES_7 if _K1199_NFLOOR256_FLAG else frozenset()
+)
+
+# Composed P8 envelope.  Anchors, neighbors, K-1175/K-1161 E2 admits, and
+# K-1199 N-floor=256 admits (gated) are deliberately kept as separate
+# constants so reviewers (and the manifest auditors) can see provenance at
+# a glance; the dispatch path consults the union.
+_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+    _K1121_P8_ANCHORS_13
+    | _K1131_P8_NEIGHBORS_12
+    | _K1161_E2_ADMITS_3
+    | _K1199_E3_NFLOOR256_ADMITS
+)
+# Default envelope size is 28 cells (K-1175 baseline); when the K-1199
+# flag is set the envelope grows to 28 + |E3_admits| (max 35 with all 7
+# N=256 candidates).  Both sizes are valid post-K-1199.
+_K1199_EXPECTED_ENVELOPE_SIZE = 28 + len(_K1199_E3_NFLOOR256_ADMITS)
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == _K1199_EXPECTED_ENVELOPE_SIZE, (
+    f"K-1199 P8 envelope size mismatch: expected "
+    f"{_K1199_EXPECTED_ENVELOPE_SIZE} cells (28 K-1175 baseline + "
+    f"{len(_K1199_E3_NFLOOR256_ADMITS)} K-1199 N=256 admits), got "
+    f"{len(_P8_MFMA_ISSUE_STALL_ROUTEOUT)}; a duplicate or stray entry "
+    f"has crept in.")
 # Cross-check: the three sub-sets must be disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -480,6 +533,20 @@ assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
 assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1131 neighbors; the K-1161 "
     "candidate generator excluded all K-1131 neighbors by construction.")
+# K-1199 disjointness pin: the 7 N=256 candidates must be disjoint from
+# the K-1175 baseline (no N=256 cell currently lives in the envelope; the
+# floor sits at K-1131 N09 N=896).  This guarantees the gated extension
+# strictly grows the envelope (or leaves it unchanged when the flag is
+# off) and never silently overrides an existing kernel-choice decision.
+assert _K1121_P8_ANCHORS_13.isdisjoint(_K1199_E3_NFLOOR256_CANDIDATES_7), (
+    "K-1199 N=256 candidate overlaps a K-1121 anchor; the K-1131-style "
+    "anchor projection excluded all K-1121 anchors by construction.")
+assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1199_E3_NFLOOR256_CANDIDATES_7), (
+    "K-1199 N=256 candidate overlaps a K-1131 neighbor; the K-1131 "
+    "perturbation set's smallest N is 896, well above the N=256 tier.")
+assert _K1161_E2_ADMITS_3.isdisjoint(_K1199_E3_NFLOOR256_CANDIDATES_7), (
+    "K-1199 N=256 candidate overlaps a K-1161 E2 admit; the K-1161 "
+    "K-axis admits all sit at N in {1792, 2048}, not N=256.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
@@ -507,6 +574,17 @@ def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     outcome is unchanged for those cells; P8 just makes the routing
     rationale source-of-truth attributable to the K-1121 + K-1131
     measurement campaign rather than P5's structural pathology heuristic.
+
+    K-1199 (E3 N-floor=256 relaxation, K-1219 cross-arch backtest):
+    Setting TRITONBLAS_ENABLE_K1199_P8_NFLOOR256=1 unions the 7 N=256
+    candidates (K-1131-style projection of the K-1121 anchors + K-1175
+    E2_M1 admit, all with M >= 4480 per K-1142) into the envelope.  The
+    flag is OFF by default so production behaviour is byte-identical to
+    K-1175.  Per K-1175 (E2 K-floor=128 admitted on MI300X but NOT on
+    MI325X / MI350X) and K-1176 (cross-arch portability is strongly
+    shape-dependent for the MFMA-issue-stall mechanism), the N=256
+    extension MUST be backtested per arch before default-on roll-out;
+    arch-specific admit sets are tracked in the K-1219 deliverable.
     """
     if not _dtype_is_bf16(dtype):
         return False

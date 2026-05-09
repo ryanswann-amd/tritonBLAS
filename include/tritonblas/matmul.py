@@ -135,6 +135,20 @@ from ._route_predicate import (
     # P13 N ∈ {128, 256} envelope).  Closes the wave-misaligned skinny-N
     # ladder rung between P31 N=256 and P30 N=384.
     _P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
+    # P35 (26th-slot): N=320 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384} × {bf16,fp16}).
+    # N=320 sits between P34 (N=288) and P30 (N=384) on the wave-misaligned
+    # skinny-N K-COMPLEMENT ladder: 320 mod 64 = 0 (wave-aligned at 64) but
+    # 320 / 128 = 2.5 BLOCK_N tiles wastes one half-tile of CU mapping (one
+    # full BLOCK_N=128 + one 192-wide remainder with 64 columns idle).  Same
+    # K-913 §3 LDS-BC fingerprint as P28/P31/P32/P33/P34 (BLOCK_N=128 packs
+    # N=320 into a wave-misaligned K-block column layout where persistent_
+    # matmul cannot trade tile reshape for atomic-reduction; only HBL's
+    # split-K kernel selection clears the band).  Both dtype rows load-
+    # bearing — no upstream alias overlap (N=320 falls above the R-K979 P5
+    # minMN ≤ 192 clause and outside the K-1367/K-1397 P13 N ∈ {128, 256}
+    # envelopes).
+    _P35_SKINNY_N320_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -430,6 +444,20 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # trade tile reshape for atomic-reduction; only HBL's split-K kernel selection
     # clears the band).
     if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
+    # P35 (26th-slot): N=320 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384} × {bf16,fp16}).
+    # Closes the wave-misaligned skinny-N ladder rung between P34 (N=288) and
+    # P30 (N=384): 320 mod 64 = 0 (wave-aligned at 64) but 320 / 128 = 2.5
+    # BLOCK_N tiles wastes one half-tile of CU mapping (one full BLOCK_N=128
+    # + one 192-wide remainder with 64 columns idle inside the second tile).
+    # Same K-913 §3 LDS-BC fingerprint as P28/P31/P32/P33/P34 — persistent_
+    # matmul cannot trade tile reshape for atomic-reduction at this N, while
+    # hipBLASLt's split-K kernel selection clears the band.  Both dtype rows
+    # load-bearing — no upstream alias overlap (N=320 falls above the R-K979
+    # P5 minMN ≤ 192 clause and outside K-1367/K-1397 P13 N ∈ {128, 256}
+    # envelopes; sibling-N firewall holds vs P31/P32/P33/P34 by N-axis
+    # disjointness).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N320_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

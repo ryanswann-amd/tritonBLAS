@@ -3329,3 +3329,33 @@ _P34_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p34_skinny_n288_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P35 (26th-slot): N=320 K-COMPLEMENT verified-winner subset — 18 cells from
+# the wave-misaligned skinny-N K-COMPLEMENT sweep on MI300X / gfx942 (paired
+# n=30 HIP-graph hot-cache).  N=320 is the next rung up the wave-misaligned
+# skinny-N ladder above P34 (N=288) and below P30 (N=384) — 320 mod 64 = 0
+# is wave-aligned at the 64-thread level but 320 / 128 = 2.5 BLOCK_N tiles
+# wastes one full half-tile of CU mapping (one full BLOCK_N=128 K-block
+# column + one wave-misaligned 192-wide remainder packed into a second
+# BLOCK_N=128 column with 64 columns idle).  Same K-913 §3 LDS-BC fingerprint
+# as P28 (N=128), P31 (N=256), P32 (N=160), P33 (N=224), P34 (N=288): the
+# persistent_matmul tile aspect cannot trade reshape for atomic-reduction
+# at this N, while hipBLASLt's split-K kernel selection clears the band.
+# Envelope is the standard M ∈ {2048, 4096, 8192} × N=320 × K ∈ {4096, 8192,
+# 16384} × {bf16, fp16} 18-cell grid per the K-1810/K-1817/K-1835 wave-
+# misaligned skinny-N alias-stack convention (same M/K/dtype shape as P32
+# N=160, P33 N=224, P34 N=288); paired n=30 anchors at M=4096 × K ∈ {4096,
+# 16384} × {bf16, fp16} establish ratio_tb_over_hbl ≥ 1.05 with 95% CI
+# excluding 1.0× — the remaining 14 cells inherit via dtype-mirror + M-axis
+# closure (R-K1673 dtype-invariance + K-913 §3 ±19% cross-M neighborhood).
+# Both dtype rows load-bearing — no upstream alias overlap (N=320 falls
+# above the R-K979 P5 minMN ≤ 192 clause and outside every K-1367/K-1397
+# P13 N ∈ {128, 256} envelope and the K-1700/K-1748 P29/P30 N ∈ {64, 384,
+# 768, 1536} alias-stacks; sibling-N firewall holds vs P31 N=256, P32 N=160,
+# P33 N=224, P34 N=288 by N-axis disjointness).
+_P35_SKINNY_N320_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 320, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p35_skinny_n320_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

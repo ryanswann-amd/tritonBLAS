@@ -99,6 +99,46 @@ def persistent_matmul_lt(
     waves_per_eu = 0
     mfmaInstrSize = 16
     kpack = 1
+    # K-1655 (negative result, documents constraint): K-1641's 3-pass rocprofv2
+    # PMC sweep on the 6 worst M=N=4096 K-COMPLEMENT cells (K∈{2048,16384,32768}
+    # × {bf16,fp16}) decomposed the TritonBLAS-vs-hipBLASLt gap into 4 axes and
+    # identified S3 (LDS pipeline back-pressure, `SQ_WAIT_INST_LDS / wave`) as
+    # DOMINANT (TB:HBL = 22-24× across every cell). K-1641 §5 proposed three
+    # remediation directions: (1) NS bump 2→3, (2) BK bump 64→128, (3) narrower
+    # BN. K-1655 measured all three on MI300X gfx942 and found NONE applies
+    # productively here — Origami picks (BM=256, BN=256, BK=64) for this
+    # cohort, and the hardware 64 KB LDS budget bounds the feasible knob space:
+    #
+    #   - **NS=3 (K-1641 §5.1)**: needs (256+256)*64*2 * (NS-1) = 128 KB → 6/6
+    #     cells fail to compile with `out of resource: shared memory` on triton
+    #     3.6 / ROCm 7.2 (rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_2.10).
+    #   - **BK=32 (LDS-feasible NS-direction proxy)**: 0.876× geomean across
+    #     the 6 cells (12.4% wall-clock REGRESSION). The S3 mechanism
+    #     hypothesis is falsified: halving BK doubles the LDS-issue count per
+    #     K-iteration, *increasing* SQ_WAIT_INST_LDS / wave rather than
+    #     decreasing it.
+    #   - **num_warps=4 (K-1641 §4.1 mechanism #2 proxy)**: 0.663× geomean
+    #     (33.7% regression) — halving WG-level wave count starves the MFMA
+    #     pipe far worse than it relieves LDS port contention.
+    #   - All other LDS-feasible variants in the (NS, num_warps, BLK_K, kpack,
+    #     waves_per_eu, mfma_instr_nonkdim) knob space regress vs baseline
+    #     (K-1655 knob sweep, n=12 configs at K=16384 bf16, repeated at
+    #     K∈{2048,32768}). Confirms K-1635's earlier finding that current
+    #     settings are optimal at BK=64 on this geometry.
+    #
+    # Wall-clock conclusion: **persistent_matmul (256,256,64,NS=2,NW=8,kpack=1)
+    # is at the kernel-knob optimum for this cohort.** The residual ~15%
+    # geomean gap to hipBLASLt is bounded below by Triton's 64 KB LDS limit
+    # vs HBL's MT512x112 wider tile + PGR2 prefetch staging (which together
+    # hold ~78 KB live data spanning 2 prefetch stages — outside Triton's
+    # reach without async-copy primitives or kernel restructuring).
+    #
+    # **Production response: this cohort is already routed away from TB by
+    # K-1623/K-1614/K-1604/K-1611-stack alias frozensets** (`_K1611_P26_*`,
+    # `_K1604_P26_*`, etc.) at the routing-oracle level, so the kernel-side
+    # gap is invisible to end users. See K-1655 PR for full negative-result
+    # report including knob_sweep CSV, paired n=30 6-cell timing JSONL, and
+    # K-1641 mechanism falsifier table.
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

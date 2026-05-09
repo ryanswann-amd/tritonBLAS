@@ -125,6 +125,13 @@ from ._route_predicate import (
     # dtype rows load-bearing — no upstream alias overlap (N=224 is the first
     # N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192).
     _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
+    # P34 (25th-slot): N=128 wave-aligned mid-K verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
+    # K-1828 paired n=30 HIP-graph hot-cache TB-native vs HBL on MI300X
+    # (cohort gmean 1.680×, 18/18 admit at strict ≥1.05 gate).  All 18 cells
+    # alias-overlap upstream slots (P5 / P13 / P28); P34 is the K-1810/K-1817
+    # verified-winner audit handle for the wave-aligned N=128 rung.
+    _P34_SKINNY_N128_KMID_VERIFIED_WIN_18,
 )
 
 
@@ -407,6 +414,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # bearing, closes the wave-misaligned N=224 dtype-mirror (BLOCK_N=128 packs
     # N=224 into one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint).
     if (int(M), int(N), int(K), str(a_dtype)) in _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18: return True
+    # P34 (25th-slot): N=128 wave-aligned mid-K verified-winner subset — 18 cells from
+    # K-1828's N=128 mid-K sub-cohort (M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}).  K-1828 paired n=30 HIP-graph hot-cache TB-native vs HBL on
+    # MI300X / gfx942: 18/18 admit at strict ≥1.05 gate (cohort gmean tb/hbl=1.680×,
+    # range 1.155×–2.268×).  All 18 cells already alias-overlap upstream P5 (bf16
+    # via Clause-3) / P13 N=128 (K-1367, all 18 cells) / P28 (K-1673, alias-stack);
+    # P34 is the K-1810/K-1817-style verified-winner audit handle that mirrors the
+    # P32 (N=160) and P33 (N=224) frozenset shape exactly, closing the wave-aligned
+    # N=128 rung in the contiguous {N=64, 96, 128, 160, 192, 224, 256} K-COMPLEMENT
+    # mid-K verified-winner alias-stack ladder.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N128_KMID_VERIFIED_WIN_18: return True
     return False
 
 

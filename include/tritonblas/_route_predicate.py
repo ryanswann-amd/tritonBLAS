@@ -3300,3 +3300,28 @@ _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p33_skinny_n224_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P34 (25th-slot): N=128 wave-aligned mid-K verified-winner subset — 18 cells
+# from K-1828's N=128 sub-cohort = M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,
+# 8192,16384} × {bf16,fp16}.  K-1828 paired n=30 HIP-graph hot-cache TB-native
+# (persistent_matmul_lt) vs hipBLASLt on MI300X / gfx942 (OCI fallback amd-rccl
+# per INFRA-0048): 18/18 cells admit at the strict ≥1.05 winner gate; cohort
+# geomean tb/hbl = 1.680×, range 1.155×–2.268×, 0 regressions.  All 18 cells
+# are full alias-overlap with upstream slots (R-K979 P5 Clause-3 catches the 9
+# bf16 cells via minMN ≤ 192 ∧ K ≥ 2048; K-1367 P13 N=128 catches all 18
+# bf16+fp16 cells; K-1673 P28 alias-stack covers them at the 19th slot) — P34
+# is the K-1810/K-1817 verified-winner audit handle for the wave-aligned N=128
+# rung, mirroring P32 (N=160) and P33 (N=224) frozenset shape exactly so the
+# K-1794-style cohort drift sentinel can pin a single named handle for N=128.
+# Mechanism: BLOCK_N=128 packs N=128 into a single wave-aligned K-block column
+# but the K-913 §3 LDS-bank-conflict fingerprint still dominates persistent_
+# matmul (1.45–2.13 cyc/inst per K-1673 RCA), dtype-invariant per R-K1673;
+# hipBLASLt's split-K kernel selection clears the band.  Closes the wave-
+# aligned N=128 gap in the contiguous K-COMPLEMENT N-ladder
+# {64, 96, 128, 160, 192, 224, 256} mid-K verified-winner alias-stack.
+_P34_SKINNY_N128_KMID_VERIFIED_WIN_18 = frozenset(
+    (M, 128, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p34_skinny_n128_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

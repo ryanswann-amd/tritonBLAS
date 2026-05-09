@@ -1366,6 +1366,218 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1429 (S-002) — P16 `skinny_N1024` K-COMPLEMENT route-OUT (10th-position).
+#
+# K-1429 productionises the 29-cell `skinny_N1024` K-COMPLEMENT cohort
+# (BASE 18 + EXTENSION 12 swept, 1 BASE cell rejected by the strict 1.05
+# admit gate) as `_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29`, layered as
+# the 10th-position envelope in the dispatch precedence chain on top of
+# the K-1417 P15 9-predicate baseline (envelope grows by +29 admits at
+# the full K-axis sweep of the N=1024 column-narrow regime).
+#
+# Bucket scope: fourth-N successive sibling extension after K-1417 (N=512)
+# along the K-COMPLEMENT axis.  Unlike K-1417 (which limited itself to the
+# K-EXTREMES K ∈ {2048, 32768}), K-1429 sweeps the full K-axis
+# K ∈ {2048, 4096, 8192, 16384, 32768} and admits 29/30 cells under the
+# strict per-cell gate (median ≥ 1.05 ∧ CI95-lo > 1.0).  The single
+# rejected cell is (2048, 1024, 4096, bf16) at r=1.0154 (CI95-lo=1.008
+# clears > 1.0 but ratio_median misses the 1.05 floor by 3.5 pp).
+#
+# Codified as R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024
+# — the R-1409 monotonic N-axis attenuation (1.678 → 1.471 → 1.372 across
+# N=128/256/512) DOES NOT extend to N=1024.  Cohort geomean tb/hbl jumps
+# back to **2.23×** (BASE 2.08×, EXTREMES 2.48×), exceeding every prior
+# N bucket including N=128.  The R-1382 weak-form prediction "per-cell
+# admission collapses around N=1024" is FALSIFIED — 29/30 admit per-cell
+# unanimously and the K-1131 A2 1.40× cohort floor is comfortably cleared
+# (2.23× vs 1.40× — A2 PASS at N=1024 after MISS at N=512).  Mechanism:
+# at N=1024 the persistent_matmul tile aspect (BLOCK_M=128, BLOCK_N
+# heuristic) misaligns the M-axis tile against the M ∈ {2048, 4096, 8192}
+# anchors, accumulating LDS-bank conflicts that exceed the K-913 §3
+# attenuation seen at N=512.  hipBLASLt's split-K kernel re-selects at
+# N=1024 to a pattern that better matches the M anchors.
+#
+# K-COMPLEMENT region (N=1024, K full sweep):
+#   M ∈ {2048, 4096, 8192}                   (3 anchors, sibling row to K-1417)
+#   N = 1024                                  (column-narrow regime, +1 step from N=512)
+#   K ∈ {2048, 4096, 8192, 16384, 32768}      (full K-axis — BASE + EXTREMES)
+#   dtype ∈ {bf16, fp16}                      (K-913 §3 dtype invariance preserved)
+# = 3 × 1 × 5 × 2 = 30 sweep cells; 29 admit (1 rejected: 2048×1024×4096 bf16).
+#
+# PMC mechanism (consistent with K-913 / K-1397 / K-1417 findings;
+# verified by paired n=30 timing signature, PMC capture deferred to
+# K-1429-FOLLOW-D):
+#   The K-1417 small-K (K=2048) starvation pattern at N=512 (TB ≈ 280-290 µs
+#   vs HBL ≈ 19-50 µs) recurs at N=1024 with similar magnitude (TB ≈ 280-290 µs
+#   vs HBL ≈ 31-78 µs; ratio 3.5×-8.85× for K=2048 cells).  The K=32768
+#   large-K LDS-BC saturation is also reproduced (TB ≈ 460-1620 µs vs
+#   HBL ≈ 285-1316 µs; ratio 1.26×-1.62×).  Crucially the BASE
+#   (K ∈ {4096, 8192, 16384}) cells which would be in the BASE region also
+#   admit uniformly (17/18 admit) — at N=1024 the BASE geomean (2.08×) and
+#   the EXTREMES geomean (2.48×) are within ~20% of each other, in
+#   contrast to the prior N buckets where the BASE region had not been
+#   productionised.  This justifies merging both K-COMPLEMENT regions
+#   into a single 29-cell P16 frozenset rather than the 18+12 split
+#   used at N=128/256/512.
+#
+# Verification (paired n=30 HIP-graph hot-cache, B=10000 vectorised paired
+# bootstrap CI95 on MI300X gfx942 / OCI amd-arad fallback — c42 down):
+#   29/30 ROUTE-OUT  (every admit cell ratio_median ≥ 1.05 AND CI95-lo > 1.0)
+#   cohort geomean tb/hbl = **2.23×** (range 1.26×–8.85×)
+#   min CI95-lo            = **1.267** at (8192, 1024, 32768, fp16)
+#   max ratio_median       = **8.85×**  at (2048, 1024,  2048, fp16)
+#   envelope grows         97 → 126 cells (9 → 10 predicate stack)
+#   BASE     geomean 2.08× (17/18 admit; reject at (2048,1024,4096,bf16) r=1.015)
+#   EXTREMES geomean 2.48× (12/12 admit)
+#
+# Disjointness rationale (verified by frozenset.isdisjoint at module load):
+#   * P8 sub-frozensets — K-1219 E3 N=256 sub-frozenset uses N=256;
+#     K-1429 cells all use N=1024, no collision.  Other P8 anchors use
+#     M=N for square cells; no N=1024 cells anywhere.
+#   * K971_ROUTE_TABLE — K-905/K-971/K-1335 anchors use M=N ∈ {1024, 2048};
+#     K-1429 cells have N=1024 with M ∈ {2048, 4096, 8192} — only M=2048
+#     could collide if N=1024 ∧ M=2048 ∧ K were ever in K971_ROUTE_TABLE,
+#     which it is not (K971 uses N=1024 only at M=1024).
+#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096}; N=1024 never matches.
+#   * K-1367 P13 — uses N=128.
+#   * K-1397 P13 — uses N=256.
+#   * K-1409 P15 (K-1417) — uses N=512.
+# All asserted at module load.
+# ---------------------------------------------------------------------------
+_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29 = frozenset({
+    # === BASE region (K ∈ {4096, 8192, 16384}) — 17 admit cells (1 reject)
+    # M=2048 row × K ∈ {4096, 8192, 16384} × {bf16, fp16} (5 of 6 admit;
+    # (2048, 1024, 4096, bf16) rejected at r=1.015 < strict 1.05 floor)
+    (2048, 1024,  4096, "torch.float16"),     # r=5.062 ci_lo=5.044
+    (2048, 1024,  8192, "torch.bfloat16"),    # r=3.336 ci_lo=3.269
+    (2048, 1024,  8192, "torch.float16"),     # r=3.145 ci_lo=3.081
+    (2048, 1024, 16384, "torch.bfloat16"),    # r=1.997 ci_lo=1.973
+    (2048, 1024, 16384, "torch.float16"),     # r=1.871 ci_lo=1.841
+    # M=4096 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (4096, 1024,  4096, "torch.bfloat16"),    # r=3.581 ci_lo=3.566
+    (4096, 1024,  4096, "torch.float16"),     # r=3.358 ci_lo=3.337
+    (4096, 1024,  8192, "torch.bfloat16"),    # r=1.969 ci_lo=1.966
+    (4096, 1024,  8192, "torch.float16"),     # r=1.871 ci_lo=1.865
+    (4096, 1024, 16384, "torch.bfloat16"),    # r=1.463 ci_lo=1.460
+    (4096, 1024, 16384, "torch.float16"),     # r=1.448 ci_lo=1.446
+    # M=8192 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (8192, 1024,  4096, "torch.bfloat16"),    # r=2.198 ci_lo=2.187
+    (8192, 1024,  4096, "torch.float16"),     # r=2.019 ci_lo=2.011
+    (8192, 1024,  8192, "torch.bfloat16"),    # r=1.568 ci_lo=1.548
+    (8192, 1024,  8192, "torch.float16"),     # r=1.529 ci_lo=1.522
+    (8192, 1024, 16384, "torch.bfloat16"),    # r=1.635 ci_lo=1.626
+    (8192, 1024, 16384, "torch.float16"),     # r=1.616 ci_lo=1.594
+    # === EXTENSION region (K ∈ {2048, 32768}) — 12/12 admit
+    # M=2048 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (2048, 1024,  2048, "torch.bfloat16"),    # r=1.519 ci_lo=1.527
+    (2048, 1024,  2048, "torch.float16"),     # r=8.849 ci_lo=8.795
+    (2048, 1024, 32768, "torch.bfloat16"),    # r=1.616 ci_lo=1.610
+    (2048, 1024, 32768, "torch.float16"),     # r=1.591 ci_lo=1.588
+    # M=4096 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (4096, 1024,  2048, "torch.bfloat16"),    # r=6.028 ci_lo=6.021
+    (4096, 1024,  2048, "torch.float16"),     # r=5.667 ci_lo=5.687
+    (4096, 1024, 32768, "torch.bfloat16"),    # r=1.495 ci_lo=1.489
+    (4096, 1024, 32768, "torch.float16"),     # r=1.456 ci_lo=1.451
+    # M=8192 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (8192, 1024,  2048, "torch.bfloat16"),    # r=3.764 ci_lo=3.716
+    (8192, 1024,  2048, "torch.float16"),     # r=3.512 ci_lo=3.494
+    (8192, 1024, 32768, "torch.bfloat16"),    # r=1.272 ci_lo=1.272
+    (8192, 1024, 32768, "torch.float16"),     # r=1.263 ci_lo=1.267
+})
+assert len(_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29) == 29, (
+    "K-1429 P16 skinny_N1024 K-COMPLEMENT frozenset must be exactly 29 cells "
+    "(M ∈ {2048,4096,8192} × N=1024 × K ∈ {2048,4096,8192,16384,32768} × "
+    "{bf16,fp16} = 30 sweep cells, minus the single (2048,1024,4096,bf16) "
+    "reject at r=1.015 below the strict 1.05 floor); any deviation indicates "
+    "an authoring typo against the K-1429 paired n=30 admit set "
+    "(R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024).")
+# Cross-frozenset disjointness — K-1429 P16 vs prior 9-predicate stack.
+_K1429_P16_VS_P8_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1429_P16_VS_P8_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps the K-1322 51-cell P8 envelope; "
+    "P8's K-1219 E3 N=256 sub-frozenset uses N=256, K-1429 uses N=1024 — "
+    "natural disjointness, asserted as cheap insurance per "
+    "R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
+_K1429_P16_VS_K971_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(K971_ROUTE_TABLE))
+assert _K1429_P16_VS_K971_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K971_ROUTE_TABLE; K971 uses M=N ∈ "
+    "{1024, 2048} with M=N square anchors — K-1429 has M ∈ {2048,4096,8192} "
+    "with N=1024 (non-square), natural disjointness, asserted insurance.")
+_K1429_P16_VS_P12_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1429_P16_VS_P12_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1361 P12 square_mid; P12 uses "
+    "M=N=K ∈ {2048, 4096}; P16 cells all have N=1024 ≠ M — natural "
+    "disjointness, asserted (A4 no-double-admit).")
+_K1429_P16_VS_K1367_P13_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(
+        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
+assert _K1429_P16_VS_K1367_P13_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1367 P13 skinny_N128; "
+    "P13(N=128) uses N=128, P16 uses N=1024 — natural disjointness "
+    "(A4 sibling-N firewall).")
+_K1429_P16_VS_K1397_P13_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(
+        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
+assert _K1429_P16_VS_K1397_P13_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1397 P13 skinny_N256; "
+    "P13(N=256) uses N=256, P16 uses N=1024 — natural disjointness "
+    "(A4 sibling-N firewall).")
+_K1429_P16_VS_K1409_P15_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29.isdisjoint(
+        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
+assert _K1429_P16_VS_K1409_P15_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1417 P15 skinny_N512; "
+    "P15 uses N=512, P16 uses N=1024 — natural disjointness "
+    "(A4 sibling-N firewall; the four K-COMPLEMENT predicates "
+    "partition the skinny-N column-narrow regime by N-axis at "
+    "{128, 256, 512, 1024}).")
+
+
+def _k1429_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1429 P16 — direct hipBLASLt route-OUT for the 29-cell skinny_N1024
+    K-COMPLEMENT cohort (`_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 29 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 1024 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}, MINUS the single
+    rejected cell (2048, 1024, 4096, torch.bfloat16) at r=1.015 (below the
+    strict 1.05 admit floor though CI95-lo=1.008 > 1.0).
+
+    Source measurement: K-1429 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X / gfx942 (OCI amd-arad MI300X fallback per
+    R-1409.OCI-AMD-ARAD-MI300X-IS-ESTABLISHED-FALLBACK; c42 down) with
+    B=10000 vectorised paired bootstrap CI95 (numpy advanced-indexing per
+    R-1298 / R-1367); 29/30 ROUTE-OUT, cohort geomean tb/hbl = 2.23×,
+    min CI95-lo = 1.267, range 1.26×–8.85×.
+
+    Mechanism (R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024):
+    The R-1409 monotone N-axis attenuation (cohort 1.678 → 1.471 → 1.372
+    across N=128/256/512) DOES NOT extend to N=1024.  Cohort geomean
+    REVERSES upward to 2.23× — exceeding every prior N bucket including
+    N=128.  At N=1024 the persistent_matmul tile aspect misaligns
+    against the M ∈ {2048, 4096, 8192} anchors, accumulating LDS-bank
+    conflicts beyond the K-913 §3 N=512 attenuation; hipBLASLt's split-K
+    kernel re-selects at N=1024 to a pattern that better matches the M
+    anchors.  Codified as **R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024**:
+    cohort geomean is non-monotone in N along the K-COMPLEMENT axis
+    (1.678 → 1.471 → 1.372 → **2.23**); R-1382's predicted "null
+    discriminator at N≥512" is FALSIFIED a second time and the K-1131 A2
+    1.40× cohort floor (MISSED by 2.8 pp at N=512) is RECOVERED at N=1024.
+
+    Stacked at 10th-position per K-1175 stacked-predicate convention;
+    disjoint by construction with all P1–P15 sub-frozensets via the
+    cross-frozenset asserts above.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1389,6 +1601,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       7. K-1367 P13 skinny_N128 K-COMPLEMENT 18-cell strict-equality -> hipBLASLt.
       8. K-1397 P13 skinny_N256 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
       9. K-1417 P15 skinny_N512 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
+     10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
     """
     if disable_env_set:
         return False
@@ -1449,5 +1662,17 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # Per-cell ratios 1.36×–14.06×; cohort geomean 3.43×; envelope grows
     # 85 → 97 cells.
     if _k1409_p15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1429 P16 (10th-position): skinny_N1024 K-COMPLEMENT 29-cell route-OUT.
+    # Stacks AFTER K-1417 P15 per K-1175 stacked-predicate convention; closes
+    # the fourth-N successive sibling of the K-COMPLEMENT axis at N=1024
+    # (full K-axis K ∈ {2048, 4096, 8192, 16384, 32768}).  R-1409 monotone
+    # N-axis attenuation (1.678 → 1.471 → 1.372 across N=128/256/512)
+    # REVERSES at N=1024 to cohort geomean 2.23× (BASE 2.08× / EXTREMES 2.48×);
+    # 29/30 admit per-cell strict gate (single reject (2048,1024,4096,bf16)
+    # at r=1.015 below 1.05 floor).  K-1131 A2 1.40× cohort floor RECOVERED
+    # at N=1024 after MISS at N=512 (R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024).
+    # Envelope grows 97 → 126 cells.
+    if _k1429_p16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

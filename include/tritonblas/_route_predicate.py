@@ -2385,26 +2385,25 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # 1.451 → 1.234 → 1.220 → 1.174 → 1.118).
     if _k1566_p24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype):
         return True
-    # K-1567 P24 (17th-position): skinny_N8192 K-COMPLEMENT alias-stack-named
-    # 30-cell route-OUT.  Stacks AFTER K-1566 P24 (N=4096) per the K-1175
+    # K-1567 P24 (17th-position): skinny_N8192 K-COMPLEMENT 30-cell
+    # route-OUT.  Stacks AFTER K-1566 P24 (N=4096) per the K-1175
     # stacked-predicate convention; closes the previously-empty mid-band
     # N=8192 rung of the K-COMPLEMENT N-ladder between P24 N=4096 and P19
     # N=16384 on the full K-grid {2048, 4096, 8192, 16384, 32768}.  30/30
     # admit at the strict ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01 gate
     # (K-1567 paired n=30 + B=10000 vectorised paired bootstrap on MI300X /
-    # gfx942 against the live post-K-1552 routing oracle); cohort geomean
+    # gfx942 against the live post-K-1552 routing oracle; archival source
+    # measurement reused for K-1586, see PR description); cohort geomean
     # tb/hbl ≈ 1.220×, range ≈ 1.085×–1.402×, 0 regressions.  Per-row
     # geomean: ≈ 1.300× (M=2048, K-913 LDS-BC band partly live because
     # min(M, N) = 2048) / ≈ 1.181× (M=4096) / ≈ 1.187× (M=8192).  All 30
-    # cells are LOAD-BEARING NEW route-OUT (no upstream alias coverage —
-    # the `_ALIASSTACK_` suffix follows the K-1493 / K-1538 / K-1552
-    # single-symbol-pin naming convention; the alias-overlap union vs the
-    # prior 13 frozensets is asserted EMPTY at module load).  Sibling-N
-    # firewall disjoint with all P1-P24 (K-1566) by construction.
-    # Validates the R-1478 #1 N-axis attenuation chain anchor at the
-    # previously-empty N=8192 rung (full chain 1.451 → 1.234 → 1.220 →
-    # 1.174 → 1.118 across N ∈ {2048, 4096, 8192, 16384, 32768}).
-    if _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype):
+    # cells are LOAD-BEARING NEW route-OUT — sibling-N firewall data-driven
+    # assert loop above is the single-source proof that no upstream layer
+    # covers any N=8192 cell.  Validates the R-1478 #1 N-axis attenuation
+    # chain anchor at the previously-empty N=8192 rung (full chain
+    # 1.451 → 1.234 → 1.220 → 1.174 → 1.118 across N ∈ {2048, 4096, 8192,
+    # 16384, 32768}).
+    if _k1567_p24_skinny_n8192_kcompl_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False
 
@@ -2584,8 +2583,8 @@ def _k1566_p24_skinny_n4096_routeout(M: int, N: int, K: int, dtype) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# K-1567 (S-002) — P24 `skinny_N8192` K-COMPLEMENT 30-cell alias-stack
-# route-OUT (17th-position).
+# K-1567 (S-002) — P24 `skinny_N8192` K-COMPLEMENT 30-cell route-OUT
+# (17th-position).
 #
 # Productionizes the K-1567 verification of the N=8192 K-COMPLEMENT envelope
 # (M ∈ {2048, 4096, 8192} × N=8192 × K ∈ {2048, 4096, 8192, 16384, 32768} ×
@@ -2601,23 +2600,16 @@ def _k1566_p24_skinny_n4096_routeout(M: int, N: int, K: int, dtype) -> bool:
 # (M=4096) / ≈ 1.187× (M=8192) — attenuates one bucket below P24 N=4096
 # 1.234× per the R-1478 #1 N-axis attenuation invariant.
 #
-# ALIAS-STACK NAMING (per K-1493 P20-of-P19 / K-1538 P22-of-P15+P17 /
-# K-1552 P23-of-P15+P17+P5 convention): the 17th-position symbol freezes
-# the K-1567 30-cell admit set under a single named handle so future
-# N-ladder audits have a dedicated symbol for the N=8192 cohort.  Unlike
-# the K-1552 P23 N=512 case where every cell aliased an upstream P15/P17/P5
-# routing decision, the K-1567 N=8192 envelope has NO upstream coverage in
-# the post-K-1566 stack: P5 R_K979 declines (clause-1 maxMN <= 3072 fails
-# at N=8192; clause-2 N=2048 fails; clause-3 minMN > 192 / aspect < 100;
-# clause-4 N=1792 fails); K971_ROUTE_TABLE anchors all sit at N ∈ {1024,
-# 2048}; K-1142 E1 N ∈ {1792, 2048, 3072}; K-1295 P12 only covers M=N=K ∈
-# {2048, 4096}; the K-COMPLEMENT N-ladder predicates (P13/P15/P16/P17/P19/
-# P21/P22/P23/P24) cover N ∈ {128, 256, 512, 1024, 16384, 32768, 4096}.
-# The "ALIASSTACK" suffix therefore documents the structural convention
-# (single-symbol pin per K-1493 alias-stack convention) — but all 30 cells
-# are LOAD-BEARING NEW route-OUT cells; the alias-overlap union is empty
-# and explicitly asserted as such at module load.  Sibling-N firewall vs
-# every prior frozenset is the strict invariant (no aliases permitted).
+# All 30 cells are LOAD-BEARING NEW route-OUT — no upstream layer covers
+# any N=8192 cell in the post-K-1566 stack: P5 R_K979 declines (clause-1
+# maxMN <= 3072 fails at N=8192; clause-2 N=2048 fails; clause-3 minMN > 192 /
+# aspect < 100; clause-4 N=1792 fails); K971_ROUTE_TABLE anchors all sit at
+# N ∈ {1024, 2048}; K-1142 E1 N ∈ {1792, 2048, 3072}; K-1295 P12 only covers
+# M=N=K ∈ {2048, 4096}; the K-COMPLEMENT N-ladder predicates (P13/P15/P16/
+# P17/P19/P21/P22/P23/P24) cover N ∈ {128, 256, 512, 1024, 16384, 32768,
+# 4096}.  Sibling-N firewall vs every prior frozenset is the strict
+# invariant; the data-driven disjointness loop below is the single-source
+# proof.
 #
 # Validates the R-1478 #1 N-axis attenuation chain at the previously-
 # empty N=8192 anchor: chain extends to 1.451 → 1.234 → 1.220 → 1.174 →
@@ -2626,7 +2618,7 @@ def _k1566_p24_skinny_n4096_routeout(M: int, N: int, K: int, dtype) -> bool:
 # verified by direct measurement at the N=8192 rung — slots between
 # K-1566 N=4096 1.234× and K-1478 N=16384 1.174×).
 # ---------------------------------------------------------------------------
-_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 = frozenset({
+_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30 = frozenset({
     # M=2048 row × N=8192 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
     (2048, 8192,  2048, "torch.bfloat16"),    # r=1.402 ci95=[1.388,1.418] (max)
     (2048, 8192,  2048, "torch.float16"),     # r=1.388 ci95=[1.372,1.401]
@@ -2661,23 +2653,21 @@ _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 = frozenset({
     (8192, 8192, 32768, "torch.bfloat16"),    # r=1.147 ci95=[1.136,1.159]
     (8192, 8192, 32768, "torch.float16"),     # r=1.124 ci95=[1.113,1.135]
 })
-assert len(_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30) == 30, (
-    "K-1567 P24 skinny_N8192 K-COMPLEMENT alias-stack frozenset must be "
+assert len(_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30) == 30, (
+    "K-1567 P24 skinny_N8192 K-COMPLEMENT route-OUT frozenset must be "
     "exactly 30 cells (M ∈ {2048, 4096, 8192} × N=8192 × K ∈ {2048, 4096, "
     "8192, 16384, 32768} × {bf16, fp16} = 30 sweep cells, 30/30 admit at "
     "the strict ratio_median ≥ 1.05 ∧ bootstrap p(<1.05) < 0.01 gate); any "
     "deviation indicates an authoring typo against the K-1567 paired n=30 "
     "admit set.")
-# Cross-frozenset disjointness — K-1567 P24 (N=8192) vs the prior 16-predicate
-# stack.  Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024,
-# 4096, 16384, 32768}; P8 / K971 / K1335 cap at N ≤ 2048; K-1295 P12 only
-# routes the M=N=K ∈ {2048, 4096} diagonal — none intersects the K-1567
-# admit set.  Unlike the K-1552 P23 N=512 alias-stack (which intentionally
-# overlaps with P15/P17/P5), the K-1567 N=8192 envelope has NO upstream
-# coverage and therefore the alias-overlap union must be EMPTY — every
-# cell is a LOAD-BEARING NEW route-OUT.  Data-driven assert loop per the
-# K-1532 minimalist refactor: every sibling listed below MUST be FULLY
-# disjoint with the K-1567 admit set.
+# Sibling-N firewall — K-1567 P24 (N=8192) vs the prior 16-predicate stack.
+# Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, 4096,
+# 16384, 32768}; P8 / K971 / K1335 cap at N ≤ 2048; K-1295 P12 only routes
+# the M=N=K ∈ {2048, 4096} diagonal — none intersects the K-1567 admit set.
+# Data-driven assert loop per the K-1532 minimalist refactor: every sibling
+# listed below MUST be FULLY disjoint with the K-1567 admit set.  The empty
+# union with the prior stack proves all 30 cells are LOAD-BEARING NEW
+# route-OUT (no aliases), without a separate union-of-intersections guard.
 _K1567_P24_DISJOINT_SIBLINGS = (
     ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
     ("K971_ROUTE_TABLE (M=N≤2048)",       K971_ROUTE_TABLE),
@@ -2694,43 +2684,18 @@ _K1567_P24_DISJOINT_SIBLINGS = (
     ("P24 N=4096 (K-1566)",               _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30),
 )
 for _sibling_name, _sibling_set in _K1567_P24_DISJOINT_SIBLINGS:
-    assert _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30.isdisjoint(_sibling_set), (
+    assert _K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30.isdisjoint(_sibling_set), (
         f"K-1567 P24 skinny_N8192 (N=8192) overlaps {_sibling_name}; "
         "sibling-N firewall violated — every prior K-COMPLEMENT predicate "
         "uses N ∈ {128, 256, 512, 1024, 4096, 16384, 32768} and P8 / K971 "
         "cap at N ≤ 2048, so the N=8192 column must be FULLY disjoint by "
-        "construction.  Unlike K-1552 P23 (which intentionally aliases "
-        "P15/P17/P5), the K-1567 N=8192 envelope has no upstream coverage "
-        "and every cell is a load-bearing NEW route-OUT.")
+        "construction.")
 del _sibling_name, _sibling_set
-# ALIAS-STACK NAMING INVARIANT (per K-1552 P23 / K-1493 P20 convention):
-# the symbol's `_ALIASSTACK_` infix documents that the cohort is pinned
-# under a single handle for future N-ladder audits.  For K-1567 the
-# alias-overlap union must be EMPTY because no prior frozenset routes any
-# N=8192 cell — guards against future upstream additions silently
-# converting K-1567 from a load-bearing 30/30 NEW route-OUT into a partial
-# alias without a re-audit.  Recompute on every module load (cheap,
-# 30 × 13 = 390 frozenset membership checks).
-_K1567_P24_ALIAS_OVERLAP_UNION = frozenset()
-for _sibling_name, _sibling_set in _K1567_P24_DISJOINT_SIBLINGS:
-    _K1567_P24_ALIAS_OVERLAP_UNION = (
-        _K1567_P24_ALIAS_OVERLAP_UNION
-        | (_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 & _sibling_set))
-assert _K1567_P24_ALIAS_OVERLAP_UNION == frozenset(), (
-    "K-1567 P24 skinny_N8192 alias-stack must have an EMPTY alias-overlap "
-    f"union with the prior 13 frozensets; computed {sorted(_K1567_P24_ALIAS_OVERLAP_UNION)} "
-    "— a non-empty overlap means an upstream layer now routes one of the "
-    "K-1567 cells, which converts K-1567 from a load-bearing NEW route-OUT "
-    "into a partial alias and requires a re-audit (the cell may need to be "
-    "removed from K-1567 to keep the slot a strict pin of the K-1567 admit "
-    "set).")
-del _K1567_P24_ALIAS_OVERLAP_UNION, _sibling_name, _sibling_set
 
 
-def _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1567 P24 — alias-stack-named hipBLASLt route-OUT for the 30-cell
-    skinny_N8192 K-COMPLEMENT cohort
-    (`_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30`).
+def _k1567_p24_skinny_n8192_kcompl_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1567 P24 — hipBLASLt route-OUT for the 30-cell skinny_N8192
+    K-COMPLEMENT cohort (`_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30`).
 
     Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
     keys: M ∈ {2048, 4096, 8192} × N = 8192 × K ∈ {2048, 4096, 8192, 16384,
@@ -2759,16 +2724,14 @@ def _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout(M: int, N: int, K: int, d
     PREDICTS-NEXT-RUNG verified by direct measurement at the N=8192 rung).
 
     Stacked at 17th-position per the K-1175 stacked-predicate convention
-    after K-1566 P24 (N=4096); the `_ALIASSTACK_` suffix documents the
-    K-1493 alias-stack single-symbol-pin convention but for K-1567 the
-    alias-overlap union with the prior 13 frozensets is EMPTY (asserted
-    at module load) — every cell is a load-bearing NEW route-OUT.
-    Sibling-N firewall disjointness with all P1-P24 (K-1566) is the
-    strict invariant; no aliases permitted.  Closes the previously-empty
-    mid-band N=8192 rung of the K-COMPLEMENT N-ladder, completing
-    coverage at N ∈ {128, 256, 512, 1024, 4096, 8192, 16384, 32768}.
+    after K-1566 P24 (N=4096); every cell is LOAD-BEARING NEW route-OUT
+    (the sibling-N firewall data-driven assert loop above is the
+    single-source proof that no upstream layer covers any N=8192 cell).
+    Closes the previously-empty mid-band N=8192 rung of the K-COMPLEMENT
+    N-ladder, completing coverage at N ∈ {128, 256, 512, 1024, 4096, 8192,
+    16384, 32768}.
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30
+        in _K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30
     )

@@ -1,15 +1,15 @@
-"""Unit fixture — K-1567 P24 skinny_N8192 K-COMPLEMENT 30-cell alias-stack-
-named route-OUT envelope (17th-position).
+"""Unit fixture — K-1567 P24 skinny_N8192 K-COMPLEMENT 30-cell route-OUT
+envelope (17th-position).
 
-Verifies:
+Verifies (collapsed per The Minimalist's K-1586 review):
   (a) frozenset cardinality + exact admit-set match (K-1567 30 cells);
-  (b) every admit cell predicate-returns True;
+  (b) single parametrized test asserting every admit cell predicate-routes
+      True (one parametrized case over the admit set, not 30 hand-listed
+      pins);
   (c) sibling-N firewall sentinels return False (carry-out N-axis carve-out);
   (d) sibling-N firewall vs every prior K-COMPLEMENT frozenset is FULLY
-      disjoint (the `_ALIASSTACK_` suffix follows the K-1493 / K-1538 /
-      K-1552 single-symbol-pin naming convention but, unlike K-1552 P23
-      which intentionally aliases P15/P17/P5, the K-1567 N=8192 envelope
-      has NO upstream coverage and the alias-overlap union is EMPTY);
+      disjoint — every cell is a load-bearing NEW route-OUT, no upstream
+      layer covers any N=8192 cell;
   (e) the public `k971_route_decision` dispatch returns True for every
       P24 N=8192 cell at default flag values (no double-admit, no flag
       interference);
@@ -20,9 +20,9 @@ Source data: K-1567 paired n=30 HIP-graph hot-cache on MI300X / gfx942,
 TRITONBLAS_DISABLE_K971=1 against the live post-K-1552 routing oracle;
 B=10000 vectorised paired bootstrap; 30/30 admit at strict
 ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01 gate; cohort geomean tb/hbl ≈ 1.220×,
-range ≈ 1.085×–1.402×.  Validates R-1478 #1 N-axis attenuation chain
-anchor at the previously-empty N=8192 rung (full chain
-1.451 → 1.234 → 1.220 → 1.174 → 1.118).
+range ≈ 1.085×–1.402× (archival K-1567 measurement; see PR description).
+Validates R-1478 #1 N-axis attenuation chain anchor at the previously-empty
+N=8192 rung (full chain 1.451 → 1.234 → 1.220 → 1.174 → 1.118).
 """
 import pytest
 import torch
@@ -39,9 +39,9 @@ from tritonblas._route_predicate import (
     _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30,
     _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30,
     _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30,
-    _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30,
+    _K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30,
     K971_ROUTE_TABLE,
-    _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout,
+    _k1567_p24_skinny_n8192_kcompl_routeout,
     k971_route_decision,
 )
 
@@ -50,7 +50,7 @@ from tritonblas._route_predicate import (
 # (a) frozenset shape pin — 30 cells, exact M/N/K/dtype grid.
 # ---------------------------------------------------------------------------
 def test_p24_n8192_cardinality_is_thirty():
-    assert len(_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30) == 30
+    assert len(_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30) == 30
 
 
 def test_p24_n8192_admit_set_is_full_n8192_kcompl_grid():
@@ -60,20 +60,33 @@ def test_p24_n8192_admit_set_is_full_n8192_kcompl_grid():
         for K in (2048, 4096, 8192, 16384, 32768)
         for dtype in ("torch.bfloat16", "torch.float16")
     }
-    assert _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 == expected
+    assert _K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30 == expected
 
 
 # ---------------------------------------------------------------------------
-# (b) every admit cell predicate-returns True.
+# (b) every admit cell predicate-routes True AND full-stack dispatch routes
+#     True — collapsed into a single parametrized test over the admit set
+#     per The Minimalist's K-1586 review (was 30 + 30 hand-listed cases).
 # ---------------------------------------------------------------------------
+_DTYPE_OBJ = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
+
+
 @pytest.mark.parametrize(
     "cell",
-    sorted(_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30),
+    sorted(_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30),
 )
 def test_p24_n8192_admit_cell_routes_true(cell):
+    """Every cell in the admit set must route True via both the leaf
+    predicate AND the public k971_route_decision dispatch (default flags)."""
     M, N, K, dtype = cell
-    assert _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout(
-        M, N, K, dtype) is True
+    # leaf predicate
+    assert _k1567_p24_skinny_n8192_kcompl_routeout(M, N, K, dtype) is True
+    # full-stack dispatch with matched dtype, no streamk / work_stealing
+    a = _DTYPE_OBJ[dtype]
+    assert k971_route_decision(
+        M, N, K, a_dtype=a, b_dtype=a,
+        enable_streamk=False, work_stealing=False,
+    ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -99,19 +112,20 @@ def test_p24_n8192_admit_cell_routes_true(cell):
 )
 def test_p24_n8192_sibling_n_firewall_rejects(cell):
     M, N, K, dtype = cell
-    assert _k1567_p24_skinny_n8192_kcompl_aliasstack_routeout(
-        M, N, K, dtype) is False
+    assert _k1567_p24_skinny_n8192_kcompl_routeout(M, N, K, dtype) is False
 
 
 # ---------------------------------------------------------------------------
 # (d) sibling-N firewall vs every prior K-COMPLEMENT frozenset is FULLY
-#     disjoint — alias-overlap union must be EMPTY.  Unlike K-1552 P23
-#     (which intentionally aliases P15/P17/P5), the K-1567 N=8192 envelope
-#     has NO upstream coverage; every cell is a load-bearing NEW route-OUT.
+#     disjoint — every cell is a load-bearing NEW route-OUT.  Collapsed
+#     into a single test that computes the union of all intersections in
+#     one pass (was 12 parametrized cases + a separate union test).
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize(
-    "name,sibling",
-    [
+def test_p24_n8192_sibling_n_firewall_is_fully_disjoint():
+    """K-1567 N=8192 envelope has NO upstream coverage; every cell is a
+    load-bearing NEW route-OUT.  Computes the union of intersections vs
+    all prior K-COMPLEMENT frozensets in one pass and asserts EMPTY."""
+    siblings = (
         ("K971_ROUTE_TABLE",  K971_ROUTE_TABLE),
         ("P12_square_mid",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
         ("P13_N128",          _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
@@ -124,69 +138,23 @@ def test_p24_n8192_sibling_n_firewall_rejects(cell):
         ("P22_N32768",        _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
         ("P23_N512_alias",    _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30),
         ("P24_N4096",         _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30),
-    ],
-)
-def test_p24_n8192_sibling_n_firewall_is_fully_disjoint(name, sibling):
-    assert _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30.isdisjoint(sibling), (
-        f"K-1567 P24 N=8192 must be FULLY disjoint with {name}; the "
-        "_ALIASSTACK_ suffix follows the K-1493 single-symbol-pin "
-        "convention but the K-1567 envelope has no upstream coverage and "
-        "every cell must be a load-bearing NEW route-OUT.")
-
-
-def test_p24_n8192_alias_overlap_union_is_empty():
-    """ALIAS-STACK NAMING INVARIANT (per K-1552 P23 convention): the
-    `_ALIASSTACK_` suffix documents single-symbol-pin convention; for
-    K-1567 the alias-overlap union with the prior 13 frozensets MUST be
-    EMPTY (no upstream layer routes any N=8192 cell)."""
-    siblings = (
-        K971_ROUTE_TABLE,
-        _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4,
-        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18,
-        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12,
-        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT,
-        _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29,
-        _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17,
-        _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30,
-        _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT,
-        _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30,
-        _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30,
-        _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30,
     )
-    overlap = frozenset()
-    for s in siblings:
-        overlap = overlap | (
-            _K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30 & s)
-    assert overlap == frozenset(), (
-        f"K-1567 alias-overlap union must be EMPTY; got {sorted(overlap)} "
-        "— a non-empty overlap indicates an upstream layer now routes one "
-        "of the K-1567 N=8192 cells, which converts K-1567 from a "
-        "load-bearing NEW route-OUT into a partial alias and requires a "
-        "re-audit.")
+    overlaps = {
+        name: sorted(_K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30 & sibling)
+        for name, sibling in siblings
+        if _K1567_P24_SKINNY_N8192_KCOMPL_ROUTEOUT_30 & sibling
+    }
+    assert overlaps == {}, (
+        f"K-1567 N=8192 envelope overlaps prior frozensets: {overlaps} — "
+        "every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, "
+        "4096, 16384, 32768} and P8 / K971 cap at N ≤ 2048, so the N=8192 "
+        "column must be FULLY disjoint by construction.  A non-empty "
+        "overlap converts K-1567 from a load-bearing NEW route-OUT into a "
+        "partial alias and requires a re-audit.")
 
 
 # ---------------------------------------------------------------------------
-# (e) full-stack dispatch — every admit cell routes True via k971_route_decision
-#     at default flag values (streamk=False, work_stealing=False, dtype matched).
-# ---------------------------------------------------------------------------
-_DTYPE_OBJ = {"torch.bfloat16": torch.bfloat16, "torch.float16": torch.float16}
-
-
-@pytest.mark.parametrize(
-    "cell",
-    sorted(_K1567_P24_SKINNY_N8192_KCOMPL_ALIASSTACK_30),
-)
-def test_p24_n8192_full_dispatch_routes_true(cell):
-    M, N, K, dtype = cell
-    a = _DTYPE_OBJ[dtype]
-    assert k971_route_decision(
-        M, N, K, a_dtype=a, b_dtype=a,
-        enable_streamk=False, work_stealing=False,
-    ) is True
-
-
-# ---------------------------------------------------------------------------
-# (f) carve-out negatives — streamk / work_stealing / dtype-mismatch all veto.
+# (e) carve-out negatives — streamk / work_stealing / dtype-mismatch all veto.
 # ---------------------------------------------------------------------------
 def test_p24_n8192_streamk_vetoes_routing():
     assert k971_route_decision(
@@ -213,7 +181,7 @@ def test_p24_n8192_dtype_mismatch_vetoes_routing():
 
 
 # ---------------------------------------------------------------------------
-# Coverage check — closes the K-COMPLEMENT N-ladder mid-band gap.
+# (f) Coverage check — closes the K-COMPLEMENT N-ladder mid-band gap.
 # ---------------------------------------------------------------------------
 def test_p24_n8192_completes_kcompl_n_ladder_midband():
     """K-COMPLEMENT N-ladder coverage post-K-1567: every cell in the

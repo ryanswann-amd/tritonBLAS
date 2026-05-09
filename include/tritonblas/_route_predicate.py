@@ -667,6 +667,87 @@ assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
     "cells all have N >= 1024; K-1219 cells all have N=256.")
 
 
+
+
+# ---------------------------------------------------------------------------
+# K-1339 / K-1326 (S-002): _LONGK_SMALLSQUARE_ADMIT — 7th provenance frozenset
+# of the unified P8 envelope.  Targets the longK_smallSquare residual bucket
+# identified by K-1326 (largest predicate-addressable residual: 4 cells,
+# aggregate gap 2.779, per-cell residual mean 0.695).  Mechanism is shape-
+# invariant LDS-bank-conflict (K-913 PMC anchor on (1024,1024,8192) bf16:
+# SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 1.78 cyc/inst on tritonblas
+# persistent_matmul vs 0.00 on hipBLASLt; LDS_WAIT/wave 7.78x; MFMA% 9.33%
+# vs 15.85%).  K-1339 paired n=30 HIP-graph hot-cache + B=10000 paired-
+# bootstrap on rad-mi300x-{1,splinter} (MI300X gfx942) measured the 6 K-1326
+# P9 candidate shapes x {bf16, fp16} = 12 cells; cells with hbl/tb >= 1.05
+# and CI95-lo > 1.0 are admitted to this frozenset (K-1326 A1 + K-1007
+# floor).  Uniquely among the 7 provenance frozensets, this set accepts
+# BOTH bf16 AND fp16 entries -- justified by K-913 sec.3 neighborhood-
+# invariance ±19% across bf16/fp16 + K-1028 R-1028.DTYPE-INVARIANT-LDS-
+# SIGNATURE-FP16-VS-BF16 production-scale verification (1.3% max delta).
+# Disjoint from the 6 prior sub-frozensets by axis: M=N square + small
+# (M in {1024, 2048}) + long-K (K >= 2*M) + K <= 16384 envelope rules out
+# every K-1121/K-1131/K-1161/K-1205/K-1219/K-1283 cell (none have M=N).
+# K-971 strict-equality table overlap on (2048,2048,16384) bf16 is by
+# construction (K-971 was the originating route-OUT for this cell);
+# K-1339 elevates it from K-971 last-resort table to the P8 frozenset
+# (checked first); net dispatch outcome is unchanged for that cell.
+# ---------------------------------------------------------------------------
+
+_K1326_LONGK_SMALLSQUARE_ADMIT_12 = frozenset({
+    ( 1024,  1024,   4096, "torch.bfloat16"),
+    ( 1024,  1024,   4096, "torch.float16"),
+    ( 1024,  1024,   8192, "torch.bfloat16"),
+    ( 1024,  1024,   8192, "torch.float16"),
+    ( 1024,  1024,  16384, "torch.bfloat16"),
+    ( 1024,  1024,  16384, "torch.float16"),
+    ( 2048,  2048,   4096, "torch.bfloat16"),
+    ( 2048,  2048,   4096, "torch.float16"),
+    ( 2048,  2048,   8192, "torch.bfloat16"),
+    ( 2048,  2048,   8192, "torch.float16"),
+    ( 2048,  2048,  16384, "torch.bfloat16"),
+    ( 2048,  2048,  16384, "torch.float16"),
+})
+
+# Disjointness with all six prior provenance frozensets — by axis: M==N is
+# never satisfied by any K-1121/K-1131/K-1161/K-1205/K-1219/K-1283 cell
+# (every prior cell has M != N by construction).  Verified at module load.
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1121_P8_ANCHORS_13; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1131_P8_NEIGHBORS_12; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1161_E2_ADMITS_3; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1205_EN3_ADMITS_8), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1205_EN3_ADMITS_8; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1219_E3_NFLOOR256_ADMITS_7; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+assert _K1326_LONGK_SMALLSQUARE_ADMIT_12.isdisjoint(_K1283_A1_PERTURBATIONS_8), (
+    "K-1339 _LONGK_SMALLSQUARE_ADMIT cell overlaps _K1283_A1_PERTURBATIONS_8; "
+    "K-1339 cells all have M==N (square) and M in {1024,2048}, "
+    "which no prior provenance frozenset satisfies.")
+
+def _longk_smallsquare_admit_routeout(M, N, K, dtype):
+    """K-1339 / K-1326: LDS-bound longK_smallSquare route-OUT.
+
+    Accepts bf16 OR fp16 (uniquely among the P8 sub-frozensets) per
+    K-913 sec.3 neighborhood-invariance + K-1028 R-1028.DTYPE-INVARIANT-
+    LDS-SIGNATURE-FP16-VS-BF16 (production-scale 1.3% max delta).
+    Returns True iff (M, N, K, dtype) matches one of the strict-equality
+    keys in :data:`_K1326_LONGK_SMALLSQUARE_ADMIT_12`.
+    """
+    return (int(M), int(N), int(K), str(dtype)) in _K1326_LONGK_SMALLSQUARE_ADMIT_12
+
 # ---------------------------------------------------------------------------
 # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope productionised
 # from K-1151 / K-1142 stacked AFTER the P8 28-cell strict-equality route.
@@ -767,6 +848,11 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # (P6 has no N<896 cells); K-1297's 8 A1 perturbations are S25/S29
     # K-1131-style perturbations, structurally identical to K-1131's
     # routing rationale.
+    # K-1339: LDS-bound longK_smallSquare route-OUT (bf16+fp16) checked
+    # FIRST so it pre-empts the bf16-only P8 frozenset on the (2048,
+    # 2048,16384) bf16 overlap and admits the fp16 twins.
+    if _longk_smallsquare_admit_routeout(int(M), int(N), int(K), a_dtype):
+        return True
     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
         return True
     # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth

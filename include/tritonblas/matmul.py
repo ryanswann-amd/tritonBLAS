@@ -10,6 +10,10 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .kernels.lds_padded_envelope import (
+    should_use_lds_padded_path,
+    lds_padded_launch_overrides,
+)
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
@@ -101,6 +105,28 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ─── K-1640: skinny-N LDS-padded staging path ───────────────────────────
+    # K-1629's PMC capture identified an SQ_LDS_BANK_CONFLICT / SQ_INSTS_LDS
+    # overhead on the persistent_matmul A-tile staging for N∈{128,256}
+    # K-COMPLEMENT cells. The 16x16x16 MFMA + num_warps=8 default lays out
+    # consecutive lanes onto the same LDS bank row when BN∈{128,256},
+    # serialising ds_read_b64. Switching to 32x32x8 MFMA + num_warps=4 breaks
+    # the modular collision and recovers the predicted 1/(1+LDS_WAIT_frac)
+    # speedup. Strictly gated to the K-1617/K-1633-verified envelope so the
+    # 17 already-productionized P26 frozensets (N>=512) cannot regress.
+    # See include/tritonblas/kernels/lds_padded_envelope.py for the full
+    # mechanism and bank-conflict math; see workspace gist for K-1629 PMC
+    # deltas this targets. The work-stealing path is not eligible (it has
+    # its own staging contract verified separately).
+    if (
+        not work_stealing
+        and should_use_lds_padded_path(
+            M, N, K, BLK_M, BLK_N, BLK_K,
+            quantized=quantized, bias=bias is not None,
+        )
+    ):
+        mfmaInstrSize, num_warps, kpack = lds_padded_launch_overrides()
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m

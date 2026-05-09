@@ -7,8 +7,8 @@ Productionizes the K-1673 verification of the N=128 K-COMPLEMENT envelope
 gap left by K-1367 P13 (7th-slot, 18 cells, K ∈ {4096, 8192, 16384} only).
 
 Source measurement (still-of-record): K-1673 paired n=30 HIP-graph hot-
-cache benchmark on MI300X / gfx942 (OCI useocpm2m-097-099 fallback per
-INFRA-0048 c42 SSH refused) against the LIVE post-K-1647 P27 routing
+cache benchmark on MI300X / gfx942 (per INFRA-0048 c42 SSH refused
+fallback) against the LIVE post-K-1647 P27 routing
 oracle on TB fork branch fix/K-1647 HEAD `8d010c6`; engines: TB →
 tritonblas.matmul → persistent_matmul; HBL → hipBLASLt direct.
 30/30 lose to hipBLASLt by ≥10% (cohort geomean 1.694×, worst 2.890×

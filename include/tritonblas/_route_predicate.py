@@ -2960,7 +2960,7 @@ _K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30 = (
 # above the ~30 µs triton_op wrapper-overhead ceiling).
 #
 # Source measurement: K-1673 paired n=30 HIP-graph hot-cache benchmark on
-# MI300X / gfx942 (OCI useocpm2m-097-099 fallback per INFRA-0048 c42 SSH
+# MI300X / gfx942 (per INFRA-0048 c42 SSH
 # refused) against the LIVE post-K-1647 P27 routing oracle on TB fork
 # branch fix/K-1647 HEAD `8d010c6`; engines: TB → tritonblas.matmul →
 # persistent_matmul; HBL → hipBLASLt direct (R-1629
@@ -3168,8 +3168,8 @@ def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
     32768} × dtype ∈ {torch.bfloat16, torch.float16}.
 
     Source measurement: K-1673 paired n=30 HIP-graph hot-cache benchmark
-    on MI300X / gfx942 (OCI useocpm2m-097-099 fallback per INFRA-0048
-    c42 SSH refused) against the LIVE post-K-1647 P27 routing oracle on
+    on MI300X / gfx942 (per INFRA-0048 c42 SSH refused fallback)
+    against the LIVE post-K-1647 P27 routing oracle on
     TB fork branch fix/K-1647 HEAD `8d010c6`; engines: TB →
     tritonblas.matmul → persistent_matmul; HBL → hipBLASLt direct.
     30/30 lose to hipBLASLt by ≥10% (cohort geomean 1.694×, worst 2.890×

@@ -36,6 +36,7 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1205_EN3_ADMITS_8,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -680,18 +681,22 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
-    Any silent edit changes this count and trips this canary.
+def test_k1144_p8_envelope_size_is_exactly_36_after_k1205_extension():
+    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
+    E_N3 = 36 cells.  Any silent edit changes this count and trips here.
 
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
-    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
-    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+    K-1144 originally pinned 25; K-1175 extended +3 K-1161-validated cells
+    (E2_I4 K-interior + 2 M-axis admits at K=1024); K-1205 extends +8
+    N-axis-validated cells at N=128 (paired n=30 HIP-graph hot-cache on
+    rad-mi300x-1, B=10000 bootstrap CI95, 8/9 = 88.9% admit rate decisively
+    above the 75% landing threshold).  See _K1205_EN3_ADMITS_8 docstring
+    for the N-axis extension mechanism (N=128 mirror of K-1121 anchors;
+    diverges from K-1161 K-axis NEGATIVE pattern)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
+    assert len(_K1205_EN3_ADMITS_8) == 8
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1079,3 +1084,145 @@ def test_k1175_p8_e2_admits_m_axis_cells_at_k1024_anchor_k():
         assert N == 2048  # K-1121 anchor N
         # M is interior to the K-1121 anchor M-range:
         assert 8064 < M < 14208
+
+
+# ---------------------------------------------------------------------------
+# K-1205 — N-axis extension validation pin tests (8 admits + 1 no-leak).
+#
+# K-1205 measured 9 N=128 candidates (mirrors of K-1121 anchors) at paired
+# n=30 HIP-graph hot-cache + B=10000 bootstrap CI95 on rad-mi300x-1 (c42 SSH
+# plane outage 6th recurrence -- documented K-1121/K-1127/K-1142/K-1147/
+# K-1161 fallback used).  8/9 = 88.9% admit rate, decisively above the 75%
+# landing threshold, *diverging* from K-1161 K-axis NEGATIVE pattern (1/6 =
+# 16.7%) on the same hardware/methodology.  The 8 admits cover N=128 at
+# K∈{256, 768, 1024} with M values mirroring K-1121 anchors.  The 1 reject
+# (EN_K768_S24, M=4480 K=768) is the smallest-M cell -- consistent with
+# R-1161.K-FLOOR-RELAXATION-SURFACES-TB-FAVOURED-SMALL-M-TAIL applied at
+# the M-floor of the K-1121 anchor M-set (M=4480 at narrow N=128 K=768).
+#
+# Pin tests cover (a) 8/8 envelope cells route-OUT at the dispatch level,
+# (b) bf16-only carve-out, (c) 3-way disjointness with K-1121/K-1131/K-1161,
+# (d) NO-LEAK guarantee: the 1 K-1205 cell classified as route-IN-safe
+# (EN_K768_S24) MUST NOT fire P8.
+# ---------------------------------------------------------------------------
+K1205_EN3_ADMITS_8_LIST = [
+    # (cid,            M,     N,    K)  per K-1205 paired n=30 manifest
+    ("EN_K1024_S25",  6016,  128, 1024),  # hbl/tb=1.370x CI95=[1.362, 1.374]
+    ("EN_K1024_S26",  8064,  128, 1024),  # hbl/tb=1.402x CI95=[1.396, 1.415]
+    ("EN_K1024_S29", 14208,  128, 1024),  # hbl/tb=3.254x CI95=[3.234, 3.267] (cohort MAX)
+    ("EN_K1024_S30", 16256,  128, 1024),  # hbl/tb=3.024x CI95=[3.011, 3.056]
+    ("EN_K1024_S33", 22400,  128, 1024),  # hbl/tb=2.258x CI95=[2.234, 2.269]
+    ("EN_K256_S37",  25600,  128,  256),  # hbl/tb=1.144x CI95=[1.140, 1.149] (cohort MIN admit)
+    ("EN_K256_S39",  49152,  128,  256),  # hbl/tb=1.781x CI95=[1.768, 1.803]
+    ("EN_K768_S18",   5972,  128,  768),  # hbl/tb=1.227x CI95=[1.226, 1.227]
+]
+
+
+# K-1205 cells that K-1205 measured as route-IN-safe (TB strictly faster)
+# or ambiguous.  These MUST NOT fire P8 -- staging would create production
+# false positives (TB wins routed to slower hipBLASLt).
+K1205_EN3_REJECTED_1_LIST = [
+    # (cid,       M,    N,    K, hbl_tb_med, classification)  per K-1205 manifest
+    ("EN_K768_S24", 4480, 128, 768),  # 0.967x  route-IN-safe (TB +3% faster; smallest-M cell)
+]
+
+
+def test_k1205_en3_admits_envelope_size_is_exactly_8():
+    """K-1205 measured 9 N=128 candidates; exactly 8 admit route-OUT-safe.
+    Any silent edit changes this count and trips here."""
+    assert len(_K1205_EN3_ADMITS_8) == 8
+
+
+def test_k1205_en3_admits_disjoint_from_k1121_k1131_k1161():
+    """K-1205 candidate generator (N=128 mirror of K-1121 anchors) excluded
+    all K-1121 anchors, K-1131 neighbors, and K-1161 E2 admits by
+    construction (N=128 is in NO prior P8 cell — prior min N=896)."""
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+def test_k1205_en3_admits_envelope_contents_pinned_to_k1205_manifest():
+    """Pin the 8-cell E_N3 admit envelope to source-of-truth (the K-1205
+    paired n=30 manifest at workspace K-1205/output/k1205_per_cell.csv).
+    A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1205_EN3_ADMITS_8_LIST)
+    assert _K1205_EN3_ADMITS_8 == expected
+
+
+def test_k1205_en3_admits_all_have_n_equals_128():
+    """Structural invariant: every K-1205 admit has N=128 (the N-floor
+    relaxation axis under test).  Regression trap if a future contributor
+    accidentally adds a non-N-axis cell to the K-1205 set."""
+    for cell in _K1205_EN3_ADMITS_8:
+        M, N, K, dt = cell
+        assert N == 128, f"K-1205 cell {cell} violates N==128 invariant"
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST,
+                         ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1205_p8_admits_all_8_k1205_en3_cells(cid, M, N, K):
+    """Every K-1205 E_N3 admit must fire the P8 strict-equality match.
+    These 8 cells were paired n=30 measured at hbl/tb >= 1.144x mean
+    AND CI95-lo > 1.05x (route-OUT-safe gate) on rad-mi300x-1."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True, (
+        f"K-1205 E_N3 admit {cid} ({M},{N},{K}) missed P8 envelope")
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST,
+                         ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1205_p8_dispatch_routes_all_8_k1205_en3_cells_out_to_hbl(cid, M, N, K):
+    """Integration pin: every K-1205 E_N3 admit must dispatch to hipBLASLt
+    at the full ``_k971_route_to_hbl`` decision level (composition with
+    P5/P6/K-905-K-971 anchor table).  K-1205's paired n=30 measurement
+    shows hipBLASLt wins on every one of these 8 cells at >= 1.144x."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True, (
+        f"K-1205 E_N3 admit {cid} ({M},{N},{K}) failed to route-OUT through "
+        f"_k971_route_to_hbl; check P8 precedence vs K-1089 P6 admit")
+
+
+def test_k1205_p8_en3_admits_are_bf16_only():
+    """K-1205 measurement scope is bf16; fp16/fp32 must short-circuit."""
+    M, N, K = 14208, 128, 1024  # EN_K1024_S29 (cohort MAX hbl/tb=3.254x)
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float16) is False
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.float32) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_REJECTED_1_LIST,
+                         ids=[c[0] for c in K1205_EN3_REJECTED_1_LIST])
+def test_k1205_p8_does_not_leak_into_k1205_rejected_cells(cid, M, N, K):
+    """K-1205 NO-LEAK pin: the 1 E_N3 candidate that classified as
+    route-IN-safe (TB strictly faster) MUST NOT fire P8.
+
+    Staging EN_K768_S24 (M=4480 N=128 K=768) as route-OUT would create a
+    production FALSE POSITIVE — TB wins by ~3% (hbl/tb=0.967x CI95=[0.957,
+    0.980]) on this cell.  The cell is the smallest-M of the K-1205 cohort
+    at narrow N=128 K=768; consistent with R-1161's small-M Triton-favoured
+    tail (now confirmed to apply along the N-axis at the M-floor of the
+    K-1121 anchor M-set, not just the K-axis).  If a future contributor
+    widens E_N3 to include M < 5972 at K=768, this test fails and they
+    must re-validate at paired n=30 first."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+        f"K-1205 REJECTED cell {cid} ({M},{N},{K}) leaked into P8 -- "
+        f"this cell is TB-favoured (hbl/tb < 1.05x); routing it OUT "
+        f"would be a strict pessimisation per K-1205 paired n=30 evidence.")
+
+
+def test_k1205_p8_axis_extension_is_n_axis_not_k_axis():
+    """Structural pin: every K-1205 cell extends along the N-axis (N=128
+    new) NOT the K-axis (K stays in K-1144 K-set {256, 768, 1024}).  This
+    is load-bearing because K-1161 already established K-axis extension
+    NEGATIVE_AXIS_PIVOT (K=128 admit 0/2; K=512 admit 0/3).  K-1205's
+    POSITIVE result is specifically about the N-axis; any future widening
+    that conflates the two axes must fail this test first."""
+    K1144_K_SET = {256, 768, 1024}
+    for M, N, K, dt in _K1205_EN3_ADMITS_8:
+        assert N == 128, f"K-1205 cell {(M,N,K)} not on N-axis"
+        assert K in K1144_K_SET, (
+            f"K-1205 cell {(M,N,K)} K={K} not in K-1144 K-set; if you are "
+            f"adding K-axis cells here you must re-validate at paired n=30 "
+            f"because K-1161 NEGATIVE_AXIS_PIVOT applies along the K-axis.")

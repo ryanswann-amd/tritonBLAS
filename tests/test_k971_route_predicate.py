@@ -38,6 +38,7 @@ from tritonblas._route_predicate import (
     _K1161_E2_ADMITS_3,
     _K1205_EN3_ADMITS_8,
     _K1219_E3_NFLOOR256_ADMITS_7,
+    _K1283_A1_PERTURBATIONS_8,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -687,11 +688,11 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1303_p8_envelope_size_is_exactly_43_after_k1219_extension():
-    """K-1303 unified composition: 13 K-1121 anchors + 12 K-1131 neighbors
+def test_k1322_p8_envelope_size_is_exactly_51_after_k1297_a1_extension():
+    """K-1322 unified composition: 13 K-1121 anchors + 12 K-1131 neighbors
     + 3 K-1175/K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219
-    E3 N=256 admits = 43 cells.  Any silent edit changes this count and
-    trips this canary.
+    E3 N=256 admits + 8 K-1283/K-1297 A1 perturbations = 51 cells.  Any
+    silent edit changes this count and trips this canary.
 
     Provenance chain:
       * K-1144 originally pinned 25.
@@ -702,21 +703,31 @@ def test_k1303_p8_envelope_size_is_exactly_43_after_k1219_extension():
         (productionised in K-1275 on top of K-1216 stacked dispatch).
       * K-1219 / K-1240 extended by 7 N=256 cells (E3 cohort,
         K-1131-style anchor projection at N-floor=256), validated
-        independently on commit f110d64 (fix/K-1219-n256).  +7 -> 43.
-      * K-1303 composes K-1227 + K-1219 onto the K-1216 stacked baseline
-        (K-1275 already lands K-1227 at 36; this extension adds K-1219).
-        The two extensions sit on disjoint N axes (128 vs 256), so the
-        union is pairwise-disjoint with the prior three sets and with
-        each other (asserted in _route_predicate.py at module load and
-        again here)."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43
+        independently on commit f110d64 (fix/K-1219-n256).  +7 -> 43
+        (K-1303 unified composition).
+      * K-1283 / K-1297 extended by 8 A1 sub-cohort cells -- K-1131-style
+        +/-1-power-of-2 perturbations of A1 anchors that K-1131 itself
+        did NOT enumerate (S25 5/5 axes, S29 3/6 axes), validated
+        independently on commit f4cc5cf (fix/K-1283-A1).  +8 -> 51
+        (K-1322 unified composition).  The K-1297 cells overlap the
+        K-1131 / K-1121 N axis (N in {1024, 2048, 4096}) but always
+        differ on (M, K) by construction; disjointness asserted at
+        module load."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 51
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
     assert len(_K1219_E3_NFLOOR256_ADMITS_7) == 7
+    assert len(_K1283_A1_PERTURBATIONS_8) == 8
     # K-1303 cross-band disjointness pin: K-1227 (N=128) vs K-1219 (N=256).
     assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8)
+    # K-1322 K-1297 cross-disjointness with all five prior sub-frozensets.
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1427,13 +1438,19 @@ def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1175 P8 cell {cell} dropped from K-1231 envelope; "
             "K-1205 must be strict-equality union only.")
-    # Symmetric (post K-1303): every cell beyond the original 28-cell
-    # baseline must come from K-1205 (8 N=128) or K-1219 (7 N=256).
+    # Symmetric (post K-1322): every cell beyond the original 28-cell
+    # baseline must come from K-1205 (8 N=128), K-1219 (7 N=256), or
+    # K-1283/K-1297 (8 A1 perturbations).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1205
-    assert delta == (_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7), (
+    expected_delta = (
+        _K1205_EN3_ADMITS_8
+        | _K1219_E3_NFLOOR256_ADMITS_7
+        | _K1283_A1_PERTURBATIONS_8
+    )
+    assert delta == expected_delta, (
         "Cells added to P8 envelope past K-1175 do not match "
-        "_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7 exactly; "
-        "an unattributed cell crept in.")
+        "_K1205_EN3_ADMITS_8 | _K1219_E3_NFLOOR256_ADMITS_7 | "
+        "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed cell crept in.")
 
 
 # ---------------------------------------------------------------------------
@@ -1591,9 +1608,108 @@ def test_k1303_does_not_disturb_existing_p8_36_cell_envelope():
         assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
             f"K-1275 P8 cell {cell} dropped from K-1303 envelope; "
             "K-1219 must be strict-equality union only.")
-    # Symmetric: every new cell added by K-1219 must be in E3.
+    # Symmetric (post K-1322): every new cell added past K-1275 must
+    # come from K-1219 (7 N=256) or K-1283/K-1297 (8 A1 perturbations).
     delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1219
-    assert delta == _K1219_E3_NFLOOR256_ADMITS_7, (
+    assert delta == (_K1219_E3_NFLOOR256_ADMITS_7 | _K1283_A1_PERTURBATIONS_8), (
         "Cells added to P8 envelope past K-1275 do not match "
-        "_K1219_E3_NFLOOR256_ADMITS_7 exactly; an unattributed "
+        "_K1219_E3_NFLOOR256_ADMITS_7 | _K1283_A1_PERTURBATIONS_8 "
+        "exactly; an unattributed cell crept in.")
+
+
+# ---------------------------------------------------------------------------
+# K-1283 / K-1297 -- A1 sub-cohort targeted P8 admit-cell extension (8
+# cells).  Independent paired n=30 HIP-graph hot-cache validation on
+# rad-mi300x-1 (K-1297 commit f4cc5cf on fix/K-1283-A1, V2 protocol with
+# corrected negative-control captures).  Cohort geomean tb/hbl 1.389x;
+# productionised onto the K-1303 unified envelope by K-1322 (this branch)
+# as the 6th provenance sub-frozenset.
+# ---------------------------------------------------------------------------
+K1283_A1_PERTURBATIONS_8_LIST = [
+    # (cid, M, N, K, hbl_tb_med, CI95_lo) -- from K-1297 V2 paired n=30
+    ("A1_S25_Mx2", 12032, 2048, 1024, 3.365, 3.009),  # cohort MAX
+    ("A1_S25_Nx2",  6016, 4096, 1024, 1.383, 1.351),
+    ("A1_S25_N/2",  6016, 1024, 1024, 1.202, 1.143),
+    ("A1_S25_Kx2",  6016, 2048, 2048, 1.264, 1.242),
+    ("A1_S25_K/2",  6016, 2048,  512, 1.226, 1.140),
+    ("A1_S29_Mx2", 28416, 2048, 1024, 1.185, 1.163),
+    ("A1_S29_Nx2", 14208, 4096, 1024, 1.143, 1.071),
+    ("A1_S29_K/2", 14208, 2048,  512, 1.126, 1.035),  # cohort MIN
+]
+
+
+def test_k1283_a1_perturbations_envelope_size_is_exactly_8():
+    """Pin K-1283 A1 sub-frozenset cardinality.  K-1297 V2 admitted 8
+    cells out of 15 candidates at CI95-lo > 1.0x.  Any silent edit
+    changes the count and trips this canary."""
+    assert len(_K1283_A1_PERTURBATIONS_8) == 8
+
+
+def test_k1283_a1_perturbations_pairwise_disjoint_with_prior_five_subsets():
+    """K-1297 selected only K-1131-style perturbations on axes K-1131
+    did NOT enumerate (S25 5/5 axes, S29 3/6 axes); structural disjointness
+    with the prior five sub-frozensets is checked at module load and
+    re-asserted here for explicit test coverage."""
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8)
+    assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7)
+
+
+def test_k1283_a1_perturbations_contents_pinned_to_k1297_manifest():
+    """Pin the K-1297 8-admit envelope to source-of-truth (the K-1297 V2
+    paired n=30 dataset summarised in K1283_A1_PERTURBATIONS_8_LIST).
+    A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16")
+        for _cid, M, N, K, _hbl_tb, _ci_lo in K1283_A1_PERTURBATIONS_8_LIST)
+    assert _K1283_A1_PERTURBATIONS_8 == expected
+
+
+def test_k1283_a1_admits_are_in_p8_envelope():
+    """Per Testing Zealot REVISE on K-1297 -- positive-side admit pin:
+    every K-1283/K-1297 A1 admit MUST be a member of the unified P8
+    envelope.  Symmetric with the K-931 no-leak pins from K-1297."""
+    for cell in _K1283_A1_PERTURBATIONS_8:
+        assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT
+        M, N, K, _ = cell
+        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+
+
+def test_k1283_a1_admits_respect_k1142_m_floor_and_k1161_k_floor():
+    """Structural floor invariants inherited from K-1142 and K-1161:
+    every admit must satisfy M >= 4480 (K-1142 small-M Triton-favoured
+    tail carve-out) and K >= 256 (K-1161 negative-axis-pivot pin; do
+    NOT relax to 128 per K-1176 cross-arch failure)."""
+    for (M, N, K, _dtype) in _K1283_A1_PERTURBATIONS_8:
+        assert M >= 4480, (
+            f"K-1297 admit ({M}, {N}, {K}) violates K-1142 M>=4480 floor")
+        assert K >= 256, (
+            f"K-1297 admit ({M}, {N}, {K}) violates K-1161 K>=256 floor")
+
+
+def test_k1322_does_not_disturb_existing_k1303_43_cell_envelope():
+    """K-1303 -> K-1322 invariance check: the K-1303 43-cell P8 envelope
+    (28 baseline + 8 K-1205 E_N3 + 7 K-1219 E3) is preserved exactly --
+    K-1297 strict-equality union ADDS 8 A1 cells without re-measuring or
+    modifying any existing K-1144/K-1175/K-1205/K-1219 cell.  Extends
+    R-1184.STRICT-EQUALITY-UNION-PROVES-EXISTING-CELL-INVARIANCE to the
+    K-1322 layer."""
+    pre_k1297 = (
+        _K1121_P8_ANCHORS_13
+        | _K1131_P8_NEIGHBORS_12
+        | _K1161_E2_ADMITS_3
+        | _K1205_EN3_ADMITS_8
+        | _K1219_E3_NFLOOR256_ADMITS_7)
+    assert len(pre_k1297) == 43
+    for cell in pre_k1297:
+        assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1303 P8 cell {cell} dropped from K-1322 envelope; "
+            "K-1297 must be strict-equality union only.")
+    # Symmetric: every new cell added by K-1322 must be in K-1297 A1.
+    delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1297
+    assert delta == _K1283_A1_PERTURBATIONS_8, (
+        "Cells added to P8 envelope past K-1303 do not match "
+        "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed "
         "cell crept in.")

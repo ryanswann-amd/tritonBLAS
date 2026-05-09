@@ -535,26 +535,71 @@ _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942]
 })
 
-# Composed 43-cell P8 envelope (K-1303 unified).  Five named provenance
+# ---------------------------------------------------------------------------
+# K-1283 / K-1297 (S-002) -- A1 sub-cohort targeted P8 admit-cell extension
+# (8 cells).  K-1283 classified the K-1132 wpeu=1 13-cell residual into A1
+# (LDS-wait-starvation, MFMA-issue-stall dominated) and A2 (occupancy-bound,
+# paired waves ratio >= 1.7) sub-cohorts.  All five A1 *parent* cells (S18,
+# S24, S25, S29 in `_K1121_P8_ANCHORS_13`; N11 in `_K1131_P8_NEIGHBORS_12`)
+# are already routed.  K-1131 only perturbed S32 (A2), S39 (A2), S18 (A1),
+# and S24 (A1) -- leaving S25 and S29 (A1 anchors) with **zero**
+# +/-1-power-of-2 perturbation coverage, plus several un-covered axes on
+# S18 / S24.
+#
+# K-1297 closes the A1-only perturbation gap with a strict-equality
+# extension validated under paired n=30 HIP-graph hot-cache (V2 protocol;
+# see K-1297 PR / fix/K-1283-A1 @ f4cc5cf for the V1-vs-V2 audit).  V2
+# admits 8 cells at CI95-lo > 1.0x on rad-mi300x-1; cohort geomean =
+# 1.389x.  All admits respect the K-1142 M-floor (M >= 4480) and the
+# K-1161 K-floor (K >= 256).
+#
+# K-1322 (S-002) layers this set onto the K-1303 unified envelope (which
+# already contains K-1121 + K-1131 + K-1161 E2 + K-1205 N=128 + K-1219
+# N=256 = 43 cells), growing the unified envelope to 51 cells.  K-1283
+# A1 perturbations are K-1131-style perturbations of A1 anchors that
+# K-1131 itself did NOT enumerate (S25, S29, plus un-covered M/K axes of
+# S18 / S24).  Disjointness with all five prior sub-frozensets is by
+# construction (asserted at module load).
+# ---------------------------------------------------------------------------
+_K1283_A1_PERTURBATIONS_8 = frozenset({
+    # ----- S25 (6016, 2048, 1024) family -- A1 anchor, 5/5 axes admit -----
+    (12032, 2048, 1024, "torch.bfloat16"),  # A1_S25_Mx2
+    ( 6016, 4096, 1024, "torch.bfloat16"),  # A1_S25_Nx2
+    ( 6016, 1024, 1024, "torch.bfloat16"),  # A1_S25_N/2
+    ( 6016, 2048, 2048, "torch.bfloat16"),  # A1_S25_Kx2
+    ( 6016, 2048,  512, "torch.bfloat16"),  # A1_S25_K/2
+    # ----- S29 (14208, 2048, 1024) family -- A1 anchor, 3/6 axes admit -----
+    (28416, 2048, 1024, "torch.bfloat16"),  # A1_S29_Mx2
+    (14208, 4096, 1024, "torch.bfloat16"),  # A1_S29_Nx2
+    (14208, 2048,  512, "torch.bfloat16"),  # A1_S29_K/2
+    # NOTE: 7 K-1297 candidates were rejected (CI95-lo <= 1.0x) under V2
+    # and are DELIBERATELY OMITTED here (S29 boundary rejects, S18_Mx2
+    # noise-floor straddler, S18/S24 K-axis rejects).  See K-1297 PR
+    # body and tests/test_k971_route_predicate.py K-1283 no-leak pins.
+})
+
+# Composed 51-cell P8 envelope (K-1322 unified).  Six named provenance
 # frozensets (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits,
-# K-1231/K-1205 E_N3 N=128 admits, K-1219 E3 N=256 admits) -- the
-# dispatch path consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE
-# and its K-1175 / K-1205 / K-1219 extensions, source-ticket lineage is
-# load-bearing for future reviewers (precedence-inversion debugging,
-# PMC re-classifier work, ADR audits) so each measurement campaign keeps
-# its own named set with a runtime size + pairwise-disjointness check.
+# K-1231/K-1205 E_N3 N=128 admits, K-1219 E3 N=256 admits, K-1283/K-1297
+# A1 perturbations) -- the dispatch path consults the union.  Per
+# R-1144.DUAL-FROZENSET-PROVENANCE and its K-1175 / K-1205 / K-1219 /
+# K-1297 extensions, source-ticket lineage is load-bearing for future
+# reviewers (precedence-inversion debugging, PMC re-classifier work, ADR
+# audits) so each measurement campaign keeps its own named set with a
+# runtime size + pairwise-disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
     | _K1219_E3_NFLOOR256_ADMITS_7
+    | _K1283_A1_PERTURBATIONS_8
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
-    "K-1303 unified P8 envelope must be exactly 43 cells (13 K-1121 "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 51, (
+    "K-1322 unified P8 envelope must be exactly 51 cells (13 K-1121 "
     "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
-    "N=128 admits + 7 K-1219 E3 N=256 admits); a duplicate or stray "
-    "entry has crept in.")
+    "N=128 admits + 7 K-1219 E3 N=256 admits + 8 K-1283/K-1297 A1 "
+    "perturbations); a duplicate or stray entry has crept in.")
 # Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -596,6 +641,30 @@ assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_K1205_EN3_ADMITS_8), (
     "N=128 admits.  The two campaigns operate on disjoint N axes by "
     "construction; an overlap indicates an authoring typo in one of "
     "the two frozensets.")
+# K-1322 / K-1297 A1 cross-disjointness with the prior five sub-frozensets.
+# K-1283 A1 perturbations are perturbations of A1 anchors that K-1131 did
+# not enumerate; their N values are in {1024, 2048, 4096} (S25/S29 family),
+# overlapping the K-1131 / K-1121 N axis (N in {896, 1024, 2048}) on the N
+# coordinate but always differing on (M, K) by construction.  N=128 / N=256
+# tiers (K-1205 / K-1219) are trivially disjoint.
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1283 A1 perturbation overlaps a K-1121 anchor; the K-1131-style "
+    "+/-1-power-of-2 perturbation generator excludes the parent anchor "
+    "by construction.")
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1283 A1 perturbation overlaps a K-1131 neighbor; K-1297 selected "
+    "only A1-anchor perturbations on axes K-1131 did NOT enumerate (S25, "
+    "S29, plus un-covered M/K axes of S18/S24).")
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1283 A1 perturbation overlaps a K-1161 E2 admit; the three E2 "
+    "admits ({(736,1792,736), (10112,2048,1024), (12160,2048,1024)}) are "
+    "structurally distinct from the K-1297 A1 perturbation cells.")
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8), (
+    "K-1283 A1 perturbation overlaps a K-1205 E_N3 admit; K-1297 cells "
+    "all have N >= 1024; K-1205 cells all have N=128.")
+assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1283 A1 perturbation overlaps a K-1219 E3 N=256 admit; K-1297 "
+    "cells all have N >= 1024; K-1219 cells all have N=256.")
 
 
 # ---------------------------------------------------------------------------
@@ -634,13 +703,13 @@ def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219 -- unified
-    in K-1303) — direct hipBLASLt route-OUT for the quintuply-validated
-    MFMA-issue-stall cohort (K-1121 anchors + K-1131 neighbors +
-    K-1175/K-1161 E2 admits + K-1231/K-1205 E_N3 N=128 admits +
-    K-1219 E3 N=256 admits).
+    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1219 / K-1297 --
+    unified in K-1303 then K-1322) — direct hipBLASLt route-OUT for the
+    sextuply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
+    neighbors + K-1175/K-1161 E2 admits + K-1231/K-1205 E_N3 N=128 admits +
+    K-1219 E3 N=256 admits + K-1283/K-1297 A1 perturbations).
 
-    Returns True iff (M, N, K, dtype) matches one of the 43 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 51 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).
@@ -688,14 +757,16 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
         return False
     if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
         return False
-    # K-1144 + K-1175 + K-1231/K-1205 + K-1219 (K-1303 unified): P8
-    # 43-cell strict-equality (13 K-1121 anchors + 12 K-1131 neighbors +
+    # K-1144 + K-1175 + K-1231/K-1205 + K-1219 + K-1297 (K-1322 unified):
+    # P8 51-cell strict-equality (13 K-1121 anchors + 12 K-1131 neighbors +
     # 3 K-1161 E2 admits + 8 K-1205 E_N3 N=128 admits + 7 K-1219 E3
-    # N=256 admits) takes precedence over P6 admit so K-1121's paired
-    # n=30 evidence overrides K-1089 envelope admit for the S24/S29/N11
-    # overlap.  K-1205's 8 N=128 and K-1219's 7 N=256 additions are
-    # disjoint from K-1089 P6 envelope (P6 has no N<896 cells), so the
-    # precedence-inversion question is unchanged.
+    # N=256 admits + 8 K-1283/K-1297 A1 perturbations) takes precedence
+    # over P6 admit so K-1121's paired n=30 evidence overrides K-1089
+    # envelope admit for the S24/S29/N11 overlap.  K-1205's 8 N=128 and
+    # K-1219's 7 N=256 additions are disjoint from K-1089 P6 envelope
+    # (P6 has no N<896 cells); K-1297's 8 A1 perturbations are S25/S29
+    # K-1131-style perturbations, structurally identical to K-1131's
+    # routing rationale.
     if _p8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype):
         return True
     # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth

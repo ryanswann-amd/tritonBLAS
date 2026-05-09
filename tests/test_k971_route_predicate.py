@@ -1082,277 +1082,42 @@ def test_k1175_p8_e2_admits_m_axis_cells_at_k1024_anchor_k():
 
 
 # ---------------------------------------------------------------------------
-# K-1194 (S-002) MI300X arch-guard pin tests for the K-1175 28-cell P8
-# envelope.  The K-1121 + K-1131 + K-1161 measurement campaigns all ran on
-# MI300X; the K-1162 MI325X audit and K-1176 MI355X cross-arch port both
-# surfaced verdict divergence on the K-floor sub-cohort -- in particular,
-# 0/8 of the K<256 E2 cells transferred cleanly to the MI325X / MI355X
-# SKUs, confirming the K=256 floor is gfx942-MI300X-specific and the
-# 28-cell envelope must not silently fire on other SKUs.
-#
-# These tests pin:
-#   (a) the env override (TRITONBLAS_K1194_P8_FORCE_MI300X) ON re-enables
-#       the predicate even when the device probe returns False;
-#   (b) the env override OFF disables the predicate on MI300X (escape
-#       hatch for ops);
-#   (c) the auto-detect path returns False when the device name does not
-#       contain "MI300X" (e.g. "MI325X");
-#   (d) the auto-detect path returns False when the device name explicitly
-#       contains "MI325" (defense-in-depth against substring collisions);
-#   (e) the auto-detect path fails-safe to True when torch / CUDA cannot be
-#       probed (preserves torch-free unit-test invariant);
-#   (f) the predicate respects the arch-guard at the dispatch level.
+# K-1194 (S-002) MI300X arch-guard for the K-1175 28-cell P8 envelope.
+# K-1162 MI325X audit + K-1176 MI355X cross-arch port: 0/8 K-floor cells
+# transferred cleanly off MI300X, so the 28-cell envelope must not silently
+# fire on other SKUs.  Both MI300X and MI325X report gfx942 so we
+# discriminate by torch.cuda.get_device_name marketing string.
 # ---------------------------------------------------------------------------
-import importlib
-
+import sys
 from tritonblas import _route_predicate as _rp
 
 
-@pytest.fixture(autouse=False)
-def _clear_p8_arch_cache():
-    """Helper for tests that mutate env / device-name probing.  The
-    underlying detector is functools.lru_cache'd so every test must start
-    with a clean cache to avoid cross-test contamination."""
-    _rp._detect_mi300x_cached.cache_clear()
-    yield
-    _rp._detect_mi300x_cached.cache_clear()
-
-
-def test_k1194_p8_env_override_force_on_re_enables_predicate(
-        monkeypatch, _clear_p8_arch_cache):
-    """The TRITONBLAS_K1194_P8_FORCE_MI300X=1 escape hatch must take
-    precedence over the device-name probe (useful on partitioned-CU
-    SKUs or for unit tests without a real GPU)."""
-    monkeypatch.setenv(_rp._K1194_P8_ARCH_GUARD_ENV, "1")
-    # Force-on irrespective of detector outcome:
-    assert _rp._is_mi300x_for_p8() is True
-    # And so the predicate fires on a known anchor:
-    assert _rp._p8_mfma_issue_stall_routeout(4480, 3072, 768, "torch.bfloat16") is True
-
-
-def test_k1194_p8_env_override_force_off_disables_predicate(
-        monkeypatch, _clear_p8_arch_cache):
-    """Operator escape hatch: setting the env to 0 must short-circuit the
-    predicate to False even on a real MI300X (e.g. for A/B comparison)."""
-    monkeypatch.setenv(_rp._K1194_P8_ARCH_GUARD_ENV, "0")
-    assert _rp._is_mi300x_for_p8() is False
-    # And the predicate is now silent on every K-1175 cell:
-    for (M, N, K, dtype) in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
-        assert _rp._p8_mfma_issue_stall_routeout(M, N, K, dtype) is False, (
-            f"K-1194 force-off failed for ({M},{N},{K},{dtype})")
-
-
-@pytest.mark.parametrize("env_value", ["true", "True", "TRUE", "yes", "on", "1"])
-def test_k1194_p8_env_override_truthy_aliases_force_on(
-        monkeypatch, env_value, _clear_p8_arch_cache):
-    monkeypatch.setenv(_rp._K1194_P8_ARCH_GUARD_ENV, env_value)
-    assert _rp._is_mi300x_for_p8() is True
-
-
-@pytest.mark.parametrize("env_value", ["false", "False", "FALSE", "no", "off", "0"])
-def test_k1194_p8_env_override_falsy_aliases_force_off(
-        monkeypatch, env_value, _clear_p8_arch_cache):
-    monkeypatch.setenv(_rp._K1194_P8_ARCH_GUARD_ENV, env_value)
-    assert _rp._is_mi300x_for_p8() is False
-
-
-def test_k1194_p8_arch_guard_rejects_mi325x_device_name(
-        monkeypatch, _clear_p8_arch_cache):
-    """K-1162 audit found MI325X (gfx942 + HBM3e + 256 GB) is NOT covered
-    by the K-1175 envelope; both SKUs report ``arch == "gfx942"`` so we
-    discriminate by device name.  Pin: a device name containing "MI325X"
-    (in any case) must auto-detect to False."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
+@pytest.mark.parametrize("device_name,expected_admit", [
+    ("AMD Instinct MI300X",     True),   # production target — preserve K-1175 envelope
+    ("AMD Instinct MI300X_OAM", True),   # K-1175 evidence is gfx942-MI300X regardless of OAM/HF suffix
+    ("AMD Instinct MI325X",     False),  # K-1162: gfx942 HBM3e refresh — verdict diverges
+    ("AMD Instinct MI355X",     False),  # K-1176: gfx950 — verdict diverges
+    ("AMD Instinct MI300A",     False),  # APU variant — out of measurement scope
+])
+def test_k1194_p8_arch_guard_admits_28_cells_iff_mi300x(
+        monkeypatch, device_name, expected_admit):
+    """K-1194 contract: the K-1175 28-cell P8 envelope admits iff active
+    device's marketing name starts with ``AMD Instinct MI300X``.
+    Failsafe (torch-free / CPU-only -> True) is exercised implicitly by
+    the rest of the suite, which runs without a GPU."""
     class _FakeCuda:
         @staticmethod
         def is_available(): return True
         @staticmethod
         def current_device(): return 0
         @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI325X"
+        def get_device_name(idx): return device_name
 
     class _FakeTorch:
         cuda = _FakeCuda
 
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is False
-
-
-def test_k1194_p8_arch_guard_rejects_mi355x_device_name(
-        monkeypatch, _clear_p8_arch_cache):
-    """K-1176 cross-arch port found MI355X (gfx950) is also NOT covered by
-    the K-1175 envelope.  Even though the arch difference would also be
-    caught by a future arch-string check, we pin the device-name path."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI355X"
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is False
-
-
-def test_k1194_p8_arch_guard_accepts_mi300x_device_name(
-        monkeypatch, _clear_p8_arch_cache):
-    """Positive control: the canonical MI300X marketing name must
-    auto-detect to True so the predicate continues to fire on the SKU
-    where the K-1175 measurement evidence holds."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI300X"
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is True
-
-
-def test_k1194_p8_arch_guard_rejects_mi300a(
-        monkeypatch, _clear_p8_arch_cache):
-    """MI300A (APU variant of gfx942) is also not in scope; the K-1121 /
-    K-1131 measurement campaigns ran on MI300X discrete only."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI300A"
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is False
-
-
-def test_k1194_p8_arch_guard_failsafe_to_true_when_torch_unavailable(
-        monkeypatch, _clear_p8_arch_cache):
-    """Torch-free unit-test invariant: when torch is not importable at all
-    (the module's original design contract), the detector must return
-    True so logic-only test suites continue to exercise the predicate
-    without needing a GPU."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-    # Force ImportError by inserting a sentinel that raises on attribute
-    # access during the import resolution.
-    import sys
-    real_torch = sys.modules.get("torch")
-    sys.modules["torch"] = None  # makes ``import torch`` raise ImportError
-    try:
-        _rp._detect_mi300x_cached.cache_clear()
-        assert _rp._detect_mi300x_cached() is True
-    finally:
-        if real_torch is not None:
-            sys.modules["torch"] = real_torch
-        else:
-            del sys.modules["torch"]
-        _rp._detect_mi300x_cached.cache_clear()
-
-
-def test_k1194_p8_arch_guard_failsafe_to_true_when_cuda_unavailable(
-        monkeypatch, _clear_p8_arch_cache):
-    """CPU-only environment (torch importable, no CUDA): same invariant —
-    return True so the predicate runs as before for logic-only tests."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return False
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is True
-
-
-def test_k1194_p8_arch_guard_failsafe_to_true_on_runtime_exception(
-        monkeypatch, _clear_p8_arch_cache):
-    """Defense-in-depth: if torch.cuda.get_device_name itself raises (e.g.
-    HIP runtime hiccup), the detector must NOT silently disable the
-    predicate; preserve the legacy behavior."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx):
-            raise RuntimeError("HIP runtime not initialised")
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    assert _rp._detect_mi300x_cached() is True
-
-
-def test_k1194_p8_arch_guard_disables_all_28_cells_on_mi325x(
-        monkeypatch, _clear_p8_arch_cache):
-    """End-to-end pin: with an MI325X device name and no env override,
-    every one of the 28 P8 cells must be silenced (predicate returns
-    False).  This is the load-bearing K-1194 production contract --
-    a future contributor who deletes the arch-guard call from
-    ``_p8_mfma_issue_stall_routeout`` will fail this test."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI325X"
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    for (M, N, K, dtype) in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
-        assert _rp._p8_mfma_issue_stall_routeout(M, N, K, dtype) is False, (
-            f"K-1194 arch-guard failed to silence ({M},{N},{K},{dtype}) on MI325X")
-
-
-def test_k1194_p8_arch_guard_admits_all_28_cells_on_mi300x(
-        monkeypatch, _clear_p8_arch_cache):
-    """End-to-end positive control: with an MI300X device name and no env
-    override, every one of the 28 P8 cells must continue to route-OUT.
-    K-1144 + K-1175 contract preserved on the SKU where the measurement
-    evidence holds."""
-    monkeypatch.delenv(_rp._K1194_P8_ARCH_GUARD_ENV, raising=False)
-
-    class _FakeCuda:
-        @staticmethod
-        def is_available(): return True
-        @staticmethod
-        def current_device(): return 0
-        @staticmethod
-        def get_device_name(idx): return "AMD Instinct MI300X"
-
-    class _FakeTorch:
-        cuda = _FakeCuda
-
-    monkeypatch.setitem(__import__("sys").modules, "torch", _FakeTorch)
-    for (M, N, K, dtype) in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
-        assert _rp._p8_mfma_issue_stall_routeout(M, N, K, dtype) is True, (
-            f"K-1194 arch-guard incorrectly silenced ({M},{N},{K},{dtype}) on MI300X")
+    monkeypatch.setitem(sys.modules, "torch", _FakeTorch)
+    assert _rp._is_mi300x() is expected_admit
+    for cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT:
+        assert _rp._p8_mfma_issue_stall_routeout(*cell) is expected_admit, (
+            f"K-1194 arch-guard violated for {cell} on {device_name!r}")

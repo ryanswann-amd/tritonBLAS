@@ -36,6 +36,7 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1205_EN3_ADMITS_8,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -685,18 +686,24 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
-    Any silent edit changes this count and trips this canary.
+def test_k1144_p8_envelope_size_is_exactly_36_after_k1205_extension():
+    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
+    E_N3 = 36 cells.  Any silent edit changes this count and trips this
+    canary.
 
     K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
-    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
-    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024); K-1231 /
+    K-1205 extends by 8 N-axis-validated cells at N=128 (E_N3 cohort with
+    M from K-1121 anchor M-set, K in K-1144 K-set {256, 768, 1024}, bf16),
+    decisively diverging from K-1161's K-axis NEGATIVE_AXIS_PIVOT (88.9%
+    N-axis admit vs 16.7% K-axis admit on the same hardware/methodology).
+    See the _K1205_EN3_ADMITS_8 docstring in _route_predicate.py for the
+    full mechanism narrative and the EN_K768_S24 (M=4480) carve-out."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
+    assert len(_K1205_EN3_ADMITS_8) == 8
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1184,3 +1191,231 @@ def test_k1216_e1_dispatch_stacked_after_p8_no_double_route():
         # E1 may or may not fire depending on whether cell is inside E1
         # envelope; verdict is True iff either fires (dispatch is OR).
         assert (p8_says or e1_says) is True
+
+
+# ---------------------------------------------------------------------------
+# K-1231 / K-1205 E_N3 N-axis P8 envelope extension pin tests (8 admit cells
+# at N=128 + 1 no-leak carve-out for the EN_K768_S24 false positive at the
+# K-1142 M-floor).  Layered on top of K-1216's stacked dispatch chain
+# (fix/K-1209-stacked @ fb9461f); K-1216 P8/E1 stacking semantics are
+# preserved unchanged -- E_N3 admits are pure data added to the P8 union
+# frozenset, so E1's defense-in-depth role and 0-marginal-coverage verdict
+# from K-1209 are not disturbed.
+#
+# Source: K-1205 paired n=30 HIP-graph hot-cache validation on rad-mi300x-1
+# (c42 SSH plane outage 6th->10th->11th recurrence; rad-mi300x-1 fallback
+# is now load-bearing infrastructure for the entire P8 envelope investigation
+# series per R-1205.RAD-MI300X-1-IS-LOAD-BEARING-INFRASTRUCTURE-FOR-P8-
+# ENVELOPE-WORK).  Brief decision threshold: >=75% landing => STAGE_DIFF;
+# K-1205 returned 8/9 = 88.9% admit at hbl/tb_med >= 1.05x AND CI95-lo > 1.00.
+# ---------------------------------------------------------------------------
+
+K1205_EN3_ADMITS_8_LIST = [
+    # (cid, M, N, K, hbl_tb_med, CI95_lo)
+    ("EN_K1024_S25",  6016,  128, 1024, 1.370, 1.362),
+    ("EN_K1024_S26",  8064,  128, 1024, 1.402, 1.396),
+    ("EN_K1024_S29", 14208,  128, 1024, 3.254, 3.234),  # cohort MAX
+    ("EN_K1024_S30", 16256,  128, 1024, 3.024, 3.011),
+    ("EN_K1024_S33", 22400,  128, 1024, 2.258, 2.234),
+    ("EN_K256_S37",  25600,  128,  256, 1.144, 1.140),  # cohort MIN admit
+    ("EN_K256_S39",  49152,  128,  256, 1.781, 1.768),
+    ("EN_K768_S18",   5972,  128,  768, 1.227, 1.226),
+]
+
+# K-1205 N-axis false-positive carve-out: EN_K768_S24 at M=4480 K=768 N=128
+# bf16 measured hbl/tb_med = 0.967x CI95=[0.94, 1.00] -- TB-favoured at
+# the K-1142 M-floor.  Carve-out is implicit (cell is omitted from the
+# strict-equality frozenset by construction); this list is the explicit
+# regression-trap counterpart per R-1175.PIN-REJECTED-CELLS-AS-NO-LEAK-
+# WITNESSES.  A future contributor who tries to widen E_N3 to a parametric
+# envelope along the M-axis must trip this pin and re-validate at paired
+# n=30 -- same discipline K-1175 applied to the K-1161 K-axis rejects.
+K1205_EN3_REJECTED_1_LIST = [
+    # (cid, M, N, K, hbl_tb_med, mechanism)
+    ("EN_K768_S24", 4480, 128, 768, 0.967,
+     "small-M Triton-favoured tail at the K-1142 M-floor "
+     "(R-1205.SMALL-M-TRITON-FAVOURED-TAIL-IS-AXIS-AGNOSTIC-AT-COHORT-M-FLOOR)"),
+]
+
+
+def test_k1205_en3_admits_envelope_size_is_exactly_8():
+    """Pin K-1205 E_N3 sub-frozenset cardinality. The K-1205 brief gated
+    landing at >=75% of 9 candidates; the 8/9 = 88.9% empirical result
+    drives this size.  Any silent edit changes the count and trips this
+    canary."""
+    assert len(_K1205_EN3_ADMITS_8) == 8
+
+
+def test_k1205_en3_admits_pairwise_disjoint_with_k1121_k1131_k1161():
+    """K-1205 E_N3 candidates have N=128 by construction; no K-1121 anchor,
+    K-1131 neighbor, or K-1161 E2 admit has N=128, so the 4-way union is
+    pairwise disjoint without manual exclusion lists.  This is the
+    structural disjointness invariant that the runtime asserts in
+    _route_predicate.py rely on."""
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+def test_k1205_en3_admits_envelope_contents_pinned_to_k1205_manifest():
+    """Pin the K-1205 8-admit envelope to source-of-truth (the K-1205
+    paired n=30 dataset summarised in K1205_EN3_ADMITS_8_LIST). A silent
+    edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16")
+        for _cid, M, N, K, _hbl_tb, _ci_lo in K1205_EN3_ADMITS_8_LIST)
+    assert _K1205_EN3_ADMITS_8 == expected
+
+
+def test_k1205_en3_admits_all_have_n_equal_128():
+    """Structural axis-discipline invariant: K-1205 staged the N-axis
+    extension at N-floor=128 ONLY. K-1161/K-1176 already established
+    that K-floor relaxation past K=256 is NEGATIVE_AXIS_PIVOT (cross-
+    arch confirmed).  Any cell in E_N3 with N != 128 would be a silent
+    drift away from the staged axis and trips here."""
+    for (M, N, K, dtype) in _K1205_EN3_ADMITS_8:
+        assert N == 128, (
+            f"K-1205 E_N3 cell {(M, N, K, dtype)!r} has N={N} != 128; "
+            "K-1205 is N-axis-only at N-floor=128 by R-1205.")
+
+
+def test_k1205_en3_admits_k_in_k1144_k_set():
+    """Structural axis-discipline invariant: K-1205 held K fixed at the
+    K-1144 K-set {256, 768, 1024} (NOT a K-axis relaxation -- K-1161
+    rejected K-floor < 256 on adjacent cells).  Any K outside this set
+    would be a covert K-axis extension and trips here."""
+    for (M, N, K, dtype) in _K1205_EN3_ADMITS_8:
+        assert K in {256, 768, 1024}, (
+            f"K-1205 E_N3 cell {(M, N, K, dtype)!r} has K={K} outside "
+            "the K-1144 K-set {256, 768, 1024}; K-1205 is N-axis-only.")
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,hbl_tb_med,ci95_lo", K1205_EN3_ADMITS_8_LIST,
+    ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1205_p8_admits_all_8_en3_cells(cid, M, N, K, hbl_tb_med, ci95_lo):
+    """Every K-1205 E_N3 admit cell must fire the P8 strict-equality
+    match.  Each was paired-n=30 measured at hbl/tb_med >= 1.144x
+    AND CI95-lo > 1.00 (K-1007 admission floor exceeded with margin)
+    on rad-mi300x-1 under HIP-graph hot-cache."""
+    assert hbl_tb_med >= 1.05, (
+        f"{cid} hbl/tb_med {hbl_tb_med:.3f}x below K-1007 admission floor")
+    assert ci95_lo > 1.00, (
+        f"{cid} CI95-lo {ci95_lo:.3f} fails CI95-lo > 1.00 gate")
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,hbl_tb_med,ci95_lo", K1205_EN3_ADMITS_8_LIST,
+    ids=[c[0] for c in K1205_EN3_ADMITS_8_LIST])
+def test_k1205_dispatch_routes_all_8_en3_cells_out_to_hbl(
+        cid, M, N, K, hbl_tb_med, ci95_lo):
+    """End-to-end dispatch check: with default carve-outs disabled,
+    _k971_route_to_hbl must return True for every K-1205 E_N3 admit
+    so the cell is routed to hipBLASLt and silently picks up the
+    measured 1.14x-3.25x speedup."""
+    decision = _k971_route_to_hbl(
+        M, N, K,
+        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert decision is True, (
+        f"{cid} (M={M} N={N} K={K}) was not routed to hipBLASLt; "
+        f"expected True per K-1205 paired n=30 hbl/tb_med={hbl_tb_med:.3f}x")
+
+
+def test_k1205_p8_en3_admits_are_bf16_only():
+    """K-1205 measurement scope is bf16 only.  fp16 / fp32 with the same
+    (M, N, K) must NOT fire P8 -- fp16 dispatch is owned by the K-1093
+    / K-1125 mirror predicate line (none of which currently covers N=128;
+    a silent expansion of P8 to fp16 would invade that ownership and
+    trips here)."""
+    for (M, N, K, _dtype) in _K1205_EN3_ADMITS_8:
+        for fp_dtype in (torch.float16, torch.float32):
+            assert _p8_mfma_issue_stall_routeout(M, N, K, fp_dtype) is False, (
+                f"P8 fired on non-bf16 dtype {fp_dtype} for "
+                f"K-1205 cell {(M, N, K)}; K-1205 is bf16-only.")
+
+
+@pytest.mark.parametrize(
+    "cid,M,N,K,hbl_tb_med,mechanism", K1205_EN3_REJECTED_1_LIST,
+    ids=[c[0] for c in K1205_EN3_REJECTED_1_LIST])
+def test_k1205_p8_does_not_leak_into_en_k768_s24_carve_out(
+        cid, M, N, K, hbl_tb_med, mechanism):
+    """NO-LEAK pin (R-1175.PIN-REJECTED-CELLS-AS-NO-LEAK-WITNESSES extended
+    to the K-1205 N-axis):  EN_K768_S24 (M=4480 N=128 K=768 bf16) was
+    measured at hbl/tb_med = 0.967x (TB-favoured) -- it is the K-1205
+    N-axis FALSE-POSITIVE CARVE-OUT.  The strict-equality frozenset
+    excludes it by construction (omission); this test is the explicit
+    regression trap.
+
+    A future contributor who tries to widen E_N3 to a parametric envelope
+    along the M-axis -- e.g. ``N == 128 AND K in {256, 768, 1024} AND M
+    in K-1121-anchor-M-set`` without an M-floor strictly above 4480 --
+    will trip this test, forcing them to either (a) re-validate at paired
+    n=30 (the right thing) or (b) explicitly remove the pin (which makes
+    the deviation auditable and traceable to the K-1142 M-floor / R-1205
+    small-M Triton-favoured tail mechanism)."""
+    assert hbl_tb_med < 1.05, (
+        f"{cid} reject pin requires measured hbl/tb_med < 1.05 (got "
+        f"{hbl_tb_med:.3f}); update K1205_EN3_REJECTED_1_LIST if "
+        "K-1205 measurements were re-run with different verdict.")
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
+        f"P8 leaked admit into K-1205 N-axis carve-out {cid} "
+        f"(M={M} N={N} K={K}); reject mechanism: {mechanism}.")
+
+
+def test_k1205_en_k768_s24_dispatch_does_not_route_to_hbl():
+    """Carve-out validated through the FULL dispatch chain (P8 -> E1 ->
+    P6 -> P5 -> K-971 anchor table).  EN_K768_S24 must NOT be routed
+    to hipBLASLt by any layer; if it is, K-1205 ships a silent
+    pessimisation worth ~3% per call on this shape."""
+    M, N, K = 4480, 128, 768
+    decision = _k971_route_to_hbl(
+        M, N, K,
+        a_dtype=torch.bfloat16, b_dtype=torch.bfloat16,
+        enable_streamk=False, work_stealing=False)
+    assert decision is False, (
+        f"EN_K768_S24 (M={M} N={N} K={K}) was routed to hipBLASLt by "
+        "the dispatch chain; this is the K-1205 N-axis false-positive "
+        "carve-out -- measured TB-WIN at hbl/tb_med=0.967x.")
+
+
+def test_k1205_p8_e1_stack_no_double_route_for_en3_admits():
+    """K-1216 stacked-dispatch invariant preserved: every K-1205 E_N3
+    admit fires P8 (strict equality), and -- because all 8 admits have
+    N=128 which is OUTSIDE the K-1216 E1 envelope's N-set
+    {1792, 2048, 3072} -- E1 must NOT fire on these cells (E1 is a
+    no-op for N=128 by design).  Confirms K-1216's E1 stacking is
+    untouched by the K-1231 P8 extension (K-1209 dominance unchanged
+    on K-931 top-40)."""
+    for (M, N, K, _dtype) in _K1205_EN3_ADMITS_8:
+        p8_says = _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
+        e1_says = R_K1142_E1_route_to_hbl(M, N, K, torch.bfloat16)
+        assert p8_says is True, (
+            f"P8 missed K-1205 E_N3 admit ({M}, {N}, {K})")
+        assert e1_says is False, (
+            f"E1 fired on K-1205 N=128 cell ({M}, {N}, {K}); K-1216 "
+            "stacking semantics require E1 N-set {1792, 2048, 3072} "
+            "(N=128 must be excluded).")
+
+
+def test_k1205_does_not_disturb_existing_p8_28_cell_envelope():
+    """K-1216 -> K-1231 invariance check: the original 28-cell P8 envelope
+    is preserved exactly -- K-1205 strict-equality union ADDS 8 cells
+    without re-measuring or modifying any existing K-1144/K-1175 cell.
+    This is R-1184.STRICT-EQUALITY-UNION-PROVES-EXISTING-CELL-INVARIANCE-
+    WITHOUT-RE-MEASUREMENT in test form."""
+    pre_k1205 = (
+        _K1121_P8_ANCHORS_13
+        | _K1131_P8_NEIGHBORS_12
+        | _K1161_E2_ADMITS_3)
+    assert len(pre_k1205) == 28
+    for cell in pre_k1205:
+        assert cell in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1175 P8 cell {cell} dropped from K-1231 envelope; "
+            "K-1205 must be strict-equality union only.")
+    # Symmetric: every new cell added by K-1205 must be in E_N3.
+    delta = _P8_MFMA_ISSUE_STALL_ROUTEOUT - pre_k1205
+    assert delta == _K1205_EN3_ADMITS_8, (
+        "Cells added to P8 envelope past K-1175 do not match "
+        "_K1205_EN3_ADMITS_8 exactly; an unattributed cell crept in.")

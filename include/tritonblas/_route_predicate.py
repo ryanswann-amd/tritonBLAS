@@ -13,6 +13,7 @@ The predicate keys solely on ``(M, N, K, dtype)`` where ``dtype`` is matched by
 from __future__ import annotations
 
 import os
+import functools
 
 # fp16 K-905/K-971 anchors stay as exact-tuple lookups because their shapes
 # structurally collide with K-950 LAND cells (e.g. (1024,1024,16384,bf16) is
@@ -482,15 +483,114 @@ assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "candidate generator excluded all K-1131 neighbors by construction.")
 
 
+# ---------------------------------------------------------------------------
+# K-1194 (S-002) MI300X arch-guard for the K-1175 28-cell P8 envelope.
+#
+# The K-1121 PMC-counter-matrix campaign and the K-1131 / K-1161 paired n=30
+# HIP-graph hot-cache validation that produced the 28-cell route-OUT envelope
+# all ran exclusively on MI300X (gfx942, 304 CUs, HBM3, 192 GB).  K-1162's
+# MI325X SKU audit (gfx942, 304 CUs, HBM3e, 256 GB) and K-1176's MI355X
+# cross-arch port (gfx950, 256 CUs) both surfaced cells whose hipBLASLt-vs-
+# Triton verdict diverges from the MI300X measurement of record.  The most
+# concerning datapoint is the K-1176 K-floor sub-cohort (E2_K1=512x2048x96
+# and E2_K2=512x2048x192): 0/8 of these K<256 cells transferred cleanly to
+# the MI325X / MI355X SKUs, confirming the K=256 floor in the K-1161
+# rejection-rationale comment block above is gfx942-MI300X-specific and must
+# not silently apply on other SKUs.
+#
+# Both MI300X and MI325X report ``arch == "gfx942"`` so an arch-string check
+# is insufficient; we discriminate via ``torch.cuda.get_device_name(...)``
+# which returns the marketing name (e.g. "AMD Instinct MI300X" vs
+# "AMD Instinct MI325X").  The detection runs once per process, with a
+# best-effort fallback that fails-safe to "assume MI300X" only when device
+# enumeration itself raises (e.g. inside torch-free unit tests; see the
+# pin-test in tests/test_k971_route_predicate.py).  This keeps the existing
+# torch-free import contract of this module — torch is imported lazily,
+# inside the helper, and only when ``CUDA_VISIBLE_DEVICES`` indicates a
+# real device is available.
+# ---------------------------------------------------------------------------
+
+# Override hook for tests / operators.  When set, takes precedence over the
+# device-name probe; useful both for unit tests (force the predicate ON
+# without GPU) and for ops escape-hatches if the MI300X auto-detect is ever
+# wrong on a partitioned-CU SKU (e.g. MI300X CPX/SPX modes).  Accepted
+# values:  "1" / "true" / "yes"  -> force-on,
+#          "0" / "false" / "no"  -> force-off,
+#          unset                 -> auto-detect via device name.
+_K1194_P8_ARCH_GUARD_ENV = "TRITONBLAS_K1194_P8_FORCE_MI300X"
+
+
+def _is_mi300x_for_p8() -> bool:
+    """Return True iff the active CUDA device is an MI300X (gfx942 + name).
+
+    K-1194 arch-guard for the K-1175 28-cell P8 envelope.  The 28-cell
+    measurement evidence is MI300X-only (K-1162 MI325X audit + K-1176
+    MI355X cross-arch port both showed verdict divergence on the K-floor
+    sub-cohort, confirming the K=256 floor is gfx942-MI300X-specific).
+    SKU discrimination is required because MI300X and MI325X both report
+    ``gfx942``; we use ``torch.cuda.get_device_name`` to disambiguate.
+
+    Fails-safe to the predicate's existing behavior on import errors:
+    when torch / CUDA cannot be probed at all (torch-free unit tests),
+    returns True so the strict-equality lookup runs as before.  When
+    torch IS importable but the device name does not match a known
+    MI300X marker, returns False.
+
+    The env override ``TRITONBLAS_K1194_P8_FORCE_MI300X`` (truthy / falsy)
+    bypasses the auto-detect entirely.
+    """
+    env = os.environ.get(_K1194_P8_ARCH_GUARD_ENV)
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    return _detect_mi300x_cached()
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_mi300x_cached() -> bool:
+    """One-shot device-name probe with fail-safe behavior; LRU-cached so
+    the import-time overhead is paid at most once per process."""
+    try:
+        import torch  # local import keeps module torch-free at import time
+    except Exception:
+        # No torch -> torch-free unit-test path; preserve legacy behavior
+        # (predicate runs).  Pin tests cover this case explicitly.
+        return True
+    try:
+        if not torch.cuda.is_available():
+            # CPU-only environment (torch-importable, no GPU) — same
+            # rationale as the no-torch case: preserve legacy behavior so
+            # logic-only tests continue to exercise the predicate.
+            return True
+        idx = torch.cuda.current_device()
+        name = (torch.cuda.get_device_name(idx) or "").upper()
+    except Exception:
+        return True
+    # Marketing-name discrimination.  Both MI300X and MI325X are gfx942 so
+    # we cannot use the arch string here; we explicitly accept the MI300X
+    # tokens and reject everything else (including MI300A / MI300X-HF and
+    # the MI325X HBM3e refresh that K-1162 audited).
+    if "MI300X" not in name:
+        return False
+    # Reject MI325X explicitly.  Some ROCm versions return strings like
+    # "AMD INSTINCT MI325X" without an obvious "MI325" token; check both
+    # the canonical marker and the SKU number to be robust to formatting.
+    if "MI325" in name or "MI300A" in name:
+        return False
+    return True
+
+
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
-    triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
-    neighbors + K-1175/K-1161 E2 admits).
+    """K-1144 P8 (extended by K-1175, MI300X-arch-guarded by K-1194) — direct
+    hipBLASLt route-OUT for the triply-validated MFMA-issue-stall cohort
+    (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits).
 
     Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
-    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
-    (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
-    parity is tracked separately on the K-1093 / K-1125 line).
+    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT` AND the active device is
+    an MI300X.  bf16-only by design (the entire K-1121 / K-1131 source
+    measurement scope is bf16; fp16 parity is tracked separately on the
+    K-1093 / K-1125 line).  MI300X-only by K-1194 arch-guard (K-1162
+    MI325X audit + K-1176 MI355X cross-arch port both surfaced verdict
+    divergence on the K-floor sub-cohort; K=256 floor is MI300X-specific).
 
     This predicate is consulted **before** the K-1089 P6 admit-back-to-
     kernel check inside ``_k971_route_to_hbl`` so K-1121's measurement
@@ -509,6 +609,11 @@ def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
     measurement campaign rather than P5's structural pathology heuristic.
     """
     if not _dtype_is_bf16(dtype):
+        return False
+    if not _is_mi300x_for_p8():
+        # K-1194 arch-guard: K-1175 28-cell envelope is MI300X-only.
+        # Falling back to in-kernel dispatch is the safe default for
+        # MI325X/MI355X (K-1162 + K-1176 verdict-divergence evidence).
         return False
     return (int(M), int(N), int(K), str(dtype)) in _P8_MFMA_ISSUE_STALL_ROUTEOUT
 

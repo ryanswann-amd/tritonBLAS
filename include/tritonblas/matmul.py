@@ -170,23 +170,30 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # with all P1–P16 sub-frozensets via cross-frozenset asserts at module
     # load.
     if _R_K1437_P17_skinny_n1024_kcompl_ext_routeout(int(M), int(N), int(K), a_dtype): return True
-    # K-1465 (S-002): P19 skinny_N8192 K-COMPLEMENT 29-cell direct hipBLASLt
+    # K-1474 (S-002): P19 skinny_N8192 K=2048-COLUMN 6-cell direct hipBLASLt
     # route-OUT (12th-position).  Stacks AFTER K-1437 P17 per the K-1175
-    # stacked-predicate convention; productionises the next-higher N tier
-    # (N=8192) of the K-COMPLEMENT lineage, unifying the K band
-    # {2048, 4096, 8192, 16384, 32768} per K-1429 BASE+EXTREMES merge precedent
-    # (the wider N=8192 tile broadens the K crossover band).  At N=8192 the
-    # persistent_matmul kernel re-engages the K-913 §3 LDS-bank-conflict
-    # signature across the entire K band on the M anchor row;
-    # hipBLASLt's split-K / waveletted kernel selection avoids the LDS-BC
-    # pathology and wins by 11-41% per cell.  Paired n=30 HIP-graph hot-cache
-    # + B=10000 vectorised paired bootstrap on MI300X gfx942: 29/30 ADMIT
-    # (1 reject (2048,8192,32768,fp16) at r=1.087 below the 1.10 strict gate);
-    # 29/29 PRODUCTIONISED, cohort geomean tb/hbl = 1.220x, range
-    # 1.108x-1.413x; min CI99-lo = 1.106 at canary (2048,8192,8192,fp16).
-    # Envelope grows 127 -> 156 cells.  Disjoint by construction with all
-    # P1-P17 sub-frozensets via cross-frozenset asserts at module load
-    # (N-axis projection: P19 N=8192 vs prior {128,256,512,1024,2048} columns).
+    # stacked-predicate convention.
+    #
+    # K-1474 SHRUNK FROM K-1465's predicted 29-cell envelope after re-
+    # measurement on MI300X gfx942 / rocm7.2 / hipBLASLt / Triton 3.6.0
+    # (rad-mi300x-splinter1) found that K-1465's predicted speedups DID NOT
+    # REPRODUCE on the current stack: re-measured envelope geomean was
+    # 1.0145x (range 0.962-1.083x); 0/29 cells cleared the strict K-1442
+    # 1.10 admit gate; 12/29 cells showed tritonblas faster than hipBLASLt
+    # (would have caused REGRESSIONS of 0.4-3.8% if shipped).
+    #
+    # Productionised set (this commit): the 6 K=2048 cells where re-
+    # measurement shows ratio_median >= 1.05 AND CI95-lo >= 1.04.
+    # M in {2048, 4096, 8192} x N=8192 x K=2048 x {bf16, fp16}.  Cohort
+    # geomean tb/hbl = 1.068x; range 1.057x-1.083x; min CI95-lo = 1.040.
+    # Mechanism: K=2048 small-K starvation at the wider N=8192 column tile
+    # layout (insufficient K-loop iterations to amortise the persistent
+    # kernel's tile-launch overhead vs hipBLASLt's split-K dispatch).  At
+    # K >= 4096 tritonblas catches up; those K-1465 cells fall through to
+    # native triton dispatch.  Envelope grows 127 -> 133 cells.
+    # Disjoint by construction with all P1-P17 sub-frozensets via cross-
+    # frozenset asserts at module load (N-axis projection: P19 N=8192 vs
+    # prior {128,256,512,1024,2048} columns).
     if _R_K1465_P19_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 

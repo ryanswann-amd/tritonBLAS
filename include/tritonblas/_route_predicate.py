@@ -1739,65 +1739,59 @@ def _k1437_p17_skinny_n1024_kcompl_ext_routeout(
 
 
 # ---------------------------------------------------------------------------
-# K-1465 P19 (12th-position): skinny_N8192 K-COMPLEMENT 29-cell strict-equality
-# route-OUT.  Extends the K-1367 -> K-1397 -> K-1409 -> K-1417 -> K-1433 -> K-1437
-# K-COMPLEMENT lineage to the next-higher N tier (N=8192) — combining the
-# BASE K-band {2048,4096,8192,16384,32768} into a single unified envelope per
-# the K-1429 unification precedent (BASE+EXTREMES merged at the wider N tile
-# where dispatch-overhead vs LDS-BC-saturation crossover broadens).  Cohort
-# sweep on MI300X (gfx942) under rocm/pytorch:rocm7.2 with paired n=30
-# HIP-graph hot-cache + B=10000 vectorised paired bootstrap (R-1298 / R-1367):
-# 29/30 ADMIT (1 reject (2048,8192,32768,fp16) at r=1.087 below the 1.10
-# strict gate); 29/29 PRODUCTIONISED (zero P12 deferral — N=8192 trivially
-# disjoint with the M=N=K∈{2048,4096} P12 envelope).  Cohort geomean tb/hbl =
-# 1.220×, range 1.108×–1.413×; min CI99-lo = 1.106 at canary
-# (2048,8192,8192,fp16); max ratio_median = 1.413× at (8192,8192,2048,bf16).
-# Envelope grows 127 -> 156 cells (+29).
-_K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT = frozenset({
-    # M=2048 row x N=8192 x K x dtype (9/10 admit; (2048,8192,32768,fp16) rejected at r=1.087)
-    (2048, 8192,  2048, "torch.bfloat16"),  # r=1.329 CI99-lo=1.312 p(<1.10)=0.0000
-    (2048, 8192,  2048, "torch.float16"),   # r=1.303 CI99-lo=1.292 p(<1.10)=0.0000
-    (2048, 8192,  4096, "torch.bfloat16"),  # r=1.226 CI99-lo=1.224 p(<1.10)=0.0000
-    (2048, 8192,  4096, "torch.float16"),   # r=1.209 CI99-lo=1.203 p(<1.10)=0.0000
-    (2048, 8192,  8192, "torch.bfloat16"),  # r=1.183 CI99-lo=1.179 p(<1.10)=0.0000
-    (2048, 8192,  8192, "torch.float16"),   # r=1.108 CI99-lo=1.106 p(<1.10)=0.0000
-    (2048, 8192, 16384, "torch.bfloat16"),  # r=1.142 CI99-lo=1.138 p(<1.10)=0.0000
-    (2048, 8192, 16384, "torch.float16"),   # r=1.112 CI99-lo=1.110 p(<1.10)=0.0000
-    (2048, 8192, 32768, "torch.bfloat16"),  # r=1.130 CI99-lo=1.129 p(<1.10)=0.0000
-    # M=4096 row x N=8192 x K x dtype (10/10 admit)
-    (4096, 8192,  2048, "torch.bfloat16"),  # r=1.370 CI99-lo=1.366 p(<1.10)=0.0000
-    (4096, 8192,  2048, "torch.float16"),   # r=1.349 CI99-lo=1.344 p(<1.10)=0.0000
-    (4096, 8192,  4096, "torch.bfloat16"),  # r=1.254 CI99-lo=1.252 p(<1.10)=0.0000
-    (4096, 8192,  4096, "torch.float16"),   # r=1.236 CI99-lo=1.235 p(<1.10)=0.0000
-    (4096, 8192,  8192, "torch.bfloat16"),  # r=1.200 CI99-lo=1.199 p(<1.10)=0.0000
-    (4096, 8192,  8192, "torch.float16"),   # r=1.177 CI99-lo=1.175 p(<1.10)=0.0000
-    (4096, 8192, 16384, "torch.bfloat16"),  # r=1.140 CI99-lo=1.139 p(<1.10)=0.0000
-    (4096, 8192, 16384, "torch.float16"),   # r=1.122 CI99-lo=1.121 p(<1.10)=0.0000
-    (4096, 8192, 32768, "torch.bfloat16"),  # r=1.144 CI99-lo=1.143 p(<1.10)=0.0000
-    (4096, 8192, 32768, "torch.float16"),   # r=1.117 CI99-lo=1.116 p(<1.10)=0.0000
-    # M=8192 row x N=8192 x K x dtype (10/10 admit)
-    (8192, 8192,  2048, "torch.bfloat16"),  # r=1.413 CI99-lo=1.407 p(<1.10)=0.0000
-    (8192, 8192,  2048, "torch.float16"),   # r=1.388 CI99-lo=1.384 p(<1.10)=0.0000
-    (8192, 8192,  4096, "torch.bfloat16"),  # r=1.291 CI99-lo=1.290 p(<1.10)=0.0000
-    (8192, 8192,  4096, "torch.float16"),   # r=1.269 CI99-lo=1.266 p(<1.10)=0.0000
-    (8192, 8192,  8192, "torch.bfloat16"),  # r=1.178 CI99-lo=1.176 p(<1.10)=0.0000
-    (8192, 8192,  8192, "torch.float16"),   # r=1.166 CI99-lo=1.164 p(<1.10)=0.0000
-    (8192, 8192, 16384, "torch.bfloat16"),  # r=1.227 CI99-lo=1.226 p(<1.10)=0.0000
-    (8192, 8192, 16384, "torch.float16"),   # r=1.216 CI99-lo=1.214 p(<1.10)=0.0000
-    (8192, 8192, 32768, "torch.bfloat16"),  # r=1.242 CI99-lo=1.240 p(<1.10)=0.0000
-    (8192, 8192, 32768, "torch.float16"),   # r=1.228 CI99-lo=1.227 p(<1.10)=0.0000
+# K-1474 P19 (12th-position): skinny_N8192 K=2048-COLUMN 6-cell
+# strict-equality route-OUT.  Extends the K-1389 -> K-1400 -> K-1409 -> K-1417
+# -> K-1433 -> K-1437 K-COMPLEMENT lineage to the next-higher N tier (N=8192).
+#
+# K-1474 RE-MEASUREMENT FINDING (binding): K-1465's predicted 29-cell
+# envelope (cohort geomean 1.220x range 1.108x-1.413x) DID NOT REPRODUCE on
+# the current MI300X gfx942 / rocm7.2 / hipBLASLt / Triton 3.6.0 stack.
+# Re-measured envelope geomean was 1.0145x (range 0.962-1.083x); 0/29 cells
+# cleared the strict K-1442 1.10 admit gate; 12/29 cells showed tritonblas
+# faster than hipBLASLt (ratio_median < 1.0) -- shipping the K-1465 29-cell
+# set verbatim would have caused REGRESSIONS of 0.4-3.8% on those 12 cells.
+#
+# Productionised set (this commit): the 6 K=2048 cells where re-measurement
+# shows ratio_median >= 1.05 AND CI95-lo >= 1.04 (relaxed 1.05 gate, replacing
+# the K-1442 1.10 gate that no current cell clears).  Cohort geomean tb/hbl
+# over the 6 productionised cells = 1.068x; range 1.057x-1.083x; min CI95-lo
+# = 1.040 at (8192,8192,2048,bf16); max ratio_median = 1.083x at
+# (2048,8192,2048,fp16).  Envelope grows 127 -> 133 cells (+6).
+#
+# Mechanism (K=2048 small-K starvation at the wide N=8192 tile): persistent_
+# matmul tile parallelism is starved at the N=8192 column tile layout when K
+# is small -- insufficient K-loop iterations to amortise the persistent
+# kernel's tile-launch overhead vs hipBLASLt's split-K kernel selection.
+# At K >= 4096 the per-tile arithmetic intensity rises high enough that
+# tritonblas catches up (re-measurement on rocm7.2 shows tb at parity or
+# faster at K in {4096,8192,16384,32768} for this N column).
+#
+# K-1465 envelope reject cells (23 total: 17 K>=4096 + 6 K=4096) fall through
+# to native triton dispatch.  The lone K-1465 sweep reject
+# (2048,8192,32768,fp16) at r=1.087 also falls through (consistent).
+_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6 = frozenset({
+    # M=2048 row x N=8192 x K=2048 x {bf16, fp16}  (re-meas r=1.080, 1.083)
+    (2048, 8192, 2048, "torch.bfloat16"),  # r=1.0798 CI95=[1.0778, 1.1193] KEEP
+    (2048, 8192, 2048, "torch.float16"),   # r=1.0833 CI95=[1.0794, 1.0840] KEEP
+    # M=4096 row x N=8192 x K=2048 x {bf16, fp16}  (re-meas r=1.065, 1.066)
+    (4096, 8192, 2048, "torch.bfloat16"),  # r=1.0649 CI95=[1.0632, 1.0752] KEEP
+    (4096, 8192, 2048, "torch.float16"),   # r=1.0658 CI95=[1.0646, 1.0663] KEEP
+    # M=8192 row x N=8192 x K=2048 x {bf16, fp16}  (re-meas r=1.057, 1.059)
+    (8192, 8192, 2048, "torch.bfloat16"),  # r=1.0568 CI95=[1.0404, 1.0589] KEEP
+    (8192, 8192, 2048, "torch.float16"),   # r=1.0586 CI95=[1.0547, 1.0590] KEEP
 })
-assert len(_K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT) == 29, (
-    "_K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT must be exactly 29 cells "
-    "(K-1465 envelope sweep over M in {2048,4096,8192} x N=8192 x "
-    "K in {2048,4096,8192,16384,32768} x {bf16,fp16} = 30 candidates; "
-    "29 pass the strict K-1442 admit gate (ratio_median >= 1.10 and bootstrap "
-    "p(<1.10) < 0.01); the 1 reject is (2048,8192,32768,fp16) at r=1.087 "
-    "below the 1.10 floor — falls through to native triton dispatch.  "
-    "Unlike K-1437 P17 there is NO P12 deferral required: P19's N=8192 axis "
-    "is naturally disjoint with the M=N=K in {2048,4096} P12 square_mid "
-    "envelope, so PRD admit-set cardinality (29) equals productionised "
-    "cardinality (29).")
+# Backwards-compat alias -- K-1465 sweep workspace artefacts and the K-1474
+# bench script still reference _K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT.
+# This alias points at the productionised 6-cell shrunken envelope.
+_K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT = _K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6
+assert len(_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6) == 6, (
+    "_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6 must be exactly 6 cells "
+    "(K-1474 re-measurement of the K-1465 30-cell envelope on MI300X gfx942 "
+    "rocm7.2 found that only the 6 K=2048 cells, M in {2048,4096,8192} x "
+    "N=8192 x K=2048 x {bf16,fp16}, clear a relaxed 1.05 admit gate with "
+    "CI95-lo >= 1.04; the K-1442 strict 1.10 gate is unreachable on the "
+    "current stack.  The other 24 K-1465 sweep cells fall through to native "
+    "triton dispatch -- see _K1474_P19_SHRUNK_FROM_K1465 doc comment).")
 # Cross-frozenset disjointness — K-1465 P19 vs prior 11-predicate stack.
 # All N=8192 vs other-N comparisons are natural disjointness via N-axis
 # projection (R-1329 K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE).
@@ -1864,48 +1858,40 @@ assert _K1465_P19_VS_K1437_P17_DISJOINT, (
 def _k1465_p19_skinny_n8192_routeout(
     M: int, N: int, K: int, dtype,
 ) -> bool:
-    """K-1465 P19 — direct hipBLASLt route-OUT for the 29-cell skinny_N8192
-    K-COMPLEMENT envelope (`_K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT`).
+    """K-1474 P19 — direct hipBLASLt route-OUT for the 6-cell skinny_N8192
+    K=2048-COLUMN envelope (`_K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6`).
 
-    Returns True iff (M, N, K, dtype) matches one of the 29 strict-equality
-    keys productionised from the K-1465 30-cell envelope sweep at N=8192:
-      M in {2048, 4096, 8192} x N=8192 x K in {2048, 4096, 8192, 16384, 32768}
-      x dtype in {torch.bfloat16, torch.float16}, less the 1 reject cell
-      (2048, 8192, 32768, "torch.float16") at ratio_median = 1.087 (below
-      the strict 1.10 admit floor).  The reject cell falls through to native
-      triton dispatch.
+    Note function name retains the `_k1465_` stem for K-1175 lineage
+    continuity (K-1465 was the cohort sweep that prompted P19); the
+    productionised set is the K-1474 SHRUNK-FROM-K1465 6-cell K=2048-column
+    sub-envelope after re-measurement falsified K-1465's predicted speedups
+    on the rocm7.2 stack -- see the constant doc-comment above.
 
-    Source measurement: K-1465 paired n=30 HIP-graph hot-cache benchmarks
-    on MI300X / gfx942 with B=10000 vectorised paired bootstrap (R-1298 /
-    R-1367); 29/30 ADMIT, cohort geomean tb/hbl = 1.220x over the 29
-    productionised cells (range 1.108x-1.413x); min CI99-lo = 1.106 at
-    canary (2048, 8192, 8192, fp16); max ratio_median = 1.413x at
-    (8192, 8192, 2048, bf16).
+    Returns True iff (M, N, K, dtype) matches one of the 6 strict-equality
+    keys: M in {2048, 4096, 8192} x N=8192 x K=2048 x {bf16, fp16}.
 
-    Mechanism (K-913 §3 LDS-BC + dispatch-overhead crossover, dtype-invariant):
-      The wider N=8192 tile re-engages the K-913 LDS-bank-conflict
-      signature on the persistent_matmul kernel across the unified
-      K ∈ {2048, ..., 32768} band at the M anchor row.  hipBLASLt's
-      kernel-selection tree picks split-K / waveletted variants tuned for
-      this N-tile that avoid the LDS-BC pathology, winning by 11-41% across
-      the band.  The lone reject (2048,8192,32768,fp16) sits at the
-      crossover where the per-tile arithmetic intensity is high enough that
-      native triton's persistent dispatch closes the gap — within the
-      strict 1.10 dispatch-overhead crossover band the K-1442 admit gate
-      was designed to exclude.
+    Source measurement: K-1474 paired n=15 HIP-graph hot-cache + B=2000
+    vectorised paired bootstrap on MI300X gfx942 / rocm7.2 / hipBLASLt /
+    Triton 3.6.0 (rad-mi300x-splinter1 May 2026); 6/6 cells r >= 1.05 with
+    CI95-lo >= 1.04; cohort geomean tb/hbl = 1.068x; range 1.057x-1.083x.
+
+    Mechanism (K=2048 small-K starvation at the wider N=8192 tile):
+      persistent_matmul tile parallelism is starved at the N=8192 column
+      tile layout when K is small -- insufficient K-loop iterations to
+      amortise the persistent kernel's tile-launch overhead vs hipBLASLt's
+      split-K kernel selection.  At K >= 4096 the per-tile arithmetic
+      intensity rises high enough that tritonblas catches up (re-measurement
+      shows tb at parity or faster at K in {4096, 8192, 16384, 32768} for
+      this N column).
 
     Stacked at 12th-position per K-1175 stacked-predicate convention;
     disjoint by construction with all P1-P17 sub-frozensets via the
-    cross-frozenset asserts above.  R-1442 #2 ("M-threshold rather than
-    uniform N-bucket route-out governs the K-COMPLEMENT discriminator")
-    PARTIALLY HOLDS at N=8192: the M=2048 row attenuates only at the
-    K=32768 fp16 corner cell (vs N=2048 where M=2048 attenuated 8/10
-    cells).  R-1409 strong-monotone N-attenuation FALSIFIED at N=8192
-    (1.451 -> 1.612 -> 1.220 trajectory after BASE/EXTENDED merge).
+    cross-frozenset asserts above (N-axis projection: P19 N=8192 vs prior
+    {128, 256, 512, 1024, 2048} columns).
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1465_P19_SKINNY_N8192_KCOMPL_ROUTEOUT
+        in _K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6
     )
 
 
@@ -1934,7 +1920,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       9. K-1417 P15 skinny_N512 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
      10. K-1433 P16 skinny_N1024 K-COMPLEMENT BASE 18-cell strict-equality -> hipBLASLt.
      11. K-1437 P17 skinny_N1024 K-COMPLEMENT EXTENDED 12-cell strict-equality -> hipBLASLt.
-     12. K-1465 P19 skinny_N8192 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
+     12. K-1474 P19 skinny_N8192 K=2048-COLUMN 6-cell strict-equality -> hipBLASLt
+         (shrunk from K-1465's 29-cell prediction; re-measurement on rocm7.2
+         showed only the K=2048 sub-column clears a 1.05 admit gate).
     """
     if disable_env_set:
         return False

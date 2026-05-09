@@ -48,9 +48,10 @@ from ._route_predicate import (
     # to N=16384 (full K-grid).  30/30 admit at strict 1.05 gate; cohort
     # geomean tb/hbl = 1.174×.  Naturally disjoint with all P1-P17.
     _k1478_p19_skinny_n16384_routeout as _R_K1478_P19_skinny_n16384_routeout,
-    # K-1489 13th-slot is RESERVED — no symbol imported.  See the comment
-    # block above the K-1489 P20 placeholder in _route_predicate.py for the
-    # reviewer rationale (unanimous REVISE on the prior alias-of-P19 attempt).
+    # K-1503 (S-002): P21 skinny_N256 K-COMPLEMENT K-mid-band 17-cell route-OUT
+    # (13th-position) — closes the K-1397 P13 N=256 K-mid-band gap (K in
+    # {4096, 8192, 16384}).  17/30 admits at >=1.05x; cohort geomean 1.457x.
+    _k1503_p21_skinny_n256_kmid_routeout as _R_K1503_P21_skinny_n256_kmid_routeout,
 )
 
 
@@ -180,7 +181,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # disjointness with all P1-P17 (sibling-N firewall + R-1465 #1
     # zero-P12-deferral invariant).
     if _R_K1478_P19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
-    # K-1489 13th-slot RESERVED — no executable code (placeholder only).
+    # K-1503 P21 (13th-position): skinny_N256 K-COMPLEMENT K-mid-band 17-cell
+    # route-OUT.  Stacks AFTER P19 per K-1175 stacked-predicate convention;
+    # closes the K-mid-band {4096, 8192, 16384} gap of K-1397 P13 N=256.
+    # 17/30 admits at >=1.05x; cohort geomean 1.457x; closes ~89% of the
+    # 30-cell N=256 gap.
+    if _R_K1503_P21_skinny_n256_kmid_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

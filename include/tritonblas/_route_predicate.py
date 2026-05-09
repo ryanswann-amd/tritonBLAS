@@ -1803,6 +1803,108 @@ def _k1478_p19_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
 # exists and has been measured under paired n=30 HIP-graph hot-cache.
 
 
+
+# ---------------------------------------------------------------------------
+# K-1503 (S-002) — P21 `skinny_N256` K-COMPLEMENT K-mid-band route-OUT
+# (13th-position).
+#
+# K-1503 productionises the K-mid-band (K in {4096, 8192, 16384}) gap of
+# the K-1397 P13 N=256 K-COMPLEMENT cohort (which only covered the K-axis
+# EXTREMES K in {2048, 32768}) as the 13th-position envelope on top of the
+# K-1489 P20 12-frozenset stack.  17/30 sweep cells form the minimal-diff
+# productionised set; 7 cells are deferred because the LIVE post-K-1489
+# routing oracle (12 stacked frozensets) already returns True for them via
+# K-1397 P13 (K=2048 column) or upstream P5/K971 layers (single
+# (2048,256,4096,bf16) cell), and 6 K=32768 cells failed the >=1.05x admit
+# gate (TB persistent_matmul reaches parity at large K because the wrapper-
+# overhead ceiling fully dissipates per R-1367).
+#
+# Region (productionised, MINIMAL-DIFF — 17 cells):
+#   M in {2048, 4096, 8192} x N=256 x K in {4096, 8192, 16384} x {bf16, fp16}
+#   minus single (2048, 256, 4096, bfloat16) cell already routed by upstream layer.
+#
+# Per-cell ratios 1.248x-1.982x; new-cohort geomean tb/hbl = 1.457x.
+# Cohort-wide closure: 30-cell geomean 1.273x -> 1.029x (89.5% of gap).
+#
+# Disjointness rationale (verified by frozenset.isdisjoint at module load):
+#   * K-1397 P13 N=256 — uses K in {2048, 32768}; this set uses
+#     K in {4096, 8192, 16384}; natural disjointness on K-axis projection.
+#   * All upstream/sibling frozensets — by construction, only cells with
+#     LIVE k971_route_decision == False at the K-1489 head are admitted,
+#     so isdisjoint with every layered frozenset is logically guaranteed.
+# Source measurement: K-1503 paired n=30 HIP-graph hot-cache benchmarks on
+# MI300X / OCI useocpm2m-097-033 / gfx942 with B=10000 vectorised paired
+# bootstrap CI99; admit gate ratio_median >= 1.05 ∧ p(<1.05) < 0.01.
+# ---------------------------------------------------------------------------
+# Symbol: `_K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT`
+#
+# Cardinality: 17 cells (24/30 sweep ADMIT minus 7 already routed by 12-frozenset stack).
+# Already-routed cells (LIVE k971_route_decision = True at K-1489 head):
+#   (2048, 256, 2048, "torch.bfloat16")   # r=1.119
+#   (2048, 256, 2048, "torch.float16")   # r=1.114
+#   (2048, 256, 4096, "torch.bfloat16")   # r=1.058
+#   (4096, 256, 2048, "torch.bfloat16")   # r=1.126
+#   (4096, 256, 2048, "torch.float16")   # r=1.103
+#   (8192, 256, 2048, "torch.bfloat16")   # r=1.141
+#   (8192, 256, 2048, "torch.float16")   # r=1.141
+#
+# Keys are (M, N, K, str(dtype)) — torch-free host module convention.
+_K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT = frozenset({
+    # M=2048 row × N=256 × K-mid × dtype
+    (2048, 256,  4096, "torch.float16"),   # r=1.260 CI99-lo=1.258 p(<1.05)=0.0000
+    (2048, 256,  8192, "torch.bfloat16"),   # r=1.595 CI99-lo=1.580 p(<1.05)=0.0000
+    (2048, 256,  8192, "torch.float16"),   # r=1.580 CI99-lo=1.570 p(<1.05)=0.0000
+    (2048, 256, 16384, "torch.bfloat16"),   # r=1.982 CI99-lo=1.958 p(<1.05)=0.0000
+    (2048, 256, 16384, "torch.float16"),   # r=1.926 CI99-lo=1.923 p(<1.05)=0.0000
+    # M=4096 row × N=256 × K-mid × dtype
+    (4096, 256,  4096, "torch.bfloat16"),   # r=1.248 CI99-lo=1.238 p(<1.05)=0.0000
+    (4096, 256,  4096, "torch.float16"),   # r=1.253 CI99-lo=1.244 p(<1.05)=0.0000
+    (4096, 256,  8192, "torch.bfloat16"),   # r=1.300 CI99-lo=1.294 p(<1.05)=0.0000
+    (4096, 256,  8192, "torch.float16"),   # r=1.302 CI99-lo=1.289 p(<1.05)=0.0000
+    (4096, 256, 16384, "torch.bfloat16"),   # r=1.685 CI99-lo=1.674 p(<1.05)=0.0000
+    (4096, 256, 16384, "torch.float16"),   # r=1.652 CI99-lo=1.636 p(<1.05)=0.0000
+    # M=8192 row × N=256 × K-mid × dtype
+    (8192, 256,  4096, "torch.bfloat16"),   # r=1.308 CI99-lo=1.266 p(<1.05)=0.0000
+    (8192, 256,  4096, "torch.float16"),   # r=1.281 CI99-lo=1.259 p(<1.05)=0.0000
+    (8192, 256,  8192, "torch.bfloat16"),   # r=1.379 CI99-lo=1.372 p(<1.05)=0.0000
+    (8192, 256,  8192, "torch.float16"),   # r=1.381 CI99-lo=1.370 p(<1.05)=0.0000
+    (8192, 256, 16384, "torch.bfloat16"),   # r=1.445 CI99-lo=1.443 p(<1.05)=0.0000
+    (8192, 256, 16384, "torch.float16"),   # r=1.462 CI99-lo=1.457 p(<1.05)=0.0000
+})
+assert len(_K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT) == 17
+
+# Cross-frozenset disjointness — K-1503 P21 vs K-1397 P13 N=256.
+_K1503_P21_VS_K1397_P13_DISJOINT = (
+    _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT.isdisjoint(_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
+assert _K1503_P21_VS_K1397_P13_DISJOINT, (
+    "K-1503 P21 K-mid-band cells overlap K-1397 P13 N=256 K-extremes; "
+    "K-1397 uses K in {2048,32768}, K-1503 uses K in {4096,8192,16384}; "
+    "natural disjointness on K-axis projection (K-1175 / R-1329).")
+# Cross-frozenset disjointness — K-1503 P21 vs K-1478 P19 N=16384.
+_K1503_P21_VS_K1478_P19_DISJOINT = (
+    _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT.isdisjoint(_K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30))
+assert _K1503_P21_VS_K1478_P19_DISJOINT, (
+    "K-1503 P21 N=256 cells overlap K-1478 P19 N=16384; sibling-N firewall expected.")
+
+
+def _k1503_p21_skinny_n256_kmid_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1503 P21 — direct hipBLASLt route-OUT for the 17-cell skinny_N256
+    K-COMPLEMENT K-mid-band cohort (`_K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 17 strict-equality
+    keys: M in {2048, 4096, 8192} x N=256 x K in {4096, 8192, 16384} x
+    dtype in {torch.bfloat16, torch.float16}, minus a single deferred cell
+    already routed by an upstream layer.
+
+    Stacked at 13th-position per K-1175 stacked-predicate convention; admits
+    are MINIMAL-DIFF (only cells where pre-patch routing returned False).
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1922,6 +2024,12 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # P1-P17 by sibling-N firewall + R-1465 #1 zero-P12-deferral invariant.
     if _k1478_p19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
         return True
-    # K-1489 13th-slot RESERVED — no executable code (see comment block above
-    # the P19 docstring for reviewer rationale).
+    # K-1503 P21 (13th-position): skinny_N256 K-COMPLEMENT K-mid-band 17-cell route-OUT.
+    # Stacks AFTER P19 per the K-1175 stacked-predicate convention; closes the
+    # K-mid-band {4096, 8192, 16384} gap of the K-1397 P13 N=256 cohort
+    # (which covered only the K-extremes {2048, 32768}).  17/30 admits at
+    # >=1.05x gate; cohort geomean 1.457x; closes 89.5% of the 30-cell gap.
+    # MINIMAL-DIFF: 7 already-routed cells deferred to existing layers.
+    if _k1503_p21_skinny_n256_kmid_routeout(int(M), int(N), int(K), a_dtype):
+        return True
     return False

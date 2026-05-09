@@ -830,7 +830,130 @@ def test_k1144_p8_does_not_leak_into_k931_control_cells(cid, M, N, K):
     only proves P8 itself is non-leaky on the controls.)"""
     assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
         f"P8 leaked into K-931 control {cid} ({M},{N},{K}) -- envelope "
-        f"must remain strictly the K-1121 + K-1131 25-cell set.")
+        f"must remain strictly the K-1121 + K-1131 + K-1175 28-cell set.")
+
+
+# ---------------------------------------------------------------------------
+# K-1190 PRE vs POST routing-invariance guard.
+#
+# Reviewer-mandated regression guard for the K-931 always-uncovered control
+# catalog.  Because the K-1175 diff is *purely additive* on a strict-
+# equality frozenset, and the 3 added (M, N, K, dtype) tuples are pinned
+# disjoint from the K-931 control set (see test_k1175_p8_subsets_are_
+# pairwise_disjoint and the K-931 control list above), the unit P8
+# predicate AND the composed _k971_route_to_hbl decision are mathematically
+# guaranteed to return identical values for every K-931 control cell under
+# both PRE and POST.  This test asserts that runtime invariant explicitly
+# by simulating the PRE arm in-process: it shrinks the live envelope back
+# to the 25-cell K-1144 baseline (mutating module state inside a try /
+# finally so the test is hermetic), records every routing decision for
+# every K-931 control, restores POST, records the same decisions again,
+# and asserts equality.  This is the dispatch-path runtime evidence the
+# c42 SIGSEGV-blocked GPU control sweep would have produced; the predicate
+# layer is the *exact* layer at which the diff changes behaviour, so a
+# predicate-level PRE-vs-POST invariant is sufficient evidence that no
+# K-931 cell can possibly take a different path under POST.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cid,M,N,K", K931_CONTROL_CELLS_5,
+                         ids=[c[0] for c in K931_CONTROL_CELLS_5])
+def test_k1190_k931_controls_have_identical_routing_pre_vs_post(cid, M, N, K):
+    """K-931 control cells must take an UNCHANGED routing path under POST
+    vs PRE -- predicate-level runtime evidence for the K-1175 staging.
+
+    Mutates the module-level ``_K1161_E2_ADMITS_3`` and
+    ``_P8_MFMA_ISSUE_STALL_ROUTEOUT`` to simulate the K-1144 25-cell PRE
+    arm in the same Python process, then restores POST.  Asserts that
+    BOTH the unit P8 predicate AND the composed ``_k971_route_to_hbl``
+    dispatch return the same boolean under PRE and POST.  No GPU
+    required; this is the load-bearing K-931 regression guard."""
+    import tritonblas._route_predicate as _rp
+    saved_admits = _rp._K1161_E2_ADMITS_3
+    saved_envelope = _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT
+    try:
+        # ---- POST (production code as-shipped) ----
+        post_p8 = _rp._p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
+        post_dispatch = _k971_route_to_hbl(
+            M, N, K, torch.bfloat16, torch.bfloat16,
+            enable_streamk=False, work_stealing=False)
+        # Sanity: POST P8 must be False on every K-931 control (mirror of
+        # the existing leakage canary above).
+        assert post_p8 is False, (
+            f"POST: P8 leaked into K-931 control {cid} ({M},{N},{K})")
+
+        # ---- Simulate PRE in-process by shrinking the envelope back to
+        # the K-1144 25-cell baseline.  Mutate at the module level so any
+        # closure inside _k971_route_to_hbl that re-reads
+        # _P8_MFMA_ISSUE_STALL_ROUTEOUT picks up the PRE state.
+        _rp._K1161_E2_ADMITS_3 = frozenset()
+        _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+            _rp._K1121_P8_ANCHORS_13 | _rp._K1131_P8_NEIGHBORS_12)
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25
+
+        pre_p8 = _rp._p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
+        pre_dispatch = _k971_route_to_hbl(
+            M, N, K, torch.bfloat16, torch.bfloat16,
+            enable_streamk=False, work_stealing=False)
+        # Sanity: PRE P8 must also be False (the 25-cell K-1144 envelope
+        # was the K-1127 0-FP regression-guard baseline).
+        assert pre_p8 is False, (
+            f"PRE: P8 leaked into K-931 control {cid} ({M},{N},{K})")
+    finally:
+        # Restore production state regardless of test outcome.
+        _rp._K1161_E2_ADMITS_3 = saved_admits
+        _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = saved_envelope
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+
+    # ---- Routing-invariance assertions ----
+    assert post_p8 == pre_p8, (
+        f"K-931 control {cid} ({M},{N},{K}): unit P8 predicate "
+        f"changed between PRE ({pre_p8}) and POST ({post_p8}) -- the "
+        f"K-1175 data-only diff has somehow leaked into a control cell.")
+    assert post_dispatch == pre_dispatch, (
+        f"K-931 control {cid} ({M},{N},{K}): composed _k971_route_to_hbl "
+        f"changed between PRE ({pre_dispatch}) and POST ({post_dispatch}) "
+        f"-- the K-1175 data-only diff has somehow altered the dispatch "
+        f"path for a K-931 always-uncovered control cell.")
+
+
+def test_k1190_k1175_admits_have_identical_dispatch_pre_vs_post():
+    """The 3 K-1175 admits already route True under K-1144 PRE (via
+    overlap with K-1062 / K-1066 P5 / K-1089 P6 composition).  Post the
+    diff, P8 *also* fires True at the unit level, but the composed
+    ``_k971_route_to_hbl`` outcome is identical (still True).  Codifies
+    the K-1175 design intent: P8 captures the source-of-truth attribution
+    for the MFMA-issue-stall cohort without changing dispatch behaviour
+    on any cell that was already routed by an upstream predicate."""
+    import tritonblas._route_predicate as _rp
+    saved_admits = _rp._K1161_E2_ADMITS_3
+    saved_envelope = _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT
+    try:
+        post_decisions = []
+        for _cid, M, N, K in K1161_E2_ADMITS_3_LIST:
+            post_decisions.append(_k971_route_to_hbl(
+                M, N, K, torch.bfloat16, torch.bfloat16,
+                enable_streamk=False, work_stealing=False))
+
+        _rp._K1161_E2_ADMITS_3 = frozenset()
+        _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+            _rp._K1121_P8_ANCHORS_13 | _rp._K1131_P8_NEIGHBORS_12)
+        pre_decisions = []
+        for _cid, M, N, K in K1161_E2_ADMITS_3_LIST:
+            pre_decisions.append(_k971_route_to_hbl(
+                M, N, K, torch.bfloat16, torch.bfloat16,
+                enable_streamk=False, work_stealing=False))
+    finally:
+        _rp._K1161_E2_ADMITS_3 = saved_admits
+        _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = saved_envelope
+
+    # All True under both arms (PRE via P5/P6 composition; POST via
+    # P8 strict-equality match plus the same upstream composition).
+    assert all(post_decisions), (
+        f"POST: not all K-1175 admits route to hipBLASLt: {post_decisions}")
+    assert all(pre_decisions), (
+        f"PRE: not all K-1175 admits route to hipBLASLt via upstream "
+        f"P5/P6 composition: {pre_decisions} -- the K-1175 design claim "
+        f"(no dispatch change vs K-1144) is broken.")
+    assert post_decisions == pre_decisions
 
 
 def test_k1144_p8_disjoint_from_k1109_allowlist_keys():

@@ -390,6 +390,36 @@ def matmul_a8w8_lt(
         return persistent_matmul_lt(a, b, c, selector, config, a_scale=a_scale, b_scale=b_scale, quantized=True, work_stealing=work_stealing)
 
 
+# K-1764: hipBLASLt route-OUT for the M=N=4096 mid-K square cohort.
+# K-1741 PMC RCA showed 87.5% of the TB-vs-HBL gap on this cohort comes from
+# LDS issue-port back-pressure (WAIT/ACTIVE 1.66-1.85 vs HBL's 0.08-0.16);
+# K-1741 §4 falsified every in-kernel NS/BK/async-copy/HBL-mirror/WPEU lever.
+# K-1752 falsified the kpack=2 + LDS-swizzle combo.
+# K-1764 paired n=30 hot-cache HIP-graph sweep on MI300X confirms:
+#   oracle      gmean ratio_vs_HBL = 0.8938  (1/6 cells >=0.95x)
+#   streamk_NCU gmean ratio_vs_HBL = 0.8376  (0/6 cells >=0.95x; 5/6 regress >5% vs oracle)
+#   hbl         gmean ratio_vs_HBL = 1.0000  (6/6 cells; faster than oracle on every cell)
+# Architectural reason: persistent-tile residency wins at M=N=8192 K-COMPLEMENT
+# (K-1735/K-1749) because >=2432 waves amortize wave-launch & saturate the LDS
+# pipe; at M=N=4096 the cohort dispatches only 256 tiles (4 waves/CU on 304 CUs)
+# so persistent amortization is shallow and LDS back-pressure dominates. HBL's
+# Cijk_* uses BK=64 with double-buffered async LDS hand-off that hides the same
+# pipeline. Stream-K's reduction overhead does not pay off until larger M/N
+# wave counts (the K-1735 winning regime) - it loses on this small-M=N square.
+_K1764_GATE_M = 4096
+_K1764_GATE_N = 4096
+_K1764_GATE_DTYPES = (torch.float16, torch.bfloat16)
+_K1764_GATE_K = frozenset({4096, 8192, 16384})
+
+
+def _k1764_route_to_hbl(M, N, K, dtype):
+    """Return True iff (M,N,K,dtype) is in the K-1764 mid-K square cohort."""
+    return (M == _K1764_GATE_M
+            and N == _K1764_GATE_N
+            and K in _K1764_GATE_K
+            and dtype in _K1764_GATE_DTYPES)
+
+
 @triton_op("tritonblas::_matmul", mutates_args={})
 def _matmul(
     a: torch.Tensor,
@@ -401,6 +431,11 @@ def _matmul(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-1764: HBL route-OUT for M=N=4096 mid-K square cohort (caller did not
+    # explicitly request streamk). Disjoint from K-1735/K-1749 M=N=8192 gate.
+    if not enable_streamk and _k1764_route_to_hbl(M, N, K, a.dtype):
+        return torch.matmul(a, b)
 
     out = a.new_empty(M, N)
 
@@ -460,6 +495,11 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-1764: HBL route-OUT for M=N=4096 mid-K square cohort (out= form mirror).
+    if not enable_streamk and _k1764_route_to_hbl(M, N, K, a.dtype):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

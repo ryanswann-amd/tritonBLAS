@@ -76,6 +76,17 @@ from ._route_predicate import (
     # alias overlap at (4096, 4096, 4096, {bf16, fp16}); 28 NEW cells +
     # 2 P12-alias cells.
     _k1566_p24_skinny_n4096_routeout as _R_K1566_P24_skinny_n4096_routeout,
+    # K-1553 (S-002): P25 skinny_N4096 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (17th-position).  ALIAS to P24 ⨄ P12 — the K-1553 N=4096
+    # envelope (cohort geomean tb/hbl = 1.234×, range 1.114×-1.501×;
+    # MI300X gfx942 paired n=30 HIP-graph hot-cache vs the live post-K-1532
+    # oracle; combined with K-1559 60-cell N ∈ {4096, 8192} mid-band
+    # confirmation) routes 30/30 via P24, with 2 cells additionally aliased
+    # by P12 at the (4096, 4096, 4096, {bf16, fp16}) diagonal.  This slot
+    # freezes the K-1553 admit set under a K-1553-named symbol and is
+    # load-bearing only if P24 is ablated.
+    _k1553_p25_skinny_n4096_kcompl_aliasstack_routeout
+        as _R_K1553_P25_skinny_n4096_kcompl_aliasstack_routeout,
 )
 
 
@@ -249,6 +260,26 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (4096, 4096, 4096, {bf16, fp16}) — P12 fires first so 28 cells are
     # NEW route-OUT and 2 cells are alias documentation.
     if _R_K1566_P24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1553 P25 (17th-position): skinny_N4096 K-COMPLEMENT alias-stack 30-cell.
+    # Stacks AFTER P24 per the K-1175 stacked-predicate convention.  ALIAS to
+    # P24 ⨄ P12 — the K-1553 N=4096 envelope (cohort geomean tb/hbl = 1.234×,
+    # range 1.114×-1.501×, 30/30 admit at strict 1.05 gate; paired n=30
+    # HIP-graph hot-cache MI300X gfx942 with TRITONBLAS_DISABLE_K971=1 vs the
+    # live post-K-1532 oracle; combined with K-1559 60-cell mid-band
+    # N ∈ {4096, 8192} confirmation) routes 30/30 via P24, with 2 cells
+    # additionally aliased by P12 at the (4096, 4096, 4096, {bf16, fp16})
+    # diagonal.  Membership check is unreachable while P24 is enabled —
+    # load-bearing only if P24 is ablated; the slot freezes the K-1553
+    # admit set under a K-1553-named symbol per the K-1493 / K-1538 / K-1552
+    # alias-stack convention so future N-ladder audits have a dedicated
+    # handle for the K-1553 measurement separate from K-1566's
+    # productionization label.  Mechanism: at N=4096 the persistent_matmul
+    # tile keeps min(M, N) ≤ 2048 for the M=2048 row, saturating LDS bank
+    # conflicts (K-913 §3 longK_smallSquare); hipBLASLt's split-K kernel
+    # selector re-picks at N=4096 to a tile/pipeline pattern that better
+    # amortises LDS-BC pressure and wave-occupancy starvation across all
+    # three M anchors, yielding the +14-50% per-cell speedups observed.
+    if _R_K1553_P25_skinny_n4096_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

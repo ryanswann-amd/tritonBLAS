@@ -39,6 +39,15 @@ def _dtype_is_bf16(dtype) -> bool:
     return str(dtype) == "torch.bfloat16"
 
 
+def _dtype_is_fp16(dtype) -> bool:
+    """Match torch.float16 without importing torch.
+
+    Both the ``torch.float16`` singleton and the literal string
+    ``"torch.float16"`` (used by tests) pass; anything else fails.
+    """
+    return str(dtype) == "torch.float16"
+
+
 def R_K979_P5_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
     """R-K979 v3 / P5 — closed-form 4-clause structural pathology predicate.
 
@@ -703,6 +712,94 @@ def _longk_smallsquare_routeout(M: int, N: int, K: int, dtype) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# K-1357 / K-1364 (P12) — square_mid PMC-driven route-OUT.  Three strict-
+# equality cells from the K-1345 #1 ranked predicate-addressable residual
+# bucket (square_mid: M=N in {2048, 4096, 8192} bf16/fp16 at K=8192 where
+# tritonblas/hipBLASLt gap > 1.30x).  K-1357 PMC capture (rocprofv3 4-pass,
+# 100 hot dispatches/engine, SQ_LDS_BANK_CONFLICT + MFMA_ISSUE_STALL +
+# waves_per_CU + VALU_per_MFMA + LDS_WAIT counter set) directly measured
+# the LDS-bank-conflict-bound mid-K square mechanism on 2048^3 bf16 + fp16
+# (T1, T2: SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889 cyc/inst on TB vs
+# 0.000 on HBL).  K-1345 5-anchor triangulation (K-877 + K-655 + K-818 C2
+# + K-837 N1a/N1b + K-879 N2a) extends the predicate to T3 (4096^3 bf16)
+# where LDS_BC has dropped to 0 on both engines but the dispatch-over-
+# launch ratio (waves_per_CU TB/HBL = 1.85) and VALU-packing ratio
+# (VALU/MFMA TB/HBL = 1.75) remain decisive separators.
+#
+# 8192^3 bf16 (the 3rd K-1345 square_mid candidate) is HBM-asymptote-bound
+# per K-1308 F4 row 7 with predicate-addressable residual capped at ~0.20
+# (below the K-1131 stage-gate A1 floor of CI95-lo > 1.05).  DROP-correct
+# (not admitted to this frozenset).
+#
+# Quality bar: T1/T2 MEASURED-PMC (K-877 S1b/S1a direct);
+#              T3 MEASURED-VIA-TRIANGULATION (K-1345 5-anchor matrix per
+#              K-913 §3 anchor-substitution provision).
+#
+# Stacked AFTER the K-1338 _LONGK_SMALLSQUARE_ROUTEOUT 6-cell frozenset so
+# the prior campaigns win on (zero) overlap (no double-routing); the K-1357
+# frozenset only fires on cells the existing 57-cell envelope (K-1303 P8
+# 51-cell + K-1338 longK_smallSquare 6-cell) does not already enumerate.
+# Pairwise disjoint with both prior frozensets by construction (square_mid
+# at M=N in {2048,4096} K=2048/4096 differs from longK_smallSquare M=N in
+# {1024,2048} K in {4096,8192,16384} on the M=N=K=2048 cell only — but
+# K-1338 requires K >= 4096, so disjoint).  fp16 admit on T2 honors the
+# K-877 S1a direct PMC capture (LDS_BC 0.889 cyc/inst, identical to T1
+# bf16) — the only fp16 admit in this frozenset; T3 fp16 deferred until
+# direct fp16 anchor available (R-1131 anti-overshoot).
+# ---------------------------------------------------------------------------
+_K1357_P12_PMC_SQUARE_MID_ROUTEOUT_3 = frozenset({
+    (2048, 2048, 2048, "torch.bfloat16"),  # T1 K-877 S1b: paired tb/hbl=0.258 [0.257,0.260]; LDS_BC=0.889
+    (2048, 2048, 2048, "torch.float16"),   # T2 K-877 S1a: PMC mirror of S1b within 5% (LDS_BC=0.889)
+    (4096, 4096, 4096, "torch.bfloat16"),  # T3 K-1345 5-anchor TRIANGULATED: paired tb/hbl=0.550 [0.544,0.552]
+})
+# Public alias (K-1364 productionization plan: dispatcher consults the
+# public name).  Kept as a tagged sibling so future reviewers see the
+# K-1357 provenance and the 3 entries remain attributable to a single
+# measurement campaign.
+_P12_SQUARE_MID_ROUTEOUT = _K1357_P12_PMC_SQUARE_MID_ROUTEOUT_3
+assert len(_P12_SQUARE_MID_ROUTEOUT) == 3, (
+    "K-1357 P12 PMC-driven square_mid route-OUT must be exactly 3 cells "
+    "(T1=2048^3 bf16, T2=2048^3 fp16, T3=4096^3 bf16); a duplicate or "
+    "stray entry has crept in.")
+# Cross-check: K-1357 P12 cohort is pairwise-disjoint with the K-1322 P8
+# 51-cell envelope and the K-1338 longK_smallSquare 6-cell envelope by
+# construction.  P8 sits at M >= 4480 or K <= 1024 or N in {128, 256};
+# K-1338 sits at M=N in {1024, 2048} and K in {4096, 8192, 16384};
+# K-1357 P12 sits at M=N=K in {2048, 4096} which intersects neither.
+assert _P12_SQUARE_MID_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT), (
+    "K-1357 P12 square_mid cohort overlaps the K-1322 P8 51-cell envelope; "
+    "no overlap is expected because P8 anchors sit at M >= 4480 or K <= 1024 "
+    "or N in {128, 256} while K-1357 P12 lives at M=N=K in {2048, 4096}.")
+assert _P12_SQUARE_MID_ROUTEOUT.isdisjoint(_LONGK_SMALLSQUARE_ROUTEOUT), (
+    "K-1357 P12 square_mid cohort overlaps the K-1338 longK_smallSquare "
+    "6-cell envelope; no overlap is expected because K-1338 requires "
+    "K >= 4096 while K-1357 P12 T1/T2 sit at K=2048 and T3 sits at "
+    "M=N=K=4096 (K-1338 does not enumerate the M=N=4096 plane).")
+
+
+def _p12_square_mid_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1357 / K-1364 (P12) — direct hipBLASLt route-OUT for the 3-cell
+    square_mid PMC-driven cohort.
+
+    Returns True iff (M, N, K, dtype) matches one of the 3 strict-equality
+    keys in :data:`_P12_SQUARE_MID_ROUTEOUT`.  Both bf16 and fp16 admits
+    on T1/T2 (2048^3) honor the K-877 S1a/S1b direct PMC measurement
+    (LDS_BC = 0.889 cyc/inst on both dtypes); T3 (4096^3) is bf16-only
+    by direct triangulation provenance (K-1345 5-anchor matrix).
+
+    This predicate is consulted **after** the K-1338 longK_smallSquare
+    6-cell frozenset inside ``_k971_route_to_hbl`` /
+    ``k971_route_decision`` per the R-1144.DUAL-FROZENSET-PROVENANCE
+    convention: prior campaigns win on (zero) overlap; the K-1357 P12
+    frozenset only fires on cells the existing 57-cell envelope does not
+    already enumerate.
+    """
+    if not (_dtype_is_bf16(dtype) or _dtype_is_fp16(dtype)):
+        return False
+    return (int(M), int(N), int(K), str(dtype)) in _P12_SQUARE_MID_ROUTEOUT
+
+
+# ---------------------------------------------------------------------------
 # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope productionised
 # from K-1151 / K-1142 stacked AFTER the P8 28-cell strict-equality route.
 # K-1209 ablation on K-931 always-uncovered top-40 confirmed E1 is fully
@@ -810,6 +907,17 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # bound PMC fingerprint (TB SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS = 0.889
     # or 1.778 cyc/inst, HBL = 0.000).  Disjoint with P8 by construction.
     if _longk_smallsquare_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1357 / K-1364 (P12): square_mid PMC-driven 3-cell strict-equality
+    # route-OUT, stacked AFTER the K-1338 longK_smallSquare 6-cell envelope.
+    # Closes the K-1345 #1 ranked predicate-addressable residual bucket
+    # (square_mid: T1=2048^3 bf16, T2=2048^3 fp16, T3=4096^3 bf16) where
+    # tritonblas/hipBLASLt single-shot inverse ratios are 3.87x (T1, T2 via
+    # PMC LDS-BC mechanism) and 1.82x (T3 via VALU-packing dispatch-over-
+    # launch mechanism).  Both bf16 and fp16 admits on T1/T2 are PMC-
+    # measured (K-877 S1a/S1b direct); T3 is K-1345 5-anchor triangulated.
+    # Disjoint with all prior frozensets by construction.
+    if _p12_square_mid_routeout(int(M), int(N), int(K), a_dtype):
         return True
     # K-1209-stacked / K-1216: E1 axis-aligned envelope as defense-in-depth
     # AFTER P8. K-1209 ablation showed E1 is fully dominated by P8+K-1175 on

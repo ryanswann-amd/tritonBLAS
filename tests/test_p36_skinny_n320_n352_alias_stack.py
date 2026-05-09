@@ -22,11 +22,16 @@ sweep on MI300X / gfx942 (OCI MI300X fallback per INFRA-0048) across the
 Mechanism (3-pass PMC delta, K-913 §3 / R-K1673 / R-1811): 36 / 36 cells
 classify LDS_DOMINANT.  Per-cell PMC discriminator ranking (TB / HBL ratio):
 
-  * SQ_LDS_BANK_CONFLICT/inst — 53.7× – 1.78e9× (median 393.9×; HBL ≈ 0)
-  * SQ_WAIT_INST_LDS         — 1.97× – 25.26× (median 9.28×)
-  * SQ_INSTS_MFMA / SQ_WAVES — 0.67× – 0.95× (TB does LESS MFMA per wave;
-                                rules out compute-bound)
-  * SQ_INSTS_VMEM / SQ_WAVES — 0.21× – 1.05× (rules out memory-BW)
+  * SQ_LDS_BANK_CONFLICT/inst — 53.7× – 2103.1× (median 240.3×, n_finite=26;
+                                 + 10/36 cells where HBL bank-conflict density
+                                 is at the CSV-rounding floor — those cells are
+                                 reported as `None` rather than as a divide-by-
+                                 near-zero artifact and excluded from the
+                                 median, but qualitatively still TB ≫ HBL)
+  * SQ_WAIT_INST_LDS         — 1.97× – 25.26× (median 9.27×, n=36)
+  * SQ_INSTS_MFMA / SQ_WAVES — 0.67× – 0.95× (median 0.67×; TB does LESS MFMA
+                                per wave — rules out compute-bound)
+  * SQ_INSTS_VMEM / SQ_WAVES — 0.21× – 1.05× (median 0.62×; rules out memory-BW)
 
 BLOCK_N=128 packs N=320 (=256+64) and N=352 (=256+96) into wave-misaligned
 K-block columns (off-by-64 / -96 N rungs above the N=256 cliff and below

@@ -468,10 +468,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST.  Same K-913 §3
     # LDS-bank-conflict + R-1811 wave-misalignment fingerprint as P28 / P31 /
     # P32 / P33 / P34 / P35: 36/36 LDS_DOMINANT (median SQ_WAIT_INST_LDS ratio
-    # 9.28×, median SQ_LDS_BANK_CONFLICT/inst ratio 393.9×; MFMA per-wave ratio
-    # 0.67×–0.95× with TB UNDER-issuing rules out compute-bound, VMEM per-wave
-    # 0.21×–1.05× rules out memory-BW).  N ∈ {320, 352} are the off-by-64/-96
-    # wave-misaligned rungs between N=288 P35 and N=384 P30.
+    # 9.27× over n=36; median SQ_LDS_BANK_CONFLICT/inst ratio 240.3× over the
+    # n_finite=26 subset where HBL's bank-conflict denominator is above the
+    # CSV-rounding floor — the other 10 cells have HBL ≈ 0 and the per-cell
+    # ratio is reported as `None` rather than as a divide-by-near-zero
+    # artifact; MFMA per-wave ratio 0.67×–0.95× with TB UNDER-issuing rules
+    # out compute-bound, VMEM per-wave 0.21×–1.05× rules out memory-BW).
+    # N ∈ {320, 352} are the off-by-64/-96 wave-misaligned rungs between
+    # N=288 P35 and N=384 P30.
     if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_N352_KCOMPL_VERIFIED_WIN_34: return True
     return False
 

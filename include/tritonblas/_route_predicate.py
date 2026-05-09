@@ -3389,11 +3389,18 @@ _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
 #
 # Mechanism (3-pass PMC RCA — same K-913 §3 LDS-bank-conflict + R-1811
 # wave-misalignment fingerprint as P28 / P31 / P32 / P33 / P34 / P35):
-# 36/36 cells classify LDS_DOMINANT.  Per-cell PMC (TB / HBL ratio):
-#   - SQ_LDS_BANK_CONFLICT/inst   53.7× – 1.78e9× (median 393.9×; HBL≈0)
-#   - SQ_WAIT_INST_LDS            1.97× – 25.26× (median 9.28×)
-#   - SQ_INSTS_MFMA / SQ_WAVES    0.67× – 0.95× (TB does LESS MFMA; not the limiter)
-#   - SQ_INSTS_VMEM / SQ_WAVES    0.21× – 1.05× (mostly below HBL; rule out memory BW)
+# 36/36 cells classify LDS_DOMINANT.  Per-cell PMC (TB / HBL ratio,
+# stats over the n_finite=26 subset for SQ_LDS_BANK_CONFLICT/inst — in
+# 10/36 cells HBL's bank-conflict density is at the CSV-rounding floor,
+# i.e. the denominator is ~0; those cells are reported as `None` rather
+# than as a divide-by-near-zero artifact and excluded from the median):
+#   - SQ_LDS_BANK_CONFLICT/inst   53.7× – 2103.1× (median 240.3×, n_finite=26;
+#                                  + 10 cells where HBL ≈ 0 and the ratio is
+#                                  qualitatively "TB ≫ HBL" but undefined)
+#   - SQ_WAIT_INST_LDS            1.97× – 25.26× (median 9.27×, n=36)
+#   - SQ_INSTS_MFMA / SQ_WAVES    0.67× – 0.95× (median 0.67×; TB does LESS
+#                                  MFMA per wave — rules out compute-bound)
+#   - SQ_INSTS_VMEM / SQ_WAVES    0.21× – 1.05× (median 0.62×; rules out memory-BW)
 # BLOCK_N=128 packs N=320 (=256+64) and N=352 (=256+96) into wave-misaligned
 # K-block columns (off-by-64/-96 N rungs above the N=256 productionised cliff);
 # persistent_matmul cannot trade tile reshape for atomic-reduction; only HBL's

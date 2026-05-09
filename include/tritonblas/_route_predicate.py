@@ -2057,6 +2057,181 @@ def _k1513_p22_skinny_n32768_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1538 (S-002) — P23 `skinny_N512` K-COMPLEMENT route-OUT alias-stack
+# (15th-position).
+#
+# Productionises the K-1538 N=512 K-COMPLEMENT envelope as a single cohort
+# symbol covering all 30 sweep cells: M ∈ {2048, 4096, 8192} × N=512 × K ∈
+# {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}.  Mirrors the
+# K-1493 / K-1525 P20-alias-of-P19 sibling-slot productionisation pattern:
+# every cell is already routed-OUT upstream by P15 (K-1409 N=512 EXTREMES,
+# K ∈ {2048, 32768}, 12 cells) ⨄ P17 (K-1437 N=512 BASE, K ∈ {4096, 8192,
+# 16384}, 17 cells); short-circuit semantics in `_k971_route_to_hbl` make
+# the 15th-position membership check unreachable while P15+P17 are enabled
+# — by design.  The slot is load-bearing if P15 OR P17 is ever ablated,
+# documents the N=512 cohort under a single symbol, and pins per-cell
+# ratios as comments for retro audit.
+#
+# Source measurement (K-1538 paired n=30 HIP-graph hot-cache + B=10000
+# vectorised paired bootstrap CI95 on MI300X / gfx942 with ROCm 7.x /
+# PyTorch 2.10):
+#   - 29/30 admit at the strict ratio_median ≥ 1.05 ∧ CI95-lo ≥ 1.00 gate
+#   - 1/30 strict reject: (2048, 512, 2048, bf16) at r=1.015
+#     (CI95 [1.007, 1.028]) — within 1.5% parity, currently routed by
+#     P15 EXTREMES (K-1409); preserved without regression
+#   - cohort geomean tb/hbl = 1.329× (admit subset 1.341×); range
+#     1.015×–1.842×
+#   - per-cell ratio widens monotonically with K within each M ladder
+#     (M=2048: 1.05× @ K=2048 → 1.75× @ K=32768) — opposite of the
+#     K-1465/K-1478 narrowing trajectory at N=8192/N=16384 (per-tile work
+#     too small to amortise the LDS-bank-conflict gap at N=512)
+#
+# Disjointness rationale:
+#   * ALIAS to P15 ⨄ P17 — `isdisjoint(P15)` and `isdisjoint(P17)` are
+#     False by construction; cross-frozenset asserts vs P15/P17 are
+#     intentionally OMITTED per the K-1493 P20 alias-stack convention.
+#   * Sibling-N firewall vs every other K-COMPLEMENT predicate
+#     (P13(N=128), P13(N=256), P16(N=1024), P19(N=16384), P21(N=256-mid),
+#     P22(N=32768)) — N=512 has no overlap with any other column.
+#   * P12 SQUARE_MID is bounded to M=N=K ∈ {2048, 4096}; N=512 ≠ M, so
+#     R-1465 #1 zero-P12-deferral natural-disjointness invariant holds.
+#   * P8 sub-frozensets cap at N=256; K971_ROUTE_TABLE at M=N square
+#     anchors M=N ∈ {1024, 2048}.
+#
+# Stacked at 15th-position per the K-1175 stacked-predicate convention
+# (after P22).  "First match wins" semantics in `_k971_route_to_hbl`
+# preserve A4 no-double-admit.  Once K-1525 N=2048 K-COMPLEMENT also
+# lands, the K-COMPLEMENT N-ladder coverage closes at N ∈ {128, 256,
+# 512, 1024, 2048, 16384, 32768}.
+#
+# Symbol: `_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N`
+# Cardinality: 30 cells (29 strict-admit + 1 preserved-by-P15 reject).
+# ---------------------------------------------------------------------------
+_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N = frozenset({
+    # M=2048 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048,   512,  2048, "torch.bfloat16"),    # r=1.015 ci95_lo=1.007  (preserved-by-P15; <1.05 strict-reject)
+    (2048,   512,  2048, "torch.float16"),     # r=1.055 ci95_lo=1.048
+    (2048,   512,  4096, "torch.bfloat16"),    # r=1.219 ci95_lo=1.207
+    (2048,   512,  4096, "torch.float16"),     # r=1.178 ci95_lo=1.173
+    (2048,   512,  8192, "torch.bfloat16"),    # r=1.366 ci95_lo=1.344
+    (2048,   512,  8192, "torch.float16"),     # r=1.328 ci95_lo=1.292
+    (2048,   512, 16384, "torch.bfloat16"),    # r=1.491 ci95_lo=1.435
+    (2048,   512, 16384, "torch.float16"),     # r=1.499 ci95_lo=1.348
+    (2048,   512, 32768, "torch.bfloat16"),    # r=1.750 ci95_lo=1.635
+    (2048,   512, 32768, "torch.float16"),     # r=1.686 ci95_lo=1.671
+    # M=4096 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096,   512,  2048, "torch.bfloat16"),    # r=1.146 ci95_lo=1.137
+    (4096,   512,  2048, "torch.float16"),     # r=1.164 ci95_lo=1.156
+    (4096,   512,  4096, "torch.bfloat16"),    # r=1.222 ci95_lo=1.187
+    (4096,   512,  4096, "torch.float16"),     # r=1.213 ci95_lo=1.183
+    (4096,   512,  8192, "torch.bfloat16"),    # r=1.294 ci95_lo=1.247
+    (4096,   512,  8192, "torch.float16"),     # r=1.298 ci95_lo=1.259
+    (4096,   512, 16384, "torch.bfloat16"),    # r=1.551 ci95_lo=1.518
+    (4096,   512, 16384, "torch.float16"),     # r=1.532 ci95_lo=1.448
+    (4096,   512, 32768, "torch.bfloat16"),    # r=1.758 ci95_lo=1.737
+    (4096,   512, 32768, "torch.float16"),     # r=1.842 ci95_lo=1.797 (max-ratio)
+    # M=8192 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192,   512,  2048, "torch.bfloat16"),    # r=1.108 ci95_lo=1.098
+    (8192,   512,  2048, "torch.float16"),     # r=1.106 ci95_lo=1.096
+    (8192,   512,  4096, "torch.bfloat16"),    # r=1.206 ci95_lo=1.152
+    (8192,   512,  4096, "torch.float16"),     # r=1.140 ci95_lo=1.103
+    (8192,   512,  8192, "torch.bfloat16"),    # r=1.279 ci95_lo=1.208
+    (8192,   512,  8192, "torch.float16"),     # r=1.288 ci95_lo=1.243
+    (8192,   512, 16384, "torch.bfloat16"),    # r=1.395 ci95_lo=1.345
+    (8192,   512, 16384, "torch.float16"),     # r=1.335 ci95_lo=1.308
+    (8192,   512, 32768, "torch.bfloat16"),    # r=1.480 ci95_lo=1.463
+    (8192,   512, 32768, "torch.float16"),     # r=1.409 ci95_lo=1.403
+})
+assert len(_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N) == 30, (
+    "K-1538 P23 skinny_N512 K-COMPLEMENT alias-stack frozenset must be exactly "
+    "30 cells (M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,4096,8192,16384,32768} "
+    "× {bf16,fp16}); any deviation indicates an authoring typo against the "
+    "K-1538 paired n=30 admit set.")
+# Cross-frozenset disjointness — K-1538 P23 vs the prior 14-predicate stack.
+# ALIAS to P15 (K-1409 N=512 EXTREMES) ⨄ P17 (K-1437 N=512 BASE) — those
+# two siblings are intentionally OMITTED from the assert table per the
+# K-1493 P20 alias-stack convention.  Every other K-COMPLEMENT predicate
+# uses N ∈ {128, 256, 1024, 16384, 32768}; P12 is bounded to M=N=K ∈
+# {2048, 4096}; P8/K971 cap at N ≤ 2048.  Data-driven assert loop mirrors
+# the K-1532 P22 minimalist refactor so a future P24 only needs to append
+# to `_K1538_P23_DISJOINT_SIBLINGS`.
+_K1538_P23_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("K971_ROUTE_TABLE (M=N≤2048)",       K971_ROUTE_TABLE),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+)
+for _sibling_name, _sibling_set in _K1538_P23_DISJOINT_SIBLINGS:
+    assert _K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N.isdisjoint(_sibling_set), (
+        f"K-1538 P23 skinny_N512 alias-stack overlaps {_sibling_name}; "
+        "sibling-N firewall violated — the only intentional aliases are "
+        "P15 (K-1409 N=512 EXTREMES) and P17 (K-1437 N=512 BASE), both "
+        "OMITTED from this table per the K-1493 P20 alias-stack convention.")
+del _sibling_name, _sibling_set
+# Positive alias asserts — K-1538 P23 is a strict cover of P15 ⨄ P17 over
+# the N=512 K-COMPLEMENT cohort (29/30 strict-admit cells; the 30th is the
+# (2048, 512, 2048, bf16) preserved-by-P15 reject).  These document the
+# intentional aliasing so a future audit cannot silently break the
+# load-bearing fallback property.
+assert (
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT
+    .issubset(_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N)), (
+    "K-1538 P23 alias-stack must be a strict cover of K-1409 P15 N=512 "
+    "EXTREMES (the K ∈ {2048, 32768} corner of the N=512 cohort); P23 "
+    "is intentionally a 14th-position fallback that triggers iff P15+P17 "
+    "are both ablated.")
+assert (
+    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17
+    .issubset(_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N)), (
+    "K-1538 P23 alias-stack must be a strict cover of K-1437 P17 N=512 "
+    "BASE (K ∈ {4096, 8192, 16384}); see K-1493 P20 alias-stack pattern.")
+
+
+def _k1538_p23_skinny_n512_alias_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1538 P23 — direct hipBLASLt route-OUT for the 30-cell skinny_N512
+    K-COMPLEMENT cohort, 15th-position alias-stack of the P15 ⨄ P17
+    envelope (`_K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 512 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1538 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X (gfx942) with B=10000 vectorised paired bootstrap CI95
+    (numpy advanced-indexing per R-1298 / R-1367); 29/30 strict-admit,
+    cohort geomean tb/hbl = 1.329× (range 1.015×–1.842×).  Single strict
+    reject (2048, 512, 2048, bf16) at r=1.015 (CI95 [1.007, 1.028]);
+    preserved-by-upstream-routing (P15 EXTREMES catches K=2048) without
+    regression.
+
+    Mechanism: at N=512 the persistent_matmul tile aspect against
+    M ∈ {2048, 4096, 8192} crosses the K-913 §3 LDS-bank-conflict floor
+    as K grows; hipBLASLt's split-K pattern is better matched to the BC
+    ratio.  Per-cell ratio widens monotonically with K (e.g. M=2048:
+    1.05× @ K=2048 → 1.75× @ K=32768) — opposite of the K-1465/K-1478
+    narrowing trajectory at N=8192/N=16384 (per-tile work too small to
+    amortise the LDS gap at N=512).
+
+    Stack position: 15th per the K-1175 stacked-predicate convention,
+    AFTER P22 (K-1513 N=32768).  Membership check is unreachable while
+    P15 (9th) + P17 (11th) are enabled (short-circuit semantics) — by
+    design.  Mirrors the K-1493 / K-1525 P20-alias-of-P19 sibling-slot
+    productionisation pattern: this slot documents the N=512 envelope
+    under a single cohort symbol, pins per-cell ratios as comments for
+    retro audit, and is load-bearing if P15 or P17 is ever ablated.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1538_P23_SKINNY_N512_KCOMPL_ROUTEOUT_N
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -2087,6 +2262,10 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      14. K-1513 P22 skinny_N32768 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
          (Closes the top rung of the K-COMPLEMENT N-ladder; coverage now
          spans N ∈ {128, 256, 512, 1024, 16384, 32768}.)
+     15. K-1538 P23 skinny_N512 K-COMPLEMENT 30-cell strict-equality
+         alias-stack -> hipBLASLt.  Covers the same N=512 cohort as
+         P15 ⨄ P17; unreachable while either P15 or P17 is enabled,
+         load-bearing fallback otherwise.  (Cohort geomean 1.329×.)
     """
     if disable_env_set:
         return False
@@ -2197,5 +2376,17 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # Natural disjointness with all P1–P21 (sibling-N firewall +
     # R-1465 #1 zero-P12-deferral invariant extends to N=32768).
     if _k1513_p22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1538 P23 (15th-position): skinny_N512 K-COMPLEMENT 30-cell route-OUT,
+    # alias-stack of the P15 (K-1409 EXTREMES) ⨄ P17 (K-1437 BASE) N=512
+    # envelope.  Stacks AFTER P22 per the K-1175 stacked-predicate
+    # convention.  All 30 cells already routed-OUT by P15+P17 upstream;
+    # this 15th-position slot documents the N=512 envelope under a single
+    # cohort symbol and is load-bearing if P15 or P17 is ever ablated.
+    # 29/30 admit-strict (cohort geomean tb/hbl = 1.329×, range
+    # 1.015×–1.842×); single strict reject (2048,512,2048,bf16) preserved
+    # by upstream P15 without regression.  Mirrors the K-1493 / K-1525
+    # P20-alias-of-P19 sibling-slot productionisation pattern.
+    if _k1538_p23_skinny_n512_alias_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

@@ -1028,34 +1028,9 @@ _K1367_P13_SKINNY_N128_KCOMP_ROUTEOUT_18 = frozenset({
     (8192, 128, 16384, "torch.bfloat16"),
     (8192, 128, 16384, "torch.float16"),
 })
-assert len(_K1367_P13_SKINNY_N128_KCOMP_ROUTEOUT_18) == 18, (
-    "K-1367 P13 skinny_N128 K-COMPLEMENT frozenset must be exactly 18 cells "
-    "(M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16,fp16}); "
-    "any deviation indicates an authoring typo against the K-1308 bucket rule "
-    "or the K-1227 wrapper-bound K-COMPLEMENT scoping.")
-# Cross-frozenset disjointness — P13 vs prior envelopes.
-_K1367_P13_VS_P8_DISJOINT = (
-    _K1367_P13_SKINNY_N128_KCOMP_ROUTEOUT_18.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1367_P13_VS_P8_DISJOINT, (
-    "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps the K-1322 51-cell P8 "
-    "envelope; P8's K-1205 N=128 sub-frozenset uses K ∈ {2048, 8192} with "
-    "M ≥ 4480 — no admitted P13 cell satisfies BOTH selectors simultaneously "
-    "(P13 K=8192 cells exist at M ∈ {2048, 4096, 8192} but K-1205 specific "
-    "tuples must be enumerated to overlap; disjointness verified by frozenset "
-    "intersection at module load).")
-_K1367_P13_VS_K971_DISJOINT = (
-    _K1367_P13_SKINNY_N128_KCOMP_ROUTEOUT_18.isdisjoint(K971_ROUTE_TABLE))
-assert _K1367_P13_VS_K971_DISJOINT, (
-    "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
-    "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ {1024, 2048}; "
-    "P13 cells all use N=128 — natural disjointness, but assert as cheap "
-    "insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
-_K1367_P13_VS_P12_DISJOINT = (
-    _K1367_P13_SKINNY_N128_KCOMP_ROUTEOUT_18.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1367_P13_VS_P12_DISJOINT, (
-    "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps K-1361 P12 square_mid; "
-    "P12 cells use M=N=K ∈ {2048, 4096}; P13 cells all use N=128 — natural "
-    "disjointness, asserted for completeness (A4 no-double-admit).")
+# Cardinality + cross-frozenset disjointness invariants are exercised by
+# `tests/test_k1367_p13_skinny_n128.py` (cardinality_18, disjoint_from_p8 /
+# k971_route_table / p12) per reviewer feedback — no module-load asserts.
 
 
 def _k1367_p13_skinny_n128_kcomp_routeout(M: int, N: int, K: int, dtype) -> bool:

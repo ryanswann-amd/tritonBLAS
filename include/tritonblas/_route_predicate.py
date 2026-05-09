@@ -3423,3 +3423,74 @@ _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset({
 })
 # Cardinality (==17) gated by tests/test_p36_skinny_n320_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P37 (28th-slot): N=384 K-COMPLEMENT verified-winner subset — 14 cells from
+# K-1857's N=384 sub-cohort = M ∈ {2048,4096,8192} × N=384 × K ∈ {4096,8192,16384}
+# × {bf16,fp16} = 18 cells, MINUS the 4 cells already routed by an upstream
+# alias-stack slot (K-1748 P30 _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+# explicitly enumerates (2048,384,8192,*) and (4096,384,8192,*) for both
+# dtypes — 4 cells overlap).  Per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST,
+# those already-routed cells are excluded from P37 to avoid duplicate routing.
+#
+# K-1857 paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep
+# (LDS / VALU·MFMA / VMEM·L2; 108 cell-engine-pass datapoints) on MI300X /
+# gfx942 (OCI MI300X fallback per INFRA-0048 — c42 head SSH refused, same
+# fallback as K-1846/K-1850): all 18/18 cells of the cohort gate-pass at the
+# strict ≥1.05× ∧ paired-CI95-lo ≥ 1.05 floor against upstream HEAD 95e2c47
+# (K-1857 measurement was vs unstacked main; per R-K1825 we then prune the
+# 4 P30-overlapping cells, leaving 14 NEW route-OUT entries).  Per-cell
+# ratios on the 14 admit cells span 1.135×–1.555× (median ≈ 1.292×),
+# cohort geomean TB/HBL = 1.283× across the full 18-cell K-1857 envelope.
+#
+# Mechanism (K-913 §3 LDS-bank-conflict, dtype-invariant per R-K1673 +
+# R-1811 wave-misalignment): N=384 = 6 wavefronts × 64 lanes is NOT a
+# multiple of the typical BN=128 tiling (384/128 = 3 BN tiles per N-row),
+# but the wave-pair (2-wave) packing leaves a tail wave underutilised in
+# tritonblas's persistent_matmul because the kernel cannot specialise its
+# split-K plan for this N.  K-1857 PMC ranking confirms LDS_DOMINANT in
+# 18/18 cells with SQ_WAIT_INST_LDS TB/HBL median ratio 13.0× (more
+# extreme than K-1846/K-1850's N=320 11.15×) and HBL records ZERO
+# SQ_LDS_BANK_CONFLICT in 18/18 cells (vs nonzero everywhere on TB).
+# MFMA-busy fraction: TB 9.4% vs HBL 18.3% — TB's MFMA pipe is starved
+# roughly half the cycles HBL feeds it despite identical SQ_INSTS_MFMA
+# (ratio 0.99×).  Same SCHEDULER_LDS A4 failure mode as the K-1681 /
+# K-1710 / K-1781 / K-1812 / K-1824 / K-1832 / K-1843 wave-misaligned
+# skinny-N class.  hipBLASLt's Tensile shape-specialised solutions clear
+# the band by ~22% on average across the 14 admit cells (geomean 1.283×
+# over the full 18-cell envelope per K-1857).
+#
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536} — partial N=384 coverage at K∈{8192,32768}),
+# K-1775 P31 (N=256), K-1810 P32 (N=160), K-1817 P33 (N=224), K-1831 P34 (N=96),
+# K-1837 P35 (N=288), K-1850 P36 (N=320) — now extended to the wave-misaligned
+# N=384 K-COMPLEMENT band at the K∈{4096,16384} extremes plus the K=8192
+# (8192,384,8192) cell that P30 left uncovered.
+#
+# Sibling-N firewall: N=384 already appears in P30's N-axis projection
+# {384, 768, 1536}; P37 is K-axis disjoint from P30 within the N=384
+# slice (P37 K ∈ {4096, 16384} ∪ {(8192, only at M=8192)}; P30 K ∈
+# {8192, 32768}).  N=384 is otherwise disjoint from every other prior
+# slot's N-axis projection (P5, P13, P21, P28, P29, P31–P36) — asserted
+# at module load by tests/test_p37_skinny_n384_alias_stack.py.
+_P37_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset({
+    # M=2048 (excludes (2048,384,8192,*) — already routed by P30)
+    (2048, 384,  4096, "torch.bfloat16"),  # r=1.135 CI[1.105,1.161]
+    (2048, 384, 16384, "torch.bfloat16"),  # r=1.526 CI[1.510,1.568]
+    (2048, 384,  4096, "torch.float16"),   # r=1.173 CI[1.162,1.177]
+    (2048, 384, 16384, "torch.float16"),   # r=1.555 CI[1.520,1.566]  WORST
+    # M=4096 (excludes (4096,384,8192,*) — already routed by P30)
+    (4096, 384,  4096, "torch.bfloat16"),  # r=1.168 CI[1.158,1.191]
+    (4096, 384, 16384, "torch.bfloat16"),  # r=1.486 CI[1.448,1.515]
+    (4096, 384,  4096, "torch.float16"),   # r=1.149 CI[1.138,1.154]
+    (4096, 384, 16384, "torch.float16"),   # r=1.456 CI[1.431,1.479]
+    # M=8192 (full bf16 + fp16 grid at K∈{4096,8192,16384}, no P30 overlap
+    # — P30 covers (8192,384,32768,*) only at this M)
+    (8192, 384,  4096, "torch.bfloat16"),  # r=1.150 CI[1.144,1.182]
+    (8192, 384,  8192, "torch.bfloat16"),  # r=1.249 CI[1.226,1.272]
+    (8192, 384, 16384, "torch.bfloat16"),  # r=1.429 CI[1.360,1.472]
+    (8192, 384,  4096, "torch.float16"),   # r=1.136 CI[1.133,1.177]  BEST CI floor
+    (8192, 384,  8192, "torch.float16"),   # r=1.169 CI[1.158,1.199]
+    (8192, 384, 16384, "torch.float16"),   # r=1.372 CI[1.347,1.472]
+})
+# Cardinality (==14) gated by tests/test_p37_skinny_n384_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

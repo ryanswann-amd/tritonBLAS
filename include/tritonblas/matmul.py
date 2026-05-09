@@ -145,6 +145,16 @@ from ._route_predicate import (
     # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
     # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
     _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
+    # P37 (28th-slot): N=384 K-COMPLEMENT verified-winner subset — 14 cells
+    # (M ∈ {2048,4096,8192} × N=384 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
+    # cells, MINUS the 4 cells already routed by K-1748 P30 — namely
+    # (2048,384,8192,*) and (4096,384,8192,*) for both dtypes — per
+    # R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  K-1857 paired
+    # n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep on MI300X / gfx942
+    # (OCI MI300X fallback per INFRA-0048 — c42 head SSH refused): all 18/18
+    # cohort cells gate-pass at strict ratio≥1.05 ∧ paired-CI95-lo≥1.05;
+    # cohort geomean = 1.283×; per-cell ratios 1.135×–1.555×.
+    _P37_SKINNY_N384_KCOMPL_VERIFIED_WIN_14,
 )
 
 
@@ -469,6 +479,29 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
     # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
     if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
+    # P37 (28th-slot): N=384 K-COMPLEMENT verified-winner subset — 14 cells from
+    # K-1857's N=384 sub-cohort (M ∈ {2048,4096,8192} × N=384 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}) MINUS the 4 P30-overlapping cells (2048,384,8192,*) and
+    # (4096,384,8192,*) per the K-1857 paired-n30 measurement against upstream
+    # HEAD 95e2c47 + R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST prune.  K-1857
+    # paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep on MI300X /
+    # gfx942 (OCI MI300X fallback per INFRA-0048): 18/18 cohort cells admitted
+    # at the strict ≥1.05× ∧ paired-CI95-lo≥1.05 gate; per-cell ratios on the
+    # 14 admit cells span 1.135×–1.555× (median ≈ 1.292×); cohort geomean
+    # TB/HBL = 1.283× over the full 18-cell envelope.  Both dtype rows are
+    # load-bearing — closes the wave-misaligned N=384 K-COMPLEMENT band at
+    # the K∈{4096,16384} extremes (P30 covered K∈{8192,32768} only) plus the
+    # M=8192,K=8192 cell P30 left uncovered.  Mechanism (K-913 §3 LDS-bank-
+    # conflict + R-1811 wave-misalignment): N=384 = 6 wavefronts × 64 lanes
+    # ≠ multiple of typical BN tiling (BN=128 → 3 BN tiles per N-row), causing
+    # tail-wave underutilisation in tritonblas persistent_matmul that
+    # hipBLASLt's Tensile shape-specialised solutions avoid.  K-1857 PMC
+    # bottleneck histogram: LDS_DOMINANT 18/18, SQ_WAIT_INST_LDS TB/HBL median
+    # ratio 13.0× (more extreme than K-1846 N=320's 11.15×), HBL records ZERO
+    # SQ_LDS_BANK_CONFLICT in 18/18 cells, MFMA-busy fraction TB 9.4% vs HBL
+    # 18.3%; same SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/
+    # K-1812/K-1824/K-1832/K-1843/K-1846 wave-misaligned skinny-N class.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N384_KCOMPL_VERIFIED_WIN_14: return True
     return False
 
 

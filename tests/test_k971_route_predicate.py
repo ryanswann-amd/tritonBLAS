@@ -36,6 +36,7 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1205_EN3_ADMITS_8,
     R_K1142_E1_route_to_hbl,
     K1142_E1_NS,
     K1142_E1_KS,
@@ -685,18 +686,24 @@ K931_CONTROL_CELLS_5 = [
 ]
 
 
-def test_k1144_p8_envelope_size_is_exactly_28_after_k1175_extension():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 = 28 cells.
-    Any silent edit changes this count and trips this canary.
+def test_k1144_p8_envelope_size_is_exactly_36_after_n_axis_extension():
+    """The cohort is 13 anchors + 12 neighbors + 3 E2 admits + 8 E_N3
+    N-axis admits = 36 cells.  Any silent edit changes this count and
+    trips this canary.
 
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells
-    (E2_I4 single K-interior admit + 2 M-axis admits at K=1024).  See the
-    _K1161_E2_ADMITS_3 docstring in _route_predicate.py for the K-floor
-    relaxation NEGATIVE_AXIS_PIVOT mechanism that bounds this extension."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+    Originally pinned at 25; +3 K-interior/M-axis E2-validated cells
+    (E2_I4 + 2 M-axis admits at K=1024); +8 N-axis-validated cells at
+    N=128 (paired n=30 HIP-graph hot-cache, B=10000 bootstrap CI95;
+    8/9 = 88.9% admit rate decisively above the 75% landing threshold,
+    diverging from the K-axis NEGATIVE_AXIS_PIVOT pattern).  See the
+    _K1205_EN3_ADMITS_8 docstring in _route_predicate.py for the
+    N-axis extension mechanism (skinny-N M >> N=128 widens speedups
+    1.14x-3.25x vs 1.16x-1.27x at the source N=2048 plane)."""
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
+    assert len(_K1205_EN3_ADMITS_8) == 8
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():
@@ -1184,3 +1191,116 @@ def test_k1216_e1_dispatch_stacked_after_p8_no_double_route():
         # E1 may or may not fire depending on whether cell is inside E1
         # envelope; verdict is True iff either fires (dispatch is OR).
         assert (p8_says or e1_says) is True
+
+
+# ---------------------------------------------------------------------------
+# E_N3 — N-axis extension pin tests (8 admits + 1 no-leak).
+#
+# Paired n=30 HIP-graph hot-cache + B=10000 bootstrap CI95 measurements on
+# the MI300X gfx942 audit cluster of 9 N=128 candidates (mirrors of the
+# anchor M-set at K∈{256, 768, 1024}) returned 8/9 = 88.9% admit rate,
+# decisively above the 75% landing threshold and *diverging* from the
+# prior K-axis NEGATIVE_AXIS_PIVOT pattern (1/6 = 16.7%) on the same
+# hardware/methodology.  The 1 reject (EN_K768_S24, M=4480 K=768) is the
+# smallest-M cell in the candidate set — consistent with the small-M
+# Triton-favoured tail mechanism applied at the M-floor of the anchor
+# M-set.  Per-cell speedups widen 1.14x-3.25x at narrow N=128 vs
+# 1.16x-1.27x at the source N=2048 plane.
+#
+# Pin tests cover (a) 8/8 envelope cells route-OUT at the dispatch level,
+# (b) bf16-only carve-out, (c) 3-way disjointness with prior sub-sets,
+# (d) NO-LEAK guarantee: the 1 measured-but-rejected N=128 cell
+# (EN_K768_S24) MUST NOT fire P8.
+# ---------------------------------------------------------------------------
+K1205_EN3_ADMITS_8_LIST = [
+    # (cid,            M,     N,    K)  per E_N3 paired n=30 manifest
+    ("EN_K1024_S25",  6016,  128, 1024),  # hbl/tb=1.370x CI95=[1.362, 1.374]
+    ("EN_K1024_S26",  8064,  128, 1024),  # hbl/tb=1.402x CI95=[1.396, 1.415]
+    ("EN_K1024_S29", 14208,  128, 1024),  # hbl/tb=3.254x CI95=[3.234, 3.267] (cohort MAX)
+    ("EN_K1024_S30", 16256,  128, 1024),  # hbl/tb=3.024x CI95=[3.011, 3.056]
+    ("EN_K1024_S33", 22400,  128, 1024),  # hbl/tb=2.258x CI95=[2.234, 2.269]
+    ("EN_K256_S37",  25600,  128,  256),  # hbl/tb=1.144x CI95=[1.140, 1.149] (cohort MIN admit)
+    ("EN_K256_S39",  49152,  128,  256),  # hbl/tb=1.781x CI95=[1.768, 1.803]
+    ("EN_K768_S18",   5972,  128,  768),  # hbl/tb=1.227x CI95=[1.226, 1.227]
+]
+
+# NO-LEAK pin: the only measured-but-rejected N=128 candidate.  Must NOT
+# fire P8 (M=4480 N=128 K=768 measured TB-WIN at hbl/tb=0.967x).
+K1205_EN3_REJECTED_1_LIST = [
+    ("EN_K768_S24",   4480,  128,  768),  # hbl/tb=0.967x CI95=[0.964, 0.969]
+]
+
+
+def test_n_axis_envelope_size_pinned_to_8():
+    """E_N3 N-axis extension is exactly 8 strict-equality cells.  Any
+    silent edit to the data tuple changes this count and trips here."""
+    assert len(_K1205_EN3_ADMITS_8) == 8
+
+
+def test_n_axis_admits_three_way_disjoint_with_prior_subsets():
+    """E_N3 admits all have N=128 by construction; no anchor / neighbor /
+    E2 admit has N=128 (prior P8 cells all have N >= 896), so the four
+    sub-sets are pairwise disjoint and the union size = sum-of-sizes."""
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+def test_n_axis_envelope_contents_pinned_to_manifest():
+    """Frozenset contents must match the source-of-truth list exactly.
+    A typo or reordering that changes a tuple value trips this canary."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _, M, N, K in K1205_EN3_ADMITS_8_LIST
+    )
+    assert _K1205_EN3_ADMITS_8 == expected
+
+
+def test_n_axis_structural_invariant_every_cell_has_N_128():
+    """Axis-discipline pin: every E_N3 cell must have N=128 (the defining
+    constraint of the N-axis extension); a future edit that introduces a
+    non-N=128 cell into this sub-set breaks the disjointness invariant
+    that makes the union size proof trivial."""
+    for tup in _K1205_EN3_ADMITS_8:
+        M, N, K, dtype = tup
+        assert N == 128, f"E_N3 cell {tup} has N={N}, expected N=128"
+        assert K in {256, 768, 1024}, (
+            f"E_N3 cell {tup} has K={K}, expected K in source K-set "
+            "{256, 768, 1024}")
+        assert dtype == "torch.bfloat16"
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST)
+def test_n_axis_p8_admits_all_8_cells(cid, M, N, K):
+    """Per-cell P8 admit pin: each E_N3 cell must fire the strict-equality
+    P8 predicate at bf16."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is True
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_ADMITS_8_LIST)
+def test_n_axis_dispatch_routes_all_8_cells_out_to_hbl(cid, M, N, K):
+    """End-to-end dispatch pin: each E_N3 cell must route-OUT to hipBLASLt
+    via _k971_route_to_hbl at bf16 (P8 predicate fires before the P6 admit-
+    back-to-kernel check, so the verdict is True)."""
+    assert _k971_route_to_hbl(
+        M, N, K, torch.bfloat16, torch.bfloat16,
+        enable_streamk=False, work_stealing=False) is True, (
+        f"E_N3 cell {cid} ({M},{N},{K}) failed to route-OUT through "
+        f"_k971_route_to_hbl; check P8 precedence")
+
+
+def test_n_axis_admits_are_bf16_only():
+    """E_N3 admits inherit P8's bf16-only audit scope.  Non-bf16 dtypes
+    must return False so fp16/fp32 dispatch decisions remain owned by
+    their own envelopes."""
+    M, N, K = 14208, 128, 1024  # EN_K1024_S29 (cohort MAX)
+    for dt in (torch.float16, torch.float32, torch.float64):
+        assert _p8_mfma_issue_stall_routeout(M, N, K, dt) is False
+
+
+@pytest.mark.parametrize("cid,M,N,K", K1205_EN3_REJECTED_1_LIST)
+def test_n_axis_does_not_leak_into_rejected_cell(cid, M, N, K):
+    """NO-LEAK pin: the one measured-but-rejected N=128 candidate
+    (EN_K768_S24, hbl/tb=0.967x — TB-WIN) MUST NOT fire P8.  Re-admitting
+    this cell silently re-introduces a paired-n=30 false positive."""
+    assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False
+    assert (M, N, K, "torch.bfloat16") not in _P8_MFMA_ISSUE_STALL_ROUTEOUT

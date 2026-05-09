@@ -3327,3 +3327,35 @@ _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p34_skinny_n96_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P35 (26th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells from
+# K-1832's N=288 sub-cohort = M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}.  K-1832 paired n=30 HIP-graph hot-cache 3-pass PMC sweep
+# (LDS / VALU·MFMA / VMEM·L2; 108 cell-engine-pass datapoints) on MI300X /
+# gfx942 (OCI MI300X fallback per INFRA-0048): bf16 N=288 unrouted
+# 0/9 and fp16 N=288 unrouted 0/9 in pre-stack measurement; TB loses to HBL
+# in 18/18 cells with cohort geomean TB/HBL = 4.290× (range 3.06×–6.46×) —
+# the largest cohort-level uplift in the alias-stack to date and ~3× above
+# the K-1818 P34 N=96 cohort uplift (1.16×).  All 18 cells admitted as
+# verified-winner route-OUT targets — both dtype rows are load-bearing
+# (no upstream alias overlap, mirrors K-1817 P33 N=224 / K-1831 P34 N=96
+# alias-overlap-absent discipline).  Mechanism (K-913 §3 LDS-bank-conflict,
+# dtype-invariant per R-K1673 + R-1811 wave-misalignment): BLOCK_N=128 packs
+# N=288 into wave-misaligned K-block columns (off-by-32 N rung above N=256);
+# K-1832 PMC delta ranking confirms SQ_LDS_BANK_CONFLICT ≈ 869× and
+# SQ_WAIT_INST_LDS ≈ 12.5× (TB / HBL) at the top of the discriminator list,
+# with L2/HBM signals at the noise floor — identical fingerprint to K-1812
+# (TB/HBL ratio R²=0.9999 on the 4 overlapping cells) and to K-1818 N=96
+# / K-1794 N∈{160,224}.  Same SCHEDULER_LDS A4 failure mode as the
+# K-1681 / K-1710 / K-1781 wave-misaligned skinny-N class.  hipBLASLt's
+# split-K kernel selection clears the band by ~3.3× on average.
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536}), K-1775 P31 (N=256), K-1810 P32 (N=160),
+# K-1817 P33 (N=224), and K-1831 P34 (N=96) — now applied to N=288 (the
+# wave-misaligned rung ABOVE the N=256 productionised cliff).
+_P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 288, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p35_skinny_n288_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

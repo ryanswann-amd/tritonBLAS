@@ -131,6 +131,13 @@ from ._route_predicate import (
     # dtype rows load-bearing — no upstream alias overlap (N=96 is the first
     # wave-misaligned rung below the N=128 cliff per K-1818 PMC RCA).
     _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18,
+    # P35 (26th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
+    # K-1832's N=288 sub-cohort (3-pass PMC paired n=30 HIP-graph hot-cache).
+    # Both dtype rows load-bearing — no upstream alias overlap (N=288 is the
+    # off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).  K-1832 cohort
+    # geomean TB/HBL = 4.290× — the largest uplift in the alias-stack to date.
+    _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -424,6 +431,20 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # → K-913 §3 LDS-BC fingerprint dominates AND wave-misalignment MFMA-tail
     # inefficiency per R-1811.WAVE-MISALIGNMENT-IS-ROOT-MECHANISM).
     if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18: return True
+    # P35 (26th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells from
+    # K-1832's N=288 sub-cohort (M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}).  K-1832 paired n=30 HIP-graph hot-cache 3-pass PMC sweep on
+    # MI300X / gfx942: bf16 N=288 unrouted 0/9 and fp16 N=288 unrouted 0/9 in the
+    # pre-stack measurement (no upstream alias coverage at the wave-misaligned N=288
+    # off-by-32 rung ABOVE the N=256 P31 cliff).  TB/HBL ratio R²=0.9999 vs K-1812
+    # on the 4 overlapping cells; cohort geomean TB/HBL = 4.290× (range 3.06×–6.46×,
+    # 18/18 admit at the strict ≥1.05 ∧ p<0.05 gate).  All 18 cells admitted as
+    # route-OUT — both dtype rows load-bearing, closes the wave-misaligned N=288
+    # dtype-mirror (same K-913 §3 LDS-BC + R-1811 wave-misalignment MFMA-tail
+    # fingerprint as P28 / P31 / P32 / P33 / P34; SCHEDULER_LDS A4 failure mode
+    # per K-1832 PMC delta ranking with SQ_LDS_BANK_CONFLICT ≈ 869× and
+    # SQ_WAIT_INST_LDS ≈ 12.5× at the top of the discriminator list).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

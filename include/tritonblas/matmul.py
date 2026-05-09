@@ -98,7 +98,15 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-1635: bump kpack from 1->2 for BLOCK_K in {128, 256} to break the
+    # stride-32 LDS bank-conflict pattern surfaced by K-1598 PMC analysis
+    # (SQ_LDS_BANK_CONFLICT/SQ_INSTS_LDS dominant delta vs hipBLASLt).
+    # Empirically validated on gfx942 (MI300X/MI325X): on the 14 BK in {128,256}
+    # cells we measured, kpack=2 wins 10/14 with geomean 1.033x speedup.
+    # Other BLOCK_K values (notably BK=64 used by the M=N=4096 cohort) keep
+    # kpack=1, which we measured to be optimal (kpack=2 regressed by ~3-11%
+    # at BK=64 due to ds_read alignment cost outweighing bank-conflict savings).
+    kpack = 2 if BLK_K in (128, 256) else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +252,9 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-1635: see persistent_matmul_lt for rationale. Mirror the kpack gate so
+    # streamk benefits from the same LDS bank-conflict break on BK in {128,256}.
+    kpack = 2 if BLK_K in (128, 256) else 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

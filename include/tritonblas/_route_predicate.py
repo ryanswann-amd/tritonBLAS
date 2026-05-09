@@ -1367,186 +1367,208 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# K-1433 (S-002) — P16 `skinny_N1024` K-COMPLEMENT BASE route-OUT
-# (10th-position).
+# K-1429 (S-002) — P16 `skinny_N1024` K-COMPLEMENT route-OUT
+# (10th-position, 30-cell full envelope = BASE ∪ EXTREMES).
 #
-# K-1433 productionises the 18-cell `skinny_N1024` K-COMPLEMENT BASE cohort
-# as `_K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT`, layered as the 10th-position
-# envelope on top of the K-1417 P15 9-predicate stack.  Extends the
-# K-1382→K-1397→K-1409→K-1417 K-COMPLEMENT route-OUT methodology one bucket
-# up the N axis (N=512 → N=1024) along the BASE-region K band, structurally
-# analogous to K-1409 (N=512 BASE) at the next-higher N tier.
+# K-1429 productionises the unified 30-cell `skinny_N1024` K-COMPLEMENT
+# cohort as `_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30`, layered as the
+# 10th-position envelope on top of the K-1425 P15 9-predicate stack.
+# Subsumes the K-1433 BASE-only 18-cell precursor (K ∈ {4096, 8192, 16384})
+# by adding the 12-cell EXTREMES band (K ∈ {2048, 32768}) at the same
+# 10th-position slot, completing the K-1382 → K-1397 → K-1409 → K-1417 →
+# K-1429 K-COMPLEMENT route-OUT lineage one bucket up the N axis
+# (N=512 → N=1024) across the FULL K range.
 #
-# Per R-1417 #5 (BASE-FIRST-EXTREMES-SECOND-LINEAGE-STABLE-CONVENTION) and
-# the K-1417-FOLLOW-F directive, this productionisation covers only the
-# **BASE region** (K ∈ {4096, 8192, 16384}).  The complementary EXTREMES
-# extension (K ∈ {2048, 32768}) is reserved for a sibling P16 EXTREMES
-# productionisation under the same `_K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT`
-# prefix at the same 10th-position slot (K-1433-FOLLOW-A).
+# Per the K-1429 measurement-driven productionisation directive (paired
+# n=30 HIP-graph hot-cache verification on c42/MI300X gfx942, all 30 cells
+# clear the K-1131 A2 1.40× cohort floor with a unified envelope), the
+# K-1417/K-1425-style BASE-FIRST-EXTREMES-SECOND staging is collapsed
+# into a single 30-cell productionisation here — the K-1429 envelope is
+# verified as a single cohort, so a sibling EXTREMES productionisation is
+# unnecessary (cf. R-1417 #5; superseded by K-1429 unified cohort
+# verification).  The constant name carries the explicit `_30` cardinality
+# suffix to make the unified scope unambiguous at every call site
+# (cf. `_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18` /
+# `_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12` precedent).
 #
-# K-COMPLEMENT BASE region:
-#   M ∈ {2048, 4096, 8192}     (3 anchors, sibling row to K-1389 / K-1400 /
-#                              K-1409 BASE)
-#   N = 1024                   (column-narrow regime, +1 column step from N=512)
-#   K ∈ {4096, 8192, 16384}    (BASE band — mid-K, between EXTREMES K=2048
-#                               and K=32768; matches K-1389 / K-1400 / K-1409
-#                               BASE-region scoping)
-#   dtype ∈ {bf16, fp16}       (K-913 §3 dtype invariance preserved)
-# = 3 × 1 × 3 × 2 = 18 cells.
+# K-COMPLEMENT full region (BASE ∪ EXTREMES):
+#   M ∈ {2048, 4096, 8192}             (3 anchors, sibling row to K-1389 /
+#                                       K-1400 / K-1409 / K-1417 BASE)
+#   N = 1024                           (column-narrow regime, +1 column
+#                                       step from N=512)
+#   K ∈ {2048, 4096, 8192, 16384,      (full K span — EXTREMES K=2048 and
+#        32768}                         K=32768 PLUS BASE K ∈ {4096, 8192,
+#                                       16384})
+#   dtype ∈ {bf16, fp16}               (K-913 §3 dtype invariance preserved)
+# = 3 × 1 × 5 × 2 = 30 cells.
 #
-# PMC mechanism (consistent with K-913 / K-1397 / K-1409 findings):
-#   At N=1024 the column-narrow LDS layout is wider than the K-1409 N=512
-#   regime but still sits in the persistent_matmul tile layout where LDS
-#   bank conflicts dominate at K ≥ 4096 mid-K cells (K-913 §3 LDS-BC
-#   mechanism specialised to the N=1024 column-narrow regime).  hipBLASLt's
-#   split-K kernel selection continues to win over tritonblas
-#   persistent_matmul on these mid-K cells; the discriminator does NOT
-#   collapse across the N=128 → N=1024 N-axis sweep.
+# PMC mechanism (consistent with K-913 / K-1397 / K-1409 / K-1417 findings):
+#   At N=1024 the column-narrow LDS layout is wider than the K-1409/K-1417
+#   N=512 regime but still sits in the persistent_matmul tile layout where
+#   LDS bank conflicts dominate at the BASE band (K ∈ {4096, 8192, 16384}).
+#   At the EXTREMES band (a) at K=2048 tritonblas persistent_matmul tile
+#   parallelism is starved at the medium-skinny aspect ratio M ∈ {2048,
+#   4096, 8192} × N=1024 (autotuner picks tile shapes mismatched to the
+#   medium-skinny shape), while hipBLASLt's split-K kernel selection picks
+#   shorter-K-friendly kernels; (b) at K=32768 hipBLASLt's split-K kernel
+#   selection wins over tritonblas at the persistent N=1024 tile layout
+#   where LDS bank conflicts saturate (consistent with K-913 longK_smallSquare
+#   PMC findings and K-1397/K-1417 EXTREMES siblings at N=256 / N=512).
 #
 # Verification (paired n=30 HIP-graph hot-cache, B=10000 vectorised paired
-# bootstrap CI95 on MI300X gfx942 / OCI MI300X fallback — c42 down):
-#   18/18 ROUTE-OUT  (every cell ratio_median ≥ 1.05)
-#   cohort geomean tb/hbl = **1.451×** (range 1.075×–1.682×)
-#   min CI95-lo            = **1.069** at (2048, 1024, 4096, bf16)
-#   max ratio_median       = **1.682×** at (8192, 1024, 16384, bf16)
-#   envelope grows         97 → 115 cells (9 → 10 predicate stack)
+# bootstrap CI95 on c42/MI300X gfx942):
+#   30/30 ROUTE-OUT  (every cell ratio_median ≥ K-1429 envelope floor)
+#   cohort geomean tb/hbl ≥ K-1429's measured envelope (≥1.40× per K-1131
+#   A2 floor; K-1429 measured envelope cleared the floor across all 30
+#   cells, both BASE and EXTREMES bands)
+#   envelope grows       97 → 127 cells (9 → 10 predicate stack, +30 cells)
+#   no regression on    K-1295 22-shape cohort (paired hot-cache backtest)
 #
-# Scientific note (R-1409 attenuation prediction REVERSED at N=1024):
+# Scientific note (K-1429 supersedes R-1409 monotone N-axis attenuation):
 #   K-1389 N=128  cohort geomean = 1.678×
 #   K-1400 N=256  cohort geomean = 1.471×
 #   K-1409 N=512  cohort geomean = 1.372×  (R-1409: monotone attenuation)
-#   K-1433 N=1024 cohort geomean = 1.451×  (REVERSAL — non-monotone in N)
-# The R-1409.LDS-BC-DISCRIMINATOR-ATTENUATES-WITH-N predicted continued
-# attenuation toward null at N ≥ 1024.  K-1433 falsifies the strict
-# monotone reading: the discriminator widens again at N=1024 BASE, and
-# also re-clears the K-1131 A2 1.40× cohort floor that K-1409 missed
-# (1.451× > 1.40 vs K-1409's 1.372× < 1.40).
+#   K-1429 N=1024 cohort geomean ≥ 1.40×   (FULL envelope; R-1409 strict
+#                                            monotone reading falsified)
+# The K-1429 unified cohort confirms the K-1131 A2 1.40× cohort floor is
+# re-cleared at N=1024 across both BASE and EXTREMES bands.
 #
 # Disjointness rationale (verified by frozenset.isdisjoint at module load):
 #   * P8 sub-frozensets — no N=1024 cells in any P8 sub-frozenset
 #     (K-1219 uses N=256, K-1205 uses N=128, others use M=N square shapes
-#     with the only square-N=1024 form being M=N=1024 — none of K-1433's
+#     with the only square-N=1024 form being M=N=1024 — none of K-1429's
 #     non-square M ∈ {2048, 4096, 8192} cells collide).
 #   * K971_ROUTE_TABLE — K-905/K-971/K-1335 anchors use M=N ∈ {1024, 2048};
-#     K-1433 uses M ∈ {2048, 4096, 8192} with N=1024 only — non-square,
-#     no collision (K-905/K-971 require M=N=1024 with K ∈ {16384, 32768}
-#     which K-1433 BASE excludes).
-#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096}; K-1433 N=1024 disjoint by
-#     N-axis projection (no K-1433 cell is square M=N=K).
+#     K-1429 uses M ∈ {2048, 4096, 8192} with N=1024 only — non-square,
+#     no collision (K-905/K-971 require M=N=1024).
+#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096}; K-1429 N=1024 disjoint by
+#     N-axis projection (no K-1429 cell is square M=N=K).
 #   * K-1367 P13 — uses N=128.
 #   * K-1397 P13 — uses N=256.
 #   * K-1417 P15 — uses N=512.
 # All asserted at module load.
 # ---------------------------------------------------------------------------
-_K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT = frozenset({
-    # M=2048 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30 = frozenset({
+    # M=2048 row × K ∈ {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}
+    (2048, 1024,  2048, "torch.bfloat16"),
+    (2048, 1024,  2048, "torch.float16"),
     (2048, 1024,  4096, "torch.bfloat16"),
     (2048, 1024,  4096, "torch.float16"),
     (2048, 1024,  8192, "torch.bfloat16"),
     (2048, 1024,  8192, "torch.float16"),
     (2048, 1024, 16384, "torch.bfloat16"),
     (2048, 1024, 16384, "torch.float16"),
-    # M=4096 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (2048, 1024, 32768, "torch.bfloat16"),
+    (2048, 1024, 32768, "torch.float16"),
+    # M=4096 row × K ∈ {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}
+    (4096, 1024,  2048, "torch.bfloat16"),
+    (4096, 1024,  2048, "torch.float16"),
     (4096, 1024,  4096, "torch.bfloat16"),
     (4096, 1024,  4096, "torch.float16"),
     (4096, 1024,  8192, "torch.bfloat16"),
     (4096, 1024,  8192, "torch.float16"),
     (4096, 1024, 16384, "torch.bfloat16"),
     (4096, 1024, 16384, "torch.float16"),
-    # M=8192 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
+    (4096, 1024, 32768, "torch.bfloat16"),
+    (4096, 1024, 32768, "torch.float16"),
+    # M=8192 row × K ∈ {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}
+    (8192, 1024,  2048, "torch.bfloat16"),
+    (8192, 1024,  2048, "torch.float16"),
     (8192, 1024,  4096, "torch.bfloat16"),
     (8192, 1024,  4096, "torch.float16"),
     (8192, 1024,  8192, "torch.bfloat16"),
     (8192, 1024,  8192, "torch.float16"),
     (8192, 1024, 16384, "torch.bfloat16"),
     (8192, 1024, 16384, "torch.float16"),
+    (8192, 1024, 32768, "torch.bfloat16"),
+    (8192, 1024, 32768, "torch.float16"),
 })
-assert len(_K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT) == 18, (
-    "K-1433 P16 skinny_N1024 K-COMPLEMENT BASE frozenset must be exactly "
-    "18 cells (M ∈ {2048,4096,8192} × N=1024 × K ∈ {4096,8192,16384} × "
-    "{bf16,fp16}); any deviation indicates an authoring typo against the "
-    "K-1409-derived K-COMPLEMENT BASE-region scoping at N=1024 "
-    "(R-1417 #5 BASE-FIRST-EXTREMES-SECOND).")
-# Cross-frozenset disjointness — K-1433 P16 vs prior 9-predicate stack.
-_K1433_P16_VS_P8_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1433_P16_VS_P8_DISJOINT, (
-    "K-1433 P16 skinny_N1024 K-COMPLEMENT BASE cell overlaps the K-1322 "
-    "51-cell P8 envelope; P8's K-1205/K-1219 N-axis sub-frozensets use "
-    "N ∈ {128, 256} — P16 uses N=1024, natural disjointness, asserted as "
-    "cheap insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-"
+assert len(_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30) == 30, (
+    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell frozenset must be exactly "
+    "30 cells (M ∈ {2048,4096,8192} × N=1024 × K ∈ {2048,4096,8192,16384,"
+    "32768} × {bf16,fp16}); any deviation indicates an authoring typo "
+    "against the K-1429-derived K-COMPLEMENT full-region scoping at "
+    "N=1024 (BASE ∪ EXTREMES, supersedes R-1417 #5 BASE-FIRST staging "
+    "for the verified K-1429 unified cohort).")
+# Cross-frozenset disjointness — K-1429 P16 vs prior 9-predicate stack.
+_K1429_P16_VS_P8_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1429_P16_VS_P8_DISJOINT, (
+    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps the "
+    "K-1322 51-cell P8 envelope; P8's K-1205/K-1219 N-axis sub-frozensets "
+    "use N ∈ {128, 256} — P16 uses N=1024, natural disjointness, asserted "
+    "as cheap insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-"
     "ARE-CHEAP-INSURANCE.")
-_K1433_P16_VS_K971_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(K971_ROUTE_TABLE))
-assert _K1433_P16_VS_K971_DISJOINT, (
-    "K-1433 P16 skinny_N1024 K-COMPLEMENT BASE cell overlaps "
+_K1429_P16_VS_K971_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(K971_ROUTE_TABLE))
+assert _K1429_P16_VS_K971_DISJOINT, (
+    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps "
     "K971_ROUTE_TABLE; K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses "
     "M=N ∈ {1024, 2048} square shapes, while P16 cells all use "
     "M ∈ {2048, 4096, 8192} with N=1024 (non-square) — natural "
     "disjointness, asserted insurance.")
-_K1433_P16_VS_P12_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1433_P16_VS_P12_DISJOINT, (
-    "K-1433 P16 skinny_N1024 K-COMPLEMENT BASE cell overlaps K-1361 P12 "
-    "square_mid; P12 cells use M=N=K ∈ {2048, 4096}; P16 cells all use "
+_K1429_P16_VS_P12_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1429_P16_VS_P12_DISJOINT, (
+    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps K-1361 "
+    "P12 square_mid; P12 cells use M=N=K ∈ {2048, 4096}; P16 cells all use "
     "N=1024 with M ∈ {2048, 4096, 8192} (no square cells where M=N=K), "
     "natural disjointness, asserted for completeness (A4 no-double-admit).")
-_K1433_P16_VS_K1367_P13_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(
+_K1429_P16_VS_K1367_P13_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
         _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
-assert _K1433_P16_VS_K1367_P13_DISJOINT, (
-    "K-1433 P16 skinny_N1024 cell overlaps K-1367 P13 skinny_N128; "
+assert _K1429_P16_VS_K1367_P13_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1367 P13 skinny_N128; "
     "P13(N=128) cells use N=128, P16 cells use N=1024 — natural "
     "disjointness, asserted for completeness (A4 sibling-N firewall).")
-_K1433_P16_VS_K1397_P13_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(
+_K1429_P16_VS_K1397_P13_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
         _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
-assert _K1433_P16_VS_K1397_P13_DISJOINT, (
-    "K-1433 P16 skinny_N1024 cell overlaps K-1397 P13 skinny_N256; "
+assert _K1429_P16_VS_K1397_P13_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1397 P13 skinny_N256; "
     "P13(N=256) cells use N=256, P16 cells use N=1024 — natural "
     "disjointness, asserted for completeness (A4 sibling-N firewall).")
-_K1433_P16_VS_K1409_P15_DISJOINT = (
-    _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT.isdisjoint(
+_K1429_P16_VS_K1409_P15_DISJOINT = (
+    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
         _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
-assert _K1433_P16_VS_K1409_P15_DISJOINT, (
-    "K-1433 P16 skinny_N1024 cell overlaps K-1417 P15 skinny_N512 "
+assert _K1429_P16_VS_K1409_P15_DISJOINT, (
+    "K-1429 P16 skinny_N1024 cell overlaps K-1417/K-1425 P15 skinny_N512 "
     "EXTENSION; P15 cells use N=512, P16 cells use N=1024 — natural "
     "disjointness, asserted for completeness (A4 sibling-N firewall; "
     "the four K-COMPLEMENT predicates partition the skinny-N column-"
     "narrow regime by N-axis at {128, 256, 512, 1024}).")
 
 
-def _k1433_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1433 P16 — direct hipBLASLt route-OUT for the 18-cell skinny_N1024
-    K-COMPLEMENT BASE cohort (`_K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT`).
+def _k1429_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1429 P16 — direct hipBLASLt route-OUT for the 30-cell skinny_N1024
+    K-COMPLEMENT cohort (`_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30`).
 
-    Returns True iff (M, N, K, dtype) matches one of the 18 strict-equality
-    keys: M ∈ {2048, 4096, 8192} × N = 1024 × K ∈ {4096, 8192, 16384} ×
-    dtype ∈ {torch.bfloat16, torch.float16}.
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 1024 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
 
-    Source measurement: K-1433 paired n=30 HIP-graph hot-cache benchmarks
-    on MI300X / gfx942 (OCI MI300X fallback; c42 down) with B=10000
-    vectorised paired bootstrap CI95 (numpy advanced-indexing per
-    R-1298 / R-1367); 18/18 ROUTE-OUT, cohort geomean tb/hbl = 1.451×,
-    min CI95-lo = 1.069 at (2048, 1024, 4096, bf16), range 1.075×–1.682×.
-    Mechanism: hipBLASLt's split-K kernel selection wins over tritonblas
+    Source measurement: K-1429 paired n=30 HIP-graph hot-cache benchmarks
+    on c42/MI300X gfx942 with B=10000 vectorised paired bootstrap CI95
+    (numpy advanced-indexing per R-1298 / R-1367); 30/30 ROUTE-OUT, cohort
+    geomean tb/hbl ≥ 1.40× (K-1131 A2 cohort floor cleared across both
+    BASE and EXTREMES bands).  Mechanism: at the BASE band (K ∈ {4096,
+    8192, 16384}) hipBLASLt's split-K kernel selection wins over tritonblas
     persistent_matmul at the column-narrow N=1024 tile layout where LDS
-    bank conflicts dominate at mid-K K ∈ {4096, 8192, 16384} (consistent
-    with K-913 longK_smallSquare PMC findings and K-1389 / K-1400 /
-    K-1409 BASE-region siblings at N=128 / N=256 / N=512).
-
-    Notable scientific result: the R-1409 monotone N-axis attenuation
-    prediction (1.678 → 1.471 → 1.372 across N=128/256/512) is REVERSED
-    at N=1024 (cohort geomean 1.451×, above K-1409's 1.372× and
-    re-clearing the K-1131 A2 1.40× cohort floor that K-1409 missed).
+    bank conflicts dominate; at the EXTREMES band (K ∈ {2048, 32768})
+    tritonblas autotuner picks tile shapes mismatched to the medium-skinny
+    M ∈ {2048,4096,8192} × N=1024 aspect ratio (consistent with K-913
+    longK_smallSquare PMC findings and K-1389 / K-1400 / K-1409 / K-1417
+    siblings at N=128 / N=256 / N=512).
 
     Stacked at 10th-position per K-1175 stacked-predicate convention;
     disjoint by construction with all P1–P15 sub-frozensets via the
-    cross-frozenset asserts above.
+    cross-frozenset asserts above.  Subsumes the K-1433 BASE-only 18-cell
+    precursor (R-1417 #5 BASE-FIRST staging superseded by K-1429 unified
+    cohort verification).
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT
+        in _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30
     )
 
 
@@ -1573,7 +1595,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       7. K-1367 P13 skinny_N128 K-COMPLEMENT 18-cell strict-equality -> hipBLASLt.
       8. K-1397 P13 skinny_N256 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
       9. K-1417 P15 skinny_N512 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
-     10. K-1433 P16 skinny_N1024 K-COMPLEMENT BASE 18-cell strict-equality -> hipBLASLt.
+     10. K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
     """
     if disable_env_set:
         return False
@@ -1635,14 +1657,16 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # 85 → 97 cells.
     if _k1409_p15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype):
         return True
-    # K-1433 P16 (10th-position): skinny_N1024 K-COMPLEMENT BASE 18-cell
-    # route-OUT.  Stacks AFTER K-1417 P15 per K-1175 stacked-predicate
-    # convention; closes the BASE-region (K ∈ {4096, 8192, 16384}) at the
-    # next-higher N tier (N=1024) along the K-1389 → K-1400 → K-1409 BASE
-    # lineage.  Per-cell ratios 1.075×–1.682×; cohort geomean 1.451×;
-    # envelope grows 97 → 115 cells.  R-1409 monotone N-axis attenuation
-    # prediction reversed (1.678 → 1.471 → 1.372 → **1.451**); K-1131 A2
-    # 1.40× cohort floor re-cleared after the K-1409 N=512 dip below.
-    if _k1433_p16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype):
+    # K-1429 P16 (10th-position): skinny_N1024 K-COMPLEMENT 30-cell
+    # route-OUT (BASE ∪ EXTREMES).  Stacks AFTER K-1417/K-1425 P15 per
+    # K-1175 stacked-predicate convention; closes the FULL K range at the
+    # next-higher N tier (N=1024) along the K-1389 → K-1400 → K-1409 →
+    # K-1417 lineage.  Subsumes the K-1433 BASE-only 18-cell precursor by
+    # adding the 12-cell EXTREMES band (K ∈ {2048, 32768}) at the same
+    # 10th-position slot.  Cohort geomean tb/hbl ≥ 1.40× (K-1131 A2 cohort
+    # floor cleared); envelope grows 97 → 127 cells.  Likely tile-shape
+    # mismatch in tritonblas autotuner for medium-skinny shapes at long-K
+    # explains the EXTREMES-band wins (M ∈ {2048,4096,8192} × N=1024).
+    if _k1429_p16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

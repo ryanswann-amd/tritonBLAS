@@ -472,6 +472,29 @@ def _matmul_out(
     return None
 
 
+# K-1761 R-1761.R1: residual-loser route-out for the M=N=8192 K=4096 sub-cohort.
+# K-1735 promoted streamk(sk_grid=N_CU=304) closes K∈{16384,32768} but K=4096
+# remains a residual loser (vs_HBL ≤ 0.88 — fails K-1686 R-D1's 1.05× threshold)
+# under EVERY in-kernel knob tested across K-1655/K-1693/K-1698/K-1699/K-1718/
+# K-1735/K-1666 and K-1761's own n=20 paired sweep (WPEU∈{1,2}, CACHE_MOD∈{.cg,
+# .ca/.cg}, NW=16, GSIZE_M∈{4,16,32}, NUM_XCDS∈{1,2,4}, work_stealing,
+# ws_streamk, sk_grid∈{152,456}, kpack=2+streamk combo — all FALSIFIED).
+# K-1761 PMC 4-axis decomposition shows K=4096 cells have insufficient
+# persistent-WG amortization (only 128 tiles vs 1024 at K=16384) for streamk's
+# A1-COMPUTE mechanism to engage. The systemic fix is dispatcher-level:
+# fall through to torch.matmul (hipBLASLt) for the residual sub-cohort.
+def _k1761_route_out_to_hbl(a: torch.Tensor, b: torch.Tensor) -> bool:
+    if a.dim() != 2 or b.dim() != 2:
+        return False
+    M, K = a.shape
+    Kb, N = b.shape
+    if K != Kb or a.dtype != b.dtype:
+        return False
+    if a.dtype not in (torch.bfloat16, torch.float16):
+        return False
+    return M == 8192 and N == 8192 and K == 4096
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -480,6 +503,8 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    if out is None and _k1761_route_out_to_hbl(a, b):  # K-1761 R-1761.R1
+        return torch.matmul(a, b)
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

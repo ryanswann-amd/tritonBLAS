@@ -515,22 +515,17 @@ _K1205_EN3_ADMITS_8 = frozenset({
 # inversion debugging, PMC re-classifier work, ADR audits) so each
 # measurement campaign keeps its own named set with a runtime size +
 # pairwise-disjointness check.
-# K-1336 Population A regressor carve-IN (6 cells).  K-1311 paired n=30
-# (B=10000 bootstrap) on the productionised 4-pred stack found 6 cells
-# whose CI95 hi(delta_ratio) < 0 vs tb-main.  Per-predicate ablation
-# (K-1311 classify_regressors.py against P8 sub-frozensets, R_K1142_E1,
-# R_K979_P5, K971_ROUTE_TABLE, and K-1219 N=256) returned False on all
-# 6 cells for every predicate -- no admit owns the regression; the loss
-# is dispatch-wrapper overhead (~12-15us) charged to in-kernel cells.
-# Routing them OUT short-circuits the chain and lifts the ratio toward
-# the wrapper-overhead ceiling hbl_us / (hbl_us + ~30us).
+# K-1336 carve-IN (6 cells): K-1311 paired n=30 regressors with
+# CI95 hi(delta) < 0 vs tb-main; per-predicate ablation showed no
+# admit owns them -- mechanism is dispatch-wrapper overhead (~12-15us)
+# on the in-kernel path. Route OUT to short-circuit the chain.
 _K1336_REGRESSOR_CARVEIN_6 = frozenset({
-    (1024, 1024, 4096, "torch.bfloat16"),  # delta=-0.0099 CI95=[-0.0128,-0.0072]
-    (1024, 1024, 8192, "torch.bfloat16"),  # delta=-0.0067 CI95=[-0.0087,-0.0042]
-    (2048, 2048, 4096, "torch.bfloat16"),  # delta=-0.0098 CI95=[-0.0122,-0.0080]
-    (2048, 2048, 8192, "torch.bfloat16"),  # delta=-0.0122 CI95=[-0.0155,-0.0092]
-    (2048, 2048, 2048, "torch.bfloat16"),  # delta=-0.0090 CI95=[-0.0120,-0.0060]
-    (4096, 4096, 4096, "torch.bfloat16"),  # delta=-0.0110 CI95=[-0.0174,-0.0070]
+    (1024, 1024, 4096, "torch.bfloat16"),
+    (1024, 1024, 8192, "torch.bfloat16"),
+    (2048, 2048, 2048, "torch.bfloat16"),
+    (2048, 2048, 4096, "torch.bfloat16"),
+    (2048, 2048, 8192, "torch.bfloat16"),
+    (4096, 4096, 4096, "torch.bfloat16"),
 })
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
@@ -540,10 +535,7 @@ _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     | _K1336_REGRESSOR_CARVEIN_6
 )
 assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 42, (
-    "K-1336 / K-1231 / K-1205 P8 envelope must be exactly 42 cells (13 "
-    "K-1121 anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 "
-    "E_N3 N-axis admits + 6 K-1336 Population A regressor carve-INs); a "
-    "duplicate or overlap has crept in (size check enforces disjointness).")
+    "P8 envelope must be 42 (13+12+3+8+6); duplicate/overlap.")
 # Cross-check: the four sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all

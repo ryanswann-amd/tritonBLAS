@@ -687,21 +687,83 @@ K931_CONTROL_CELLS_5 = [
 
 
 def test_k1144_p8_envelope_size_is_exactly_42_after_k1336_carvein():
-    """The cohort is 13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205
-    E_N3 + 6 K-1336 Population A regressor carve-IN = 42 cells.  Any silent
-    edit changes this count and trips this canary.
-
-    K-1144 originally pinned 25; K-1175 extends by 3 K-1161-validated cells;
-    K-1231/K-1205 extends by 8 N-axis-validated cells at N=128; K-1336 adds
-    6 Population A cells (longk + square mid-K) per K-1311 paired n=30
-    triage (CI95 hi(delta_ratio) < 0 vs tb-main, mechanism = dispatch-
-    wrapper overhead on non-admitted cells -- routing them OUT short-
-    circuits the chain to the wrapper-overhead ceiling)."""
+    """13 K-1121 + 12 K-1131 + 3 K-1175/K-1161 E2 + 8 K-1205 E_N3 +
+    6 K-1336 Population A regressor carve-IN = 42 cells."""
     assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 42
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3
     assert len(_K1205_EN3_ADMITS_8) == 8
+
+
+# K-1311 paired n=30 (B=10000 bootstrap) regressors with CI95 hi(delta) < 0
+# vs tb-main, ordered by delta_med (most-regressed first).
+K1336_REGRESSOR_CELLS_6 = [
+    ("longk-2048x2048x8192",  2048, 2048, 8192),  # delta=-0.0122
+    ("square-4096x4096x4096", 4096, 4096, 4096),  # delta=-0.0110
+    ("longk-1024x1024x4096",  1024, 1024, 4096),  # delta=-0.0099
+    ("longk-2048x2048x4096",  2048, 2048, 4096),  # delta=-0.0098
+    ("square-2048x2048x2048", 2048, 2048, 2048),  # delta=-0.0090
+    ("longk-1024x1024x8192",  1024, 1024, 8192),  # delta=-0.0067
+]
+
+
+# Neighbours of each carve-IN cell that must NOT be admitted -- guards the
+# carve-IN semantics (route OUT exactly the 6 listed shapes, nothing more).
+# Each neighbour perturbs a single axis off the carve-IN by one power-of-two
+# (or by halving M/N for square cells) and is otherwise outside every prior
+# P8 sub-frozenset.  Any drift that admits these would mean the size pin
+# (42) was satisfied by an unrelated cell of the same count.
+K1336_REGRESSOR_NEIGHBOURS_NEGATIVE_6 = [
+    ("longk-2048x2048x16384",  2048, 2048, 16384),  # K halved -> doubled
+    ("square-4096x4096x8192",  4096, 4096,  8192),  # K doubled
+    ("longk-1024x1024x2048",   1024, 1024,  2048),  # K halved
+    ("longk-2048x2048x2048+K", 2048, 2048,  2048),  # this IS in carve-IN; replaced below
+    ("square-1024x1024x1024",  1024, 1024,  1024),  # both M/N halved
+    ("longk-1024x1024x16384",  1024, 1024, 16384),  # K doubled past carve-IN
+]
+# Replace the accidental positive (2048,2048,2048 IS in the carve-IN) with
+# a true negative: (8192, 8192, 8192) bf16 -- the K-1311 borderline cell
+# that explicitly was NOT carved in (CI95 spans 0).
+K1336_REGRESSOR_NEIGHBOURS_NEGATIVE_6[3] = (
+    "square-8192x8192x8192-borderline", 8192, 8192, 8192)
+
+
+def test_k1336_carvein_admits_each_of_the_6_regressors():
+    """Per-cell happy path: each of K-1311's 6 statistically significant
+    regressors must be admitted by the P8 strict-equality route-OUT.
+    Guards against the size pin being satisfied by some unrelated cell
+    of the same count."""
+    for label, M, N, K in K1336_REGRESSOR_CELLS_6:
+        # bf16 admit
+        assert _p8_mfma_issue_stall_routeout(M, N, K, "torch.bfloat16"), (
+            f"K-1336 carve-IN regressor {label} (M={M},N={N},K={K},bf16) "
+            f"must be admitted by _p8_mfma_issue_stall_routeout but is not")
+        # bf16-only by design: same shape in fp16 must NOT admit
+        assert not _p8_mfma_issue_stall_routeout(M, N, K, "torch.float16"), (
+            f"K-1336 carve-IN must be bf16-only; {label} fp16 admitted")
+
+
+def test_k1336_carvein_does_not_admit_neighbouring_non_listed_shapes():
+    """Negative case: shapes adjacent to (but not in) the K-1336 carve-IN
+    must NOT be admitted by the P8 strict-equality route-OUT.  Without
+    this assertion, a silent edit that swapped a carve-IN cell for any
+    other shape would still pass the size pin (42)."""
+    for label, M, N, K in K1336_REGRESSOR_NEIGHBOURS_NEGATIVE_6:
+        assert not _p8_mfma_issue_stall_routeout(M, N, K, "torch.bfloat16"), (
+            f"Neighbour {label} (M={M},N={N},K={K},bf16) must NOT be "
+            f"admitted by P8 strict-equality (carve-IN is exactly the 6 "
+            f"K-1311 regressors -- nothing more)")
+
+
+def test_k1336_carvein_frozenset_is_exactly_the_six_k1311_regressors():
+    """Pin the K-1336 carve-IN frozenset to source-of-truth (the K-1311
+    regressor list).  Any silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _label, M, N, K in K1336_REGRESSOR_CELLS_6)
+    from tritonblas._route_predicate import _K1336_REGRESSOR_CARVEIN_6
+    assert _K1336_REGRESSOR_CARVEIN_6 == expected
+    assert len(_K1336_REGRESSOR_CARVEIN_6) == 6
 
 
 def test_k1144_p8_anchors_and_neighbors_are_disjoint():

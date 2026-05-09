@@ -10,6 +10,7 @@ import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
 from .kernels.fp4_matmul import fp4_matmul
+from .lds_swizzle import pick_kpack
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
@@ -98,7 +99,11 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-1652: kpack policy is centralised in tritonblas.lds_swizzle.pick_kpack
+    # so future LDS-swizzle experiments must go through it (see module
+    # docstring for PMC evidence on the M=N=4096 cohort). The current policy
+    # returns the caller's default unchanged, preserving prior behavior.
+    kpack = pick_kpack(M, N, K, a.dtype, default=1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,7 +249,8 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    # K-1652: see persistent_matmul_lt for rationale.
+    kpack = pick_kpack(M, N, K, a.dtype, default=1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

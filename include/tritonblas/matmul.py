@@ -34,6 +34,9 @@ from ._route_predicate import (
     _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
     # K-1397 (S-002): P13 skinny_N256 K-COMPLEMENT 12-cell route-OUT (8th-position).
     _k1397_p13_skinny_n256_routeout as _R_K1397_P13_skinny_n256_routeout,
+    # K-1417 (S-002): P15 skinny_N512 K-COMPLEMENT EXTENSION 12-cell route-OUT
+    # (9th-position).
+    _k1409_p15_skinny_n512_routeout as _R_K1409_P15_skinny_n512_routeout,
 )
 
 
@@ -110,6 +113,22 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # envelope grows 73 → 85 cells.  Disjoint by construction with all P1–P13(N=128)
     # sub-frozensets via cross-frozenset asserts at module load.
     if _R_K1397_P13_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1417 (S-002): P15 skinny_N512 K-COMPLEMENT EXTENSION 12-cell route-OUT
+    # (9th-position envelope).  Stacks AFTER K-1397 P13 per K-1175 stacked-
+    # predicate convention; closes the third-N successive sibling of the
+    # K-COMPLEMENT EXTREMES axis (R-1417.SKINNY-N512-K-COMPLEMENT-EXTENSION-IS-EXTREMES)
+    # at N=512 / K ∈ {2048, 32768} where (a) at K=2048 tritonblas
+    # persistent_matmul tile parallelism is starved (TB ≈ 280 µs vs HBL ≈
+    # 19-50 µs) and (b) at K=32768 hipBLASLt's split-K kernel selection wins
+    # over tritonblas at the persistent N=512 tile layout where LDS bank
+    # conflicts dominate (consistent with K-913 longK_smallSquare PMC
+    # findings and K-1397 N=256 sibling).  K-1417 paired n=30 + B=10000
+    # vectorised bootstrap CI95 on MI300X gfx942 (OCI MI300X fallback):
+    # 12/12 ROUTE-OUT, cohort geomean tb/hbl = 3.43×, min CI95-lo = 1.359,
+    # range 1.36×–14.06×; envelope grows 85 → 97 cells.  Disjoint by
+    # construction with all P1–P14 sub-frozensets via cross-frozenset
+    # asserts at module load.
+    if _R_K1409_P15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

@@ -2251,6 +2251,25 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
          K971_ROUTE_TABLE union); anchors the R-1478 #1 N-axis
          attenuation chain head (full chain 1.451 → 1.234 → 1.220 →
          1.174 → 1.118).
+     18. K-1633 P27 skinny_N512 K-COMPLEMENT alias-stack 30-cell handle
+         — bit-identical to K-1552 P23 (re-verified post-P26); audit
+         handle only, no executable predicate (P23 fires at the 15th
+         slot so P27 is unreachable while P23 is enabled).
+     19. K-1673 P28 skinny_N128 K-COMPLEMENT alias-stack 30-cell
+         strict-equality -> hipBLASLt.  Closes the dtype-symmetry gap
+         left by K-1367 P13 (7th-slot, 18 cells, K ∈ {4096, 8192,
+         16384} only) by extending the N=128 K-COMPLEMENT cohort to
+         the K-EXTREMES K ∈ {2048, 32768} on the full M-grid {2048,
+         4096, 8192} × {bf16, fp16}.  K-1673 paired n=30 vs the live
+         post-K-1647 P27 oracle: 30/30 lose to hipBLASLt by ≥10%
+         (cohort geomean 1.694×, worst 2.890×).  6 NEW fp16 cells +
+         24 alias cells (15 bf16 alias-of-R-K979-P5 ∪ 18
+         K∈{4096,8192,16384} alias-of-K-1367-P13_N128).  Mechanism
+         (R-1673 dtype-invariance proof): K-913 §3 LDS-bank-conflict
+         fingerprint reproduces BIT-IDENTICALLY across dtypes — TB
+         BC_cpi ∈ [1.4545, 2.133] vs HBL = 0.000 exactly; the LDS
+         swizzle topology lives below the dtype lane mux so the
+         routing predicate must mirror across dtype.
     """
     if disable_env_set:
         return False
@@ -2413,6 +2432,37 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # (R-1532.N-LADDER-ATTENUATION-PREDICTS-NEXT-RUNG verified at the new
     # anchor).
     if _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
+            int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1673 P28 (19th-position): skinny_N128 K-COMPLEMENT alias-stack
+    # 30-cell route-OUT.  Stacks AFTER P26 (and the K-1633 P27 18th-slot
+    # alias of K-1552 P23, which is documentation-only).  Closes the
+    # dtype-symmetry gap left by K-1367 P13 (7th-slot, 18 cells, K ∈
+    # {4096, 8192, 16384} only) by extending the N=128 K-COMPLEMENT
+    # cohort to the K-EXTREMES K ∈ {2048, 32768} on the full M-grid
+    # {2048, 4096, 8192} × {bf16, fp16}.  K-1673 paired n=30 HIP-graph
+    # hot-cache vs the live post-K-1647 P27 oracle: 30/30 lose to
+    # hipBLASLt by ≥10% (cohort geomean 1.694×, worst 2.890× at
+    # (8192,128,2048,fp16)).  ALIAS-STACK structure: 6 NEW route-OUT
+    # cells (the fp16 mirror at K ∈ {2048, 32768}) + 24 alias cells
+    # (15 bf16 alias-of-R-K979-P5 ∪ 18 K∈{4096,8192,16384} alias-of-
+    # K-1367-P13_N128, intersection 9, union 24).  R-K979 P5 fires at
+    # the 4th-slot and K-1367 P13 fires at the 7th-slot, well before
+    # P28 — the 24 alias cells are documentation; the 6 NEW fp16 cells
+    # are the load-bearing portion.  Mechanism (K-1673 PMC RCA, 36
+    # rocprofv2 captures): K-913 §3 LDS-bank-conflict fingerprint
+    # reproduces bit-identically across dtypes (TB BC_cpi ∈ [1.4545,
+    # 2.133] vs HBL BC_cpi = 0.000 exactly; bf16 and fp16 rows at the
+    # same MNK emit BIT-IDENTICAL TB BC_cpi / LDS-inst-per-wave /
+    # cycles-per-wave to within 0.1%).  R-1673 dtype-invariance proof
+    # establishes that the LDS swizzle topology lives below the dtype
+    # lane mux, so the routing predicate must mirror across dtype.
+    # Why hipBLASLt wins on extreme skinny long-K (K-EXTREMES at
+    # N=128): split-K / stream-K kernel selection vs tritonblas
+    # persistent_matmul which is L2/VMEM bound at N ≤ 256 per K-1634
+    # / K-1629.  CONFIG-FIXABLE → false at the level of BLOCK_K / NS /
+    # WPEU / NW retunes.
+    if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
     # K-1553 17th-slot handle: no executable code — `_K1553_P25_SKINNY_
@@ -2896,3 +2946,268 @@ def _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
 _K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30 = (
     _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30
 )
+
+
+# ---------------------------------------------------------------------------
+# K-1673 (S-002) — P28 `skinny_N128` K-COMPLEMENT 30-cell alias-stack route-OUT
+# (19th-position, load-bearing for the 6-cell fp16 mirror sub-cohort).
+#
+# Productionizes the K-1673 verification of the N=128 K-COMPLEMENT envelope
+# (M ∈ {2048, 4096, 8192} × N=128 × K ∈ {2048, 4096, 8192, 16384, 32768} ×
+# {bf16, fp16}) as the next stacked frozenset, extending the K-1367 P13
+# (7th-slot, 18-cell) N=128 cohort along the K-EXTREMES axis K ∈ {2048,
+# 32768} that K-1367 left out (K-1367 covered only K ∈ {4096, 8192, 16384}
+# above the ~30 µs triton_op wrapper-overhead ceiling).
+#
+# Source measurement: K-1673 paired n=30 HIP-graph hot-cache benchmark on
+# MI300X / gfx942 (OCI useocpm2m-097-099 fallback per INFRA-0048 c42 SSH
+# refused) against the LIVE post-K-1647 P27 routing oracle on TB fork
+# branch fix/K-1647 HEAD `8d010c6`; engines: TB → tritonblas.matmul →
+# persistent_matmul; HBL → hipBLASLt direct (R-1629
+# HBL-IS-TORCH-MATMUL-NOT-DIRECT-HIPBLASLT-BASELINE-CAVEAT discharged).
+# 30/30 lose to hipBLASLt by ≥10% (cohort geomean 1.694×, worst 2.890× at
+# (8192, 128, 2048, fp16)); 24 cells already routed-OUT by P5 ⨄ P13 (the
+# load-bearing alias union); 6 fp16 mirror cells slip through every
+# existing predicate at the K-EXTREMES sub-band — these are the NEW
+# route-OUT contribution of P28.
+#
+# ALIAS-STACK structure (per K-1493 / K-1538 / K-1552 P23 / K-1611 P26
+# alias-stack convention): 24 alias cells + 6 NEW route-OUT cells = 30
+# admits.  Alias decomposition:
+#   * R-K979 P5 closed-form (M ≥ 2048 ∧ N ≤ 128 ∧ K ≥ 2048 carve-out)
+#     covers all 15 bf16 cells (R-K979 dtype-bf16 admit);
+#   * K-1367 P13 (7th-slot) `_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18`
+#     covers all 18 cells at K ∈ {4096, 8192, 16384} × {bf16, fp16}.
+#   * Union P5 ⨄ P13 = 24 cells (intersection 9 cells = bf16 K ∈
+#     {4096,8192,16384}).  Asserted at module load below.
+#   * NEW P28 contribution: 6 fp16 cells at K ∈ {2048, 32768} × M ∈
+#     {2048, 4096, 8192} that R-1673 identified as the dtype-symmetry
+#     gap in the construction of K-1367 P13's bf16-only K-EXTREMES omit
+#     (P13 was authored when only K ∈ {4096, 8192, 16384} was measured).
+#
+# Mechanism (K-1673 PMC RCA, 36 rocprofv2 captures across 6 cells × 2
+# engines × 3 passes): same K-913 §3 LDS-bank-conflict signature as
+# K-1338 / K-1540 / K-1629 — TB BC_cpi ∈ [1.4545, 2.133] vs HBL BC_cpi
+# = 0.000 exactly across all 6 cells; LDS-inst/wave inflation 2.41× at
+# (2048, 128, 32768).  R-1673 dtype-invariance proof: bf16 row 1 and
+# fp16 row 2 at the same MNK = (2048, 128, 32768) emit BIT-IDENTICAL TB
+# BC_cpi (1.4545), TB LDS-inst/wave (2816), and TB cycles/wave within
+# 0.1% (34024 vs 34074) — confirming the LDS swizzle topology lives
+# below the dtype lane mux.  Mechanism is dtype-invariant; therefore the
+# routing predicate must mirror across dtype.  Why hipBLASLt wins on
+# extreme skinny long-K (K-EXTREMES at N=128): split-K / stream-K
+# kernel selection vs tritonblas persistent_matmul which is L2/VMEM
+# bound at N ≤ 256 per K-1634 / K-1629.  CONFIG-FIXABLE → false at the
+# level of BLOCK_K / NS / WPEU / NW retunes (per K-913 / K-1338 / K-1629
+# config-knob anti-anchor sweep); fastest production path is the
+# route-OUT alias-stack productionization.
+#
+# Stacked at 19th-position per the K-1175 stacked-predicate convention
+# after K-1611 P26 (17th, N=2048) ⨄ K-1633 P27 (18th, N=512 alias of
+# K-1552 P23).  Extends the alias-stack chain to dtype-symmetric admit
+# sets per R-1673.ALIAS-STACK-MUST-EXTEND-DTYPE-SYMMETRICALLY-NOT-JUST-
+# K-AXIS-ENVELOPES.  Sibling-N firewall: P28 is N=128 only; disjoint
+# with every K-COMPLEMENT predecessor that targets N ∉ {128} by
+# construction.  Alias overlap with the only N=128 predecessor (K-1367
+# P13) is intentional and asserted at module load via
+# `_K1673_P28_VS_K1367_P13_ALIAS_OVERLAP`.
+# ---------------------------------------------------------------------------
+_K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30 = frozenset({
+    # M=2048 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 128,  2048, "torch.bfloat16"),    # alias P5 (bf16 closed-form)
+    (2048, 128,  2048, "torch.float16"),     # NEW   r=2.890 (worst-cohort)
+    (2048, 128,  4096, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (2048, 128,  4096, "torch.float16"),     # alias P13_N128
+    (2048, 128,  8192, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (2048, 128,  8192, "torch.float16"),     # alias P13_N128
+    (2048, 128, 16384, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (2048, 128, 16384, "torch.float16"),     # alias P13_N128
+    (2048, 128, 32768, "torch.bfloat16"),    # alias P5
+    (2048, 128, 32768, "torch.float16"),     # NEW   r=2.579 (BC_cpi=1.454)
+    # M=4096 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 128,  2048, "torch.bfloat16"),    # alias P5
+    (4096, 128,  2048, "torch.float16"),     # NEW   r=2.45 (PMC sibling)
+    (4096, 128,  4096, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (4096, 128,  4096, "torch.float16"),     # alias P13_N128
+    (4096, 128,  8192, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (4096, 128,  8192, "torch.float16"),     # alias P13_N128
+    (4096, 128, 16384, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (4096, 128, 16384, "torch.float16"),     # alias P13_N128
+    (4096, 128, 32768, "torch.bfloat16"),    # alias P5
+    (4096, 128, 32768, "torch.float16"),     # NEW   r=2.30 (PMC sibling)
+    # M=8192 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 128,  2048, "torch.bfloat16"),    # alias P5
+    (8192, 128,  2048, "torch.float16"),     # NEW   r=2.890 (worst overall)
+    (8192, 128,  4096, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (8192, 128,  4096, "torch.float16"),     # alias P13_N128
+    (8192, 128,  8192, "torch.bfloat16"),    # alias P5 ∩ P13_N128 (PMC: 1.502)
+    (8192, 128,  8192, "torch.float16"),     # alias P13_N128
+    (8192, 128, 16384, "torch.bfloat16"),    # alias P5 ∩ P13_N128
+    (8192, 128, 16384, "torch.float16"),     # alias P13_N128
+    (8192, 128, 32768, "torch.bfloat16"),    # alias P5
+    (8192, 128, 32768, "torch.float16"),     # NEW   r=2.40 (PMC sibling)
+})
+assert len(_K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30) == 30, (
+    "K-1673 P28 skinny_N128 K-COMPLEMENT alias-stack frozenset must be "
+    "exactly 30 cells (M ∈ {2048,4096,8192} × N=128 × K ∈ {2048,4096,8192,"
+    "16384,32768} × {bf16, fp16}); deviation indicates a typo against the "
+    "K-1673 paired n=30 admit set.")
+# Cross-frozenset disjointness — K-1673 P28 vs the prior 18-K-COMPLEMENT
+# stack.  P28 carries N=128 only; sibling-N firewall holds against every
+# K-COMPLEMENT predecessor that targets N ∉ {128}.  The only N=128
+# predecessor in the chain is K-1367 P13 (7th-slot, 18 cells); the
+# intentional alias overlap with P13 is documented separately via
+# `_K1673_P28_VS_K1367_P13_ALIAS_OVERLAP` and excluded from the
+# strict-disjointness loop below.  Data-driven assert loop (K-1532
+# minimalist refactor) collapses prior hand-written assert blocks.
+_K1673_P28_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P15 N=512 (K-1409)",                _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P17 N=512 BASE (K-1437)",           _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+    ("P23 N=512 alias (K-1552)",          _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30),
+    ("P24 N=4096 (K-1566)",               _K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30),
+    ("P26 N=2048 alias (K-1611)",         _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30),
+)
+for _sibling_name, _sibling_set in _K1673_P28_DISJOINT_SIBLINGS:
+    assert _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30.isdisjoint(_sibling_set), (
+        f"K-1673 P28 skinny_N128 (N=128) overlaps {_sibling_name}; "
+        "sibling-N firewall violated — every disjoint K-COMPLEMENT sibling "
+        "must use N ∉ {128} so the N=128 column is disjoint by construction. "
+        "Intentional alias overlap with K-1367 P13 (the only N=128 sibling) "
+        "is documented separately via `_K1673_P28_VS_K1367_P13_ALIAS_OVERLAP`.")
+del _sibling_name, _sibling_set
+# Explicit K-1367 P13 alias overlap: K-1367 P13 routes all 18 cells in
+# the K-1673 envelope at K ∈ {4096, 8192, 16384}; P13 fires BEFORE P28
+# in the dispatch chain (7th-slot vs 19th-slot) so the P28 membership
+# check on those 18 cells is unreachable while P13 remains enabled.  The
+# 18 alias cells are documentation; the load-bearing portion is the 6
+# NEW fp16 cells at K ∈ {2048, 32768}.
+_K1673_P28_VS_K1367_P13_ALIAS_OVERLAP = (
+    _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
+    & _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18
+)
+assert _K1673_P28_VS_K1367_P13_ALIAS_OVERLAP == frozenset({
+    (M, 128, K, dtype)
+    for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384)
+    for dtype in ("torch.bfloat16", "torch.float16")
+}), (
+    "K-1673 P28 vs K-1367 P13 alias overlap must be EXACTLY the 18 cells "
+    "(M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16, fp16}); "
+    "any deviation indicates either a P13 contraction (re-audit P28 "
+    "membership for the affected cells) or a P28 authoring typo against "
+    "the K-1673 admit set.")
+# Explicit R-K979 P5 closed-form alias overlap: P5 routes all 15 bf16
+# cells in the K-1673 envelope (M ∈ {2048,4096,8192} × N=128 ≤ 128 ∧
+# K ≥ 2048 satisfies the P5 admit predicate for dtype=bf16 on the
+# closed-form structural pathology Gate-0).  P5 fires at the 4th-slot,
+# well before P28 (19th).  The K1335 fp16 mirror is N/A (K1335 is
+# bf16-only and at N=2048, not N=128).  Asserted as a function-call
+# alias rather than a frozenset intersection because P5 is a closed-
+# form predicate rather than a strict-equality table — the assert is
+# performed at module load by enumerating the 15 bf16 cells and
+# checking R_K979_P5_route_to_hbl returns True for each.
+_K1673_P28_VS_R_K979_P5_BF16_ALIAS = frozenset({
+    (M, 128, K, "torch.bfloat16")
+    for M in (2048, 4096, 8192)
+    for K in (2048, 4096, 8192, 16384, 32768)
+})
+for _p28_p5_cell in _K1673_P28_VS_R_K979_P5_BF16_ALIAS:
+    _M_p5, _N_p5, _K_p5, _dtype_p5 = _p28_p5_cell
+    assert R_K979_P5_route_to_hbl(_M_p5, _N_p5, _K_p5, _dtype_p5), (
+        f"K-1673 P28 vs R-K979 P5 alias cell {_p28_p5_cell} not admitted by "
+        "R_K979_P5_route_to_hbl; either the P5 closed-form predicate "
+        "contracted or the K-1673 P28 alias-decomposition rationale is "
+        "stale — re-audit which cells P5 newly contributes vs the K-1673 "
+        "envelope.")
+del _p28_p5_cell, _M_p5, _N_p5, _K_p5, _dtype_p5
+# ALIAS-STACK invariant: every cell in the K-1673 admit set MUST either
+# (a) be covered by an upstream firing predicate (R-K979 P5 closed-form
+# for bf16 OR K-1367 P13 strict-equality for K ∈ {4096,8192,16384}) OR
+# (b) be NEW route-OUT contributed by P28.  The (b) cells (the 6 NEW
+# route-OUT fp16 cells) are the load-bearing portion; the (a) cells (24
+# alias cells) are documentation that is unreachable under normal
+# dispatch but freezes the K-1673 30-cell envelope under a single audit
+# handle.  Total: 6 NEW + 24 alias = 30 K-1673 admits.
+_K1673_P28_NEW_ROUTEOUT_6 = (
+    _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
+    - _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18
+    - _K1673_P28_VS_R_K979_P5_BF16_ALIAS
+)
+assert _K1673_P28_NEW_ROUTEOUT_6 == frozenset({
+    (M, 128, K, "torch.float16")
+    for M in (2048, 4096, 8192)
+    for K in (2048, 32768)
+}), (
+    "K-1673 P28 NEW route-OUT contribution must be exactly the 6 fp16 "
+    "cells at K ∈ {2048, 32768} × M ∈ {2048, 4096, 8192} (R-1673 "
+    "dtype-symmetry gap closed); any deviation indicates either an "
+    "upstream contraction (re-audit which cells P28 newly contributes) "
+    "or a P28 authoring typo against the K-1673 admit set.")
+assert len(_K1673_P28_NEW_ROUTEOUT_6) == 6, (
+    "K-1673 P28 NEW route-OUT contribution must be exactly 6 cells "
+    "(30 admits − 18 P13_N128 alias − 15 P5 bf16 alias + 9 P5∩P13 "
+    "double-counted = 6 NEW); any deviation indicates either an upstream "
+    "contraction or a P28 authoring typo.")
+
+
+def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
+    M: int, N: int, K: int, dtype) -> bool:
+    """K-1673 P28 — direct hipBLASLt route-OUT for the K-1673-verified
+    30-cell skinny_N128 K-COMPLEMENT cohort
+    (`_K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 128 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1673 paired n=30 HIP-graph hot-cache benchmark
+    on MI300X / gfx942 (OCI useocpm2m-097-099 fallback per INFRA-0048
+    c42 SSH refused) against the LIVE post-K-1647 P27 routing oracle on
+    TB fork branch fix/K-1647 HEAD `8d010c6`; engines: TB →
+    tritonblas.matmul → persistent_matmul; HBL → hipBLASLt direct.
+    30/30 lose to hipBLASLt by ≥10% (cohort geomean 1.694×, worst 2.890×
+    at (8192, 128, 2048, fp16)); 24 cells already routed-OUT by P5 ⨄
+    P13_N128; 6 fp16 mirror cells slip through every existing predicate
+    at the K-EXTREMES sub-band — the load-bearing P28 contribution.
+
+    ALIAS-STACK structure: 6 NEW cells (the fp16 mirror at K ∈ {2048,
+    32768} that R-K979 P5 + K-1367 P13_N128 do not cover) + 24 alias
+    cells (15 bf16 alias-of-P5 + 18 K∈{4096,8192,16384} alias-of-P13
+    with 9 cell P5∩P13 intersection = 24 union).  Alias overlaps fire
+    BEFORE P28 in the dispatch chain (P5 at 4th-slot, P13 at 7th-slot)
+    so the 24 alias cells are documentation; the 6 NEW cells are the
+    load-bearing portion.
+
+    Mechanism: K-1673 PMC RCA reproduces the K-913 §3 LDS-bank-conflict
+    fingerprint bit-identically across dtypes — TB BC_cpi ∈ [1.4545,
+    2.133] vs HBL BC_cpi = 0.000 exactly across all 6 PMC cells;
+    LDS-inst/wave inflation 2.41× at (2048, 128, 32768).  R-1673
+    dtype-invariance proof: bf16 row 1 and fp16 row 2 at the same MNK
+    emit BIT-IDENTICAL TB BC_cpi (1.4545), TB LDS-inst/wave (2816), and
+    TB cycles/wave within 0.1% — the LDS swizzle topology lives below
+    the dtype lane mux so the routing predicate must mirror across
+    dtype.  Why hipBLASLt wins: split-K / stream-K kernel selection vs
+    tritonblas persistent_matmul which is L2/VMEM bound at N ≤ 256 per
+    K-1634 / K-1629.  CONFIG-FIXABLE → false at the level of BLOCK_K /
+    NS / WPEU / NW retunes.
+
+    Stacked at 19th-position per the K-1175 stacked-predicate convention
+    after K-1611 P26 (17th, N=2048) ⨄ K-1633 P27 (18th, N=512 alias of
+    K-1552 P23); extends the alias-stack chain to dtype-symmetric admit
+    sets per R-1673.ALIAS-STACK-MUST-EXTEND-DTYPE-SYMMETRICALLY-NOT-
+    JUST-K-AXIS-ENVELOPES.  Sibling-N firewall: every other K-COMPLEMENT
+    sibling targets N ∉ {128}; intentional alias overlap with K-1367
+    P13 (the only N=128 predecessor) is documented separately via
+    `_K1673_P28_VS_K1367_P13_ALIAS_OVERLAP`.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
+    )

@@ -3239,3 +3239,24 @@ _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 = frozenset(
 )
 # Cardinality (==34) gated by tests/test_k1748_p30_skinny_nmid_alias_stack.py per
 # the minimalist split: src holds data, tests hold invariants (R-1532 / R-1720).
+
+
+# P31 (22nd-slot): ultra-skinny N ∈ {32, 48, 80} fp16 K-COMPLEMENT
+# route-OUT, 36 cells = 3 N × 4 M × 3 K (M ∈ {1024,2048,4096,8192},
+# K ∈ {2048,8192,32768}, dtype=fp16 only).  Audit: paired n=30 HIP-graph
+# hot-cache on MI300X / gfx942 found 36/36 fp16 cells flagged at the
+# strict 1.05× admit gate (cohort fp16 geomean 2.965×, range 1.074×-26.040×).
+# bf16 NOT included because all 48 cohort bf16 cells are already routed-OUT
+# by the R-K979 P5 Clause-3 envelope upstream in the dispatch chain
+# (measured bf16 geomean 1.000× ≡ identity in the same sweep).  N=96
+# audited as adjacency boundary: 10/12 fp16 flagged (83.3%, below 95%
+# gate) → ENVELOPE_COVERS verdict, deliberately excluded.  Sibling-N
+# disjoint vs P29 (N=64) and P30 (N ∈ {384,768,1536}) by N-axis projection.
+_K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36 = frozenset(
+    (M, N, K, "torch.float16")
+    for N in (32, 48, 80)
+    for M in (1024, 2048, 4096, 8192)
+    for K in (2048, 8192, 32768)
+)
+# Cardinality (==36) gated by tests/test_k1753_p31_skinny_n32_n48_n80_fp16_kcompl_routeout.py
+# per the K-1748 minimalist split: src holds data, tests hold invariants.

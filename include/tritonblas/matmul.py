@@ -111,6 +111,10 @@ from ._route_predicate import (
     # K-1748 P30 (21st-slot): skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT
     # alias-stack — 34 K-1711 admit cells (closes 0/34 live-oracle gap).
     _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
+    # K-1753 P31 (22nd-slot): ultra-skinny N ∈ {32, 48, 80} fp16 K-COMPLEMENT
+    # route-OUT — 36 fp16-only admit cells (cohort fp16 geomean 2.965×; bf16
+    # already covered by R-K979 P5 Clause-3 upstream in the dispatch chain).
+    _K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36,
 )
 
 
@@ -369,6 +373,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # post-K-1709 oracle had 0/34 cells active; K-1720 (parallel branch off K-1685) never
     # merged into K-1709 lineage.  Ship at 21st slot per K-1709/K-1720 disjoint-N rationale.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34: return True
+    # K-1753 P31 (22nd-slot): ultra-skinny N ∈ {32, 48, 80} fp16 K-COMPLEMENT route-OUT
+    # (36 fp16-only cells; cohort fp16 geomean 2.965×, range 1.074×-26.040×).  Adjacency
+    # boundary N=96 deliberately excluded (10/12 fp16 flagged = 83.3%, below 95% gate).
+    # bf16 cells are already routed-OUT upstream by R-K979 P5 Clause-3, so this slot is
+    # fp16-only — first such instance in the alias-stack chain.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1753_P31_SKINNY_N32_N48_N80_FP16_KCOMPL_ROUTEOUT_36: return True
     return False
 
 

@@ -3423,3 +3423,70 @@ _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset({
 })
 # Cardinality (==17) gated by tests/test_p36_skinny_n320_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 18 cells from
+# K-1853's N=352 sub-cohort = M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}.  Per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST audit, no
+# upstream alias-stack slot covers any N=352 cell (N-axis disjoint from every
+# prior K-COMPLEMENT slot); all 18 cells are net-new route-OUT entries.
+#
+# K-1853 paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep
+# (LDS / VALU·MFMA / VMEM·L2; 108 cell-engine-pass datapoints) on MI300X /
+# gfx942 (OCI MI300X fallback per INFRA-0048): bf16 N=352 unrouted 9/9 and
+# fp16 N=352 unrouted 9/9 in the pre-stack measurement against the
+# P32+P33+P34+P35 LIVE oracle.  All 18 cells gate-pass at the strict
+# ratio_TB/HBL ≥ 1.05 ∧ scipy.stats.ttest_rel p < 0.05 floor; per-cell
+# ratios span 1.066×–1.481× (median ≈ 1.190×), per-N geomean = 1.243×;
+# per-cell paired-CI lo ranges 1.0589–1.4699 (every CI lo strictly > 1.05).
+#
+# Mechanism (K-913 §3 LDS-bank-conflict, dtype-invariant per R-K1673 +
+# R-1811 wave-misalignment): BLOCK_N=128 packs N=352 into wave-misaligned
+# K-block columns (off-by-96 N rung above N=256, 352 mod 128 = 96 — two
+# full BLOCK_N tiles plus a 96-wide remainder per N-row); K-1853 PMC delta
+# ranking confirms LDS_DOMINANT in 18/18 cells with SQ_LDS_BANK_CONFLICT
+# TB/HBL median 336× (per-cell range 76×–1920×) and SQ_WAIT_INST_LDS
+# median 10.3×, while SQ_INSTS_MFMA TB/HBL = 0.99× (identical arithmetic
+# work — TB just stalls ~2× longer waiting on LDS, with TB MFMA-busy
+# fraction ~9.4% vs HBL ~17.7%).  Same SCHEDULER_LDS A4 failure mode as
+# the K-1681 / K-1710 / K-1781 / K-1812 / K-1824 / K-1832 / K-1843
+# wave-misaligned skinny-N class.  N=352 is pathologically worse than
+# N=320 for tritonblas's persistent_matmul LDS swizzle: SQ_LDS_BANK_CONFLICT
+# shows TB/HBL ratios in ALL 18 cells (vs only 6/18 for K-1846 N=320).
+# hipBLASLt's split-K kernel selection clears the band by ~24% on average
+# (geomean 1.243× over pre-stack TB-native per K-1853).
+#
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536}), K-1775 P31 (N=256), K-1810 P32 (N=160),
+# K-1817 P33 (N=224), K-1831 P34 (N=96), K-1837 P35 (N=288), K-1850 P36
+# (N=320) — now applied to N=352 (the off-by-96 wave-misaligned rung
+# completing the wave-misaligned skinny-N N ∈ {96, 160, 224, 288, 320, 352}
+# ladder around the N=256 P31 cliff and below the N=384 P30 rung).
+#
+# Sibling-N firewall: N=352 is disjoint from every prior slot's N-axis
+# projection (P5, P13, P21, P28-P36) — natural N-axis separator, asserted
+# at module load by tests/test_p37_skinny_n352_alias_stack.py.
+_P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18 = frozenset({
+    # M=2048 (full bf16 + fp16 grid, no upstream alias overlap)
+    (2048, 352,  4096, "torch.bfloat16"),  # r=1.159 ci_lo=1.147 p<1e-6
+    (2048, 352,  8192, "torch.bfloat16"),  # r=1.213 ci_lo=1.201 p<1e-6
+    (2048, 352, 16384, "torch.bfloat16"),  # r=1.448 ci_lo=1.436 p<1e-6
+    (2048, 352,  4096, "torch.float16"),   # r=1.154 ci_lo=1.143 p<1e-6
+    (2048, 352,  8192, "torch.float16"),   # r=1.198 ci_lo=1.204 p<1e-6
+    (2048, 352, 16384, "torch.float16"),   # r=1.481 ci_lo=1.470 p<1e-6  WORST
+    # M=4096 (full bf16 + fp16 grid, no upstream alias overlap)
+    (4096, 352,  4096, "torch.bfloat16"),  # r=1.161 ci_lo=1.148 p<1e-6
+    (4096, 352,  8192, "torch.bfloat16"),  # r=1.238 ci_lo=1.217 p<1e-6
+    (4096, 352, 16384, "torch.bfloat16"),  # r=1.450 ci_lo=1.423 p<1e-6
+    (4096, 352,  4096, "torch.float16"),   # r=1.187 ci_lo=1.172 p<1e-6
+    (4096, 352,  8192, "torch.float16"),   # r=1.183 ci_lo=1.177 p<1e-6
+    (4096, 352, 16384, "torch.float16"),   # r=1.454 ci_lo=1.437 p<1e-6
+    # M=8192 (full bf16 + fp16 grid, no upstream alias overlap)
+    (8192, 352,  4096, "torch.bfloat16"),  # r=1.082 ci_lo=1.073 p<1e-6
+    (8192, 352,  8192, "torch.bfloat16"),  # r=1.176 ci_lo=1.171 p<1e-6
+    (8192, 352, 16384, "torch.bfloat16"),  # r=1.350 ci_lo=1.288 p<1e-6
+    (8192, 352,  4096, "torch.float16"),   # r=1.066 ci_lo=1.059 p<1e-6  TIGHTEST
+    (8192, 352,  8192, "torch.float16"),   # r=1.163 ci_lo=1.165 p<1e-6
+    (8192, 352, 16384, "torch.float16"),   # r=1.323 ci_lo=1.307 p<1e-6
+})
+# Cardinality (==18) gated by tests/test_p37_skinny_n352_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

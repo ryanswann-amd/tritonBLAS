@@ -145,6 +145,13 @@ from ._route_predicate import (
     # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
     # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
     _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
+    # K-1853 / K-1868 (S-002): N=352 K-COMPLEMENT verified-winner subset — 28th
+    # alias-stack slot.  18 cells: M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,
+    # 8192,16384} × {bf16,fp16}.  No upstream alias overlap (N-axis disjoint
+    # from every prior K-COMPLEMENT slot per R-K1825 audit).  All 18 cells
+    # gate-pass at strict ratio_TB/HBL≥1.05 ∧ p<0.05; per-N geomean=1.243×
+    # (range 1.066×–1.481×, paired-CI lo strictly > 1.05 in all 18 cells).
+    _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -469,6 +476,28 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
     # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
     if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
+    # P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 18 cells
+    # from K-1853's N=352 sub-cohort (M ∈ {2048,4096,8192} × N=352 × K ∈
+    # {4096,8192,16384} × {bf16,fp16}).  Per R-K1825 audit, no upstream alias
+    # covers N=352 — all 18 cells are net-new route-OUT entries.  K-1853
+    # paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep (108
+    # cell-engine-pass datapoints) on MI300X / gfx942 vs the P32+P33+P34+P35
+    # LIVE oracle: 18/18 cells admitted at the strict ≥1.05× ∧ p<0.05 gate;
+    # per-cell ratios 1.066×–1.481× (median ≈ 1.190×), per-N geomean = 1.243×.
+    # Both dtype rows are fully load-bearing (9/9 bf16 + 9/9 fp16 — closes
+    # the wave-misaligned N=352 dtype-mirror).  Mechanism: BLOCK_N=128 packs
+    # N=352 into wave-misaligned K-block columns (off-by-96 N rung above
+    # N=256, 352 mod 128 = 96 — two full BLOCK_N tiles plus a 96-wide
+    # remainder per N-row → K-913 §3 LDS-bank-conflict + R-1811 wave-
+    # misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
+    # histogram: LDS_DOMINANT 18/18 with SQ_LDS_BANK_CONFLICT TB/HBL median
+    # 336× (range 76×–1920×) and SQ_WAIT_INST_LDS median 10.3×; identical
+    # SQ_INSTS_MFMA TB/HBL = 0.99× (TB does the same arithmetic, just
+    # stalls ~2× longer waiting on LDS).  Same SCHEDULER_LDS A4 failure
+    # mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832/K-1843; N=352 is
+    # pathologically worse than N=320 (SQ_LDS_BANK_CONFLICT TB/HBL ratio
+    # in 18/18 N=352 cells vs only 6/18 for the K-1846 N=320 column).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

@@ -871,6 +871,15 @@ def test_k1190_k931_controls_have_identical_routing_pre_vs_post(cid, M, N, K):
     saved_envelope = _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT
     try:
         # ---- POST (production code as-shipped) ----
+        # Sanity-check the production envelope BEFORE invoking the predicate.
+        # If the import-time POST envelope ever drifts from 28, this test
+        # must fail loudly rather than silently exercise the wrong arm.
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
+            f"POST envelope size drifted from 28: "
+            f"got {len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT)}")
+        assert len(_rp._K1161_E2_ADMITS_3) == 3, (
+            f"POST K1161_E2_ADMITS_3 size drifted from 3: "
+            f"got {len(_rp._K1161_E2_ADMITS_3)}")
         post_p8 = _rp._p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16)
         post_dispatch = _k971_route_to_hbl(
             M, N, K, torch.bfloat16, torch.bfloat16,
@@ -927,6 +936,11 @@ def test_k1190_k1175_admits_have_identical_dispatch_pre_vs_post():
     saved_admits = _rp._K1161_E2_ADMITS_3
     saved_envelope = _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT
     try:
+        # POST envelope sanity BEFORE invoking the predicate -- if this
+        # drifts the test must fail loudly instead of silently passing.
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
+            f"POST envelope size drifted from 28: "
+            f"got {len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT)}")
         post_decisions = []
         for _cid, M, N, K in K1161_E2_ADMITS_3_LIST:
             post_decisions.append(_k971_route_to_hbl(
@@ -936,6 +950,11 @@ def test_k1190_k1175_admits_have_identical_dispatch_pre_vs_post():
         _rp._K1161_E2_ADMITS_3 = frozenset()
         _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = (
             _rp._K1121_P8_ANCHORS_13 | _rp._K1131_P8_NEIGHBORS_12)
+        # PRE envelope sanity BEFORE invoking the predicate -- catches
+        # silent typos in the hermetic K-1144 simulation.
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 25, (
+            f"PRE envelope size drifted from 25 (K-1144 baseline): "
+            f"got {len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT)}")
         pre_decisions = []
         for _cid, M, N, K in K1161_E2_ADMITS_3_LIST:
             pre_decisions.append(_k971_route_to_hbl(
@@ -944,6 +963,7 @@ def test_k1190_k1175_admits_have_identical_dispatch_pre_vs_post():
     finally:
         _rp._K1161_E2_ADMITS_3 = saved_admits
         _rp._P8_MFMA_ISSUE_STALL_ROUTEOUT = saved_envelope
+        assert len(_rp._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
 
     # All True under both arms (PRE via P5/P6 composition; POST via
     # P8 strict-equality match plus the same upstream composition).

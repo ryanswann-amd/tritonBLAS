@@ -25,6 +25,7 @@ import torch
 from tritonblas._route_predicate import (
     _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4,
     _K1563_P24_SKINNY_N4096_KCOMPL_ALIASSTACK_30,
+    _k1361_p12_square_mid_routeout,
     _k1563_p24_skinny_n4096_kcompl_aliasstack_routeout,
     k971_route_decision,
 )
@@ -76,6 +77,39 @@ def test_p24_admit_cell_routes_via_predicate_and_full_dispatch(cell):
         M, N, K, a_dtype=a, b_dtype=a,
         enable_streamk=False, work_stealing=False,
     ) is True
+
+
+# ---------------------------------------------------------------------------
+# (b.1) PARTIAL-ALIAS CONTRACT regression guard (Testing Zealot R-1563
+#       feedback): the 2 (4096,4096,4096,{bf16,fp16}) overlap cells MUST
+#       be routed by K-1361 P12 SQUARE_MID *independently* of P24.  This
+#       is the load-bearing assertion behind the K950_ANCHOR_COLLISIONS
+#       L05 allowlist entry and behind the partial-alias invariant
+#       comment in `_route_predicate.py` ("load-bearing only if P12 is
+#       ablated").  Without this guard a future P12 contraction could
+#       silently demote the documented overlap into a P24-only admit
+#       without any test catching it; the invariant assert at module
+#       load would still pass (it's a set-algebra subset check on
+#       authored frozensets, not a runtime predicate check), so we
+#       need a dedicated runtime probe here.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cell", sorted(_P24_P12_OVERLAP))
+def test_p24_p12_overlap_cells_routed_by_p12_independently(cell):
+    """Each of the 2 documented overlap cells must:
+      (i) be in the authored P12 frozenset (set-algebra subset);
+      (ii) return True from `_k1361_p12_square_mid_routeout` directly
+           (runtime predicate, P24-independent — P12's own predicate
+           is the 6th-position dispatch entry that fires before the
+           16th-position P24 entry under `k971_route_decision`).
+    A future P12 refactor that drops these cells will fail (ii) here
+    even if the K-1563 partial-alias invariant assert is left intact.
+    """
+    M, N, K, dtype = cell
+    a = _DTYPE_OBJ[dtype]
+    # (i) authored set membership (P12-side, not P24-side).
+    assert (M, N, K, dtype) in _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4
+    # (ii) P12 runtime predicate fires (independent of P24).
+    assert _k1361_p12_square_mid_routeout(M, N, K, a) is True
 
 
 # ---------------------------------------------------------------------------

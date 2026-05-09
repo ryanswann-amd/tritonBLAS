@@ -98,12 +98,23 @@ K950_ANCHOR_COLLISIONS = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # L07 — K-905 anchor table
     (1024, 1024, 16384, "torch.float16"),   # L09 — K-905 anchor table
     (2048, 2048, 16384, "torch.float16"),   # L06 — K-905 anchor table
-    # K-1361 P12 SQUARE_MID (6th-position) measurement override: PMC-driven
-    # PMC_SQUARE_MID cohort routes (4096,4096,4096,bf16) — the same shape
-    # K-950 marks as harness-guarded LAND.  K-1361 measurement supersedes
-    # K-950 here; this allowlist entry was retroactively added when K-1563
-    # made the 2-cell P12 overlap load-bearing through the new partial-alias
-    # invariant assert in `_route_predicate.py`.
+    # K-1361 P12 SQUARE_MID (6th-position) measurement override: the
+    # K-1295 PMC-driven SQUARE_MID cohort frozenset literally contains
+    # (4096,4096,4096,"torch.bfloat16") at row S2 (see line 887 of
+    # `_route_predicate.py`).  At runtime `_k1361_p12_square_mid_routeout`
+    # returns True for this cell from the 6th-position dispatch entry of
+    # `k971_route_decision`, so `_k971_route_to_hbl` returns True before
+    # ever reaching the K-950 LAND check — this allowlist entry simply
+    # records the existing routing rather than relaxing any assertion.
+    # The runtime evidence is pinned independently in
+    # `tests/test_k1563_p24_skinny_n4096_alias_stack.py::
+    # test_p24_p12_overlap_cells_routed_by_p12_independently[bf16]`,
+    # which asserts P12-direct routing of this cell (Testing-Zealot
+    # regression guard against silent P12 contraction; if that test
+    # ever turns red, this allowlist entry must be removed in lockstep).
+    # K-1563 simply made the 2-cell P12 overlap load-bearing for the
+    # alias-stack invariant assert in `_route_predicate.py`; it did
+    # not introduce the L05 routing.
     (4096, 4096,  4096, "torch.bfloat16"),  # L05 — K-1361 P12 SQUARE_MID
     # K-1563 P24 (16th-position) measurement override: K-1553 paired n=30
     # HIP-graph hot-cache MI300X gfx942 measured (4096,4096,8192,bf16) at

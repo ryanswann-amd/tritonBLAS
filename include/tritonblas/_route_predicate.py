@@ -3237,4 +3237,5 @@ _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 = frozenset(
         (2048,1536,32768),(4096,1536,2048),(4096,1536,8192),(4096,1536,32768),(8192,1536,32768),
     ) for dt in ("torch.bfloat16", "torch.float16")
 )
-assert len(_K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34) == 34
+# Cardinality (==34) gated by tests/test_k1748_p30_skinny_nmid_alias_stack.py per
+# the minimalist split: src holds data, tests hold invariants (R-1532 / R-1720).

@@ -14,7 +14,13 @@ the R-1532 / R-1720 minimalist-admit-set rule):
   3. Sibling-N firewall vs P29 (N=64): zero overlap.
   4. K-only members ∈ {2048, 8192, 32768}; M-only members ∈ {2048, 4096, 8192};
      dtype set is exactly {torch.bfloat16, torch.float16}.
-  5. Module-load assertion in `_route_predicate` is intact.
+  5. Per-shape dtype-mirror (bf16 ↔ fp16 admit sets coincide).
+
+The cardinality invariant lives in this file rather than as an import-time
+`assert` in `_route_predicate.py` per the minimalist split: source holds
+data, tests hold structural invariants (R-1532 / R-1720).  Dropping the
+runtime assert saves the cost on every `tritonblas` import without
+weakening the gate — `test_cardinality_is_34` below catches duplicates.
 """
 from __future__ import annotations
 

@@ -21,6 +21,7 @@ the actual shipped dispatch helper (`matmul._k971_route_to_hbl`) so the
 """
 from __future__ import annotations
 
+import os
 import pytest
 import torch
 
@@ -36,7 +37,12 @@ from tritonblas._route_predicate import (
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
     _K1161_E2_ADMITS_3,
+    _K1205_EN3_ADMITS_3,
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28,
+    _k1205_n_ext_enabled,
 )
+import importlib as _importlib
+import tritonblas._route_predicate as _rp_mod
 from tritonblas.matmul import _k971_route_to_hbl
 
 
@@ -1083,3 +1089,314 @@ def test_k1144_p8_does_not_match_perturbations_outside_envelope():
     # M=4479 / M=4481 not in envelope.
     assert _p8_mfma_issue_stall_routeout(4479, 3072, 768, torch.bfloat16) is False
     assert _p8_mfma_issue_stall_routeout(4481, 3072, 768, torch.bfloat16) is False
+
+
+# ---------------------------------------------------------------------------
+# K-1220 — K-1205 N-axis P8 extension feature-flag pin tests.
+#
+# K-1205 produced a paired n=30 HIP-graph hot-cache validation of 9 N=128
+# candidates (mirrors of K-1121 anchors at K in {256, 768, 1024}, bf16) on
+# rad-mi300x-1 against the K-1205-era ROCm stack -- 8/9 = 88.9% admit at the route-OUT-safe
+# gate (hbl/tb >= 1.05x AND CI95-lo > 1.00).
+#
+# **K-1220 SHRUNK SET.**  K-1220's revalidation backtest on rad-mi300x-
+# splinter1 against a newer ROCm point-release (c42 SSH plane refused for the 7th
+# recurrence per K-1199; radha SSH had connection issues so we fell back
+# to splinter1) only reproduced 3/8 = 37.5% of the K-1205 admits.  Per
+# **Pragmatist** + **Skeptic** review feedback we ship ONLY the 3
+# cells whose K-1205 admit verdict survives the new measurement
+# environment, not the full 8-cell K-1205 candidate set.
+#
+# Default (flag OFF) MUST preserve the K-1175 28-cell envelope unchanged
+# -- this is a safety contract for downstream consumers who have not
+# validated cross-arch portability (per K-1176's 0/8 cross-arch failure
+# precedent on the analogous K-axis cohort).
+# ---------------------------------------------------------------------------
+K1205_EN3_ADMITS_3_LIST = [
+    # (cid,           M,     N,    K)  K-1205 admits that *also* reproduced
+    #                                   route-OUT-safe in K-1220 paired n=30
+    #                                   revalidation on splinter1 / newer ROCm.
+    ("EN_K1024_S30", 16256,  128, 1024),  # K-1205 hbl/tb=3.024x; K-1220 hbl/tb=8.499x route-OUT-safe
+    ("EN_K256_S37",  25600,  128,  256),  # K-1205 hbl/tb=1.144x; K-1220 hbl/tb=1.065x route-OUT-safe (cohort MIN admit)
+    ("EN_K768_S18",   5972,  128,  768),  # K-1205 hbl/tb=1.227x; K-1220 hbl/tb=1.924x route-OUT-safe
+]
+
+
+# K-1205 cells that did NOT reproduce route-OUT-safe in K-1220 revalidation
+# (5 cells), plus the 1 K-1205 cell that originally measured route-IN-safe
+# (TB strictly faster). All MUST NOT fire P8 even when the K-1205 extension
+# flag is ON -- otherwise we'd route cells where Triton wins (or where the
+# verdict failed to reproduce on the target stack) to the slower hipBLASLt
+# kernel.
+K1205_EN3_REJECTED_6_LIST = [
+    # (cid,           M,    N,    K, reason)
+    ("EN_K1024_S25",  6016, 128, 1024, "k1220-revalidation-route-in-safe"),
+    ("EN_K1024_S26",  8064, 128, 1024, "k1220-revalidation-route-in-safe"),
+    ("EN_K1024_S29", 14208, 128, 1024, "k1220-revalidation-route-in-safe"),
+    ("EN_K1024_S33", 22400, 128, 1024, "k1220-revalidation-route-in-safe"),
+    ("EN_K256_S39",  49152, 128,  256, "k1220-revalidation-route-in-safe"),
+    ("EN_K768_S24",   4480, 128,  768, "k1205-original-route-in-safe (TB +3% faster)"),
+]
+
+
+def test_k1205_en3_admits_envelope_size_is_exactly_3():
+    """K-1205 admitted 8 cells on rad-mi300x-1 (K-1205-era ROCm); K-1220
+    revalidation on splinter1 (newer ROCm point-release) reproduced exactly
+    3 of those at route-OUT-safe.
+    Production envelope ships only the 3 reproducing cells."""
+    assert len(_K1205_EN3_ADMITS_3) == 3
+
+
+def test_k1205_en3_admits_disjoint_from_k1121_k1131_k1161():
+    """K-1205 candidate generator uses N=128 by construction; no prior P8
+    cell has N < 896, so disjointness is structurally guaranteed."""
+    assert _K1205_EN3_ADMITS_3.isdisjoint(_K1121_P8_ANCHORS_13)
+    assert _K1205_EN3_ADMITS_3.isdisjoint(_K1131_P8_NEIGHBORS_12)
+    assert _K1205_EN3_ADMITS_3.isdisjoint(_K1161_E2_ADMITS_3)
+
+
+def test_k1205_en3_admits_pinned_to_k1220_revalidation_manifest():
+    """Pin the 3-cell E_N3 admit envelope to source-of-truth (the K-1220
+    paired n=30 revalidation manifest at workspace K-1220/output/
+    k1220_per_cell.csv).  A silent edit to either constant trips here."""
+    expected = frozenset(
+        (M, N, K, "torch.bfloat16") for _cid, M, N, K in K1205_EN3_ADMITS_3_LIST)
+    assert _K1205_EN3_ADMITS_3 == expected
+
+
+def test_k1205_en3_admits_all_have_n_equals_128():
+    """K-1205 axis-discipline pin: every K-1205 admit lies on the N=128
+    plane (NOT the K-axis -- K-1161 already established K-axis
+    NEGATIVE_AXIS_PIVOT at K-floor relaxation).  Catches any future leak
+    of K-axis cells into the K-1205 set."""
+    for tup in _K1205_EN3_ADMITS_3:
+        M, N, K, dt = tup
+        assert N == 128, f"K-1205 admit {tup} has N={N} (must be 128)"
+        assert K in (256, 768, 1024), (
+            f"K-1205 admit {tup} has K={K} (must be in K-1144 K-set)")
+        assert dt == "torch.bfloat16", f"K-1205 admit {tup} not bf16"
+
+
+def test_k1205_p8_baseline_28_unchanged_when_flag_off():
+    """Safety contract for downstream consumers: with the K-1205 flag OFF
+    (default) the dispatch envelope MUST be exactly the K-1175 28-cell
+    baseline.  Regression-protection against accidental always-on staging.
+
+    Also pins NO LEAK for the 3 reproducing admits and the 6 rejected
+    cells (5 splinter1-non-reproducing + 1 K-1205-original-route-IN-safe).
+    """
+    saved = os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    try:
+        _importlib.reload(_rp_mod)
+        assert len(_rp_mod._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28
+        assert (_rp_mod._P8_MFMA_ISSUE_STALL_ROUTEOUT
+                == _rp_mod._P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28)
+        # No K-1205 admit should fire when flag OFF.
+        for cid, M, N, K in K1205_EN3_ADMITS_3_LIST:
+            assert _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16) is False, (
+                f"K-1205 admit {cid} ({M},{N},{K}) leaked into baseline P8 "
+                f"with TRITONBLAS_ENABLE_K1205_N_EXT unset")
+        # Rejected K-1205 cells must also NEVER fire when flag OFF.
+        for cid, M, N, K, _why in K1205_EN3_REJECTED_6_LIST:
+            assert _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16) is False, (
+                f"K-1205 rejected cell {cid} ({M},{N},{K}) leaked into "
+                f"baseline P8 with TRITONBLAS_ENABLE_K1205_N_EXT unset")
+    finally:
+        if saved is not None:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved
+        _importlib.reload(_rp_mod)
+
+
+def test_k1205_p8_extends_to_31_when_flag_on():
+    """With TRITONBLAS_ENABLE_K1205_N_EXT=1, the dispatch envelope MUST
+    grow to exactly 31 cells (28 baseline + 3 K-1220-revalidated K-1205
+    admits) and every reproducing K-1205 admit MUST fire P8."""
+    saved = os.environ.get("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = "1"
+    try:
+        _importlib.reload(_rp_mod)
+        assert len(_rp_mod._P8_MFMA_ISSUE_STALL_ROUTEOUT) == 31
+        for cid, M, N, K in K1205_EN3_ADMITS_3_LIST:
+            assert _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16) is True, (
+                f"K-1205 admit {cid} ({M},{N},{K}) failed to fire P8 "
+                f"with TRITONBLAS_ENABLE_K1205_N_EXT=1")
+    finally:
+        if saved is None:
+            os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+        else:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved
+        _importlib.reload(_rp_mod)
+
+
+@pytest.mark.parametrize("cid,M,N,K,_why", K1205_EN3_REJECTED_6_LIST,
+                         ids=[c[0] for c in K1205_EN3_REJECTED_6_LIST])
+def test_k1205_no_leak_for_rejected_cell_with_flag_on(cid, M, N, K, _why):
+    """NO-LEAK pin for the 6 K-1205 cells that did NOT reproduce route-OUT-
+    safe (5 K-1220-revalidation-route-in-safe + 1 K-1205-original-route-in-
+    safe).  These cells MUST NOT fire P8 even when the K-1205 extension
+    flag is ON -- otherwise we'd route cells where Triton wins (or whose
+    verdict failed to reproduce on the target stack) to the slower
+    hipBLASLt kernel and create a production false-positive."""
+    saved = os.environ.get("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = "1"
+    try:
+        _importlib.reload(_rp_mod)
+        assert _rp_mod._p8_mfma_issue_stall_routeout(
+            M, N, K, torch.bfloat16) is False, (
+            f"K-1205 rejected cell {cid} ({M},{N},{K}) leaked into "
+            f"P8 envelope ({_why}) -- would create production false-positive")
+    finally:
+        if saved is None:
+            os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+        else:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved
+        _importlib.reload(_rp_mod)
+
+
+# ---------------------------------------------------------------------------
+# K-1220 dispatch-level flag-OFF parity pin (Testing Zealot review
+# requirement).  Asserts that with TRITONBLAS_ENABLE_K1205_N_EXT *unset*
+# the full ``_k971_route_to_hbl`` dispatch decision is byte-identical to
+# the K-1175 baseline (i.e., to the dispatch decision computed against
+# ``_P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28``) across the entire K-931
+# top-40 catalog *and* across all 8 K-1205 candidate cells (3 admits +
+# 5 K-1220-rejected).  This proves the "default-OFF preserves K-1175
+# bit-identically" claim from the dispatch path itself, not just the
+# membership predicate.
+# ---------------------------------------------------------------------------
+
+# K-931 top-40 always-uncovered bf16 catalog (M, N, K) -- aligned with
+# the K-1220 paired n=30 backtest harness (output/k931_top40_uncovered.csv).
+K931_TOP40_DISPATCH_PARITY_CELLS = [
+    (   256,   2048,   256), (   192,   2048,   512), (   384, 409600,   384),
+    (  2304,   2048,  4800), (   256,   1792,  2048), (   736,   1792,   736),
+    (  2048,   1792,   256), (   512,   2048,   192), (   384, 409600,   256),
+    (   512,    192,  2048), (   156,   1792,   512), (   160,   3072,   512),
+    (   736,   1792,  3744), (   128, 409600,   384), (   384, 409600,   128),
+    (   256,    256,  2048), (   768,   1792,  5972), (  5972,   1792,   768),
+    (   512,   2048,    96), (   256, 409600,   384), (   768,   3072,  4480),
+    (  1024,   2048,  6016), (  1024,   2048,  8064), (  4480,   3072,   768),
+    (  6016,   2048,  1024), (  8064,   2048,  1024), ( 10112,   2048,  1024),
+    ( 12160,   2048,  1024), ( 14208,   2048,  1024), ( 16256,   2048,  1024),
+    ( 18304,   2048,  1024), ( 20352,   2048,  1024), ( 22400,   2048,  1024),
+    ( 24448,   2048,  1024), ( 26496,   2048,  1024), (    30, 786432,   200),
+    ( 25600,   2048,   256), (   384,    128,   200), ( 49152,   2048,   256),
+    (  1024,   2048,  1240),
+]
+
+
+def _baseline_p8_routeout_28(M, N, K, dtype) -> bool:
+    """Recompute the K-1175-baseline P8 route-OUT decision *directly* from
+    the BASE_28 envelope (independent of the flag)."""
+    if dtype != torch.bfloat16:
+        return False
+    return (int(M), int(N), int(K),
+            "torch.bfloat16") in _P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28
+
+
+def test_k1220_flag_off_dispatch_byte_identical_to_k1175_baseline_on_k931_top40():
+    """Testing-Zealot pin: with TRITONBLAS_ENABLE_K1205_N_EXT *unset*, the
+    P8 route-OUT decision for every K-931 top-40 cell MUST equal the
+    K-1175 baseline decision (BASE_28 lookup) -- proving the K-1220 diff
+    is bit-identical to K-1175 in the default-OFF state.
+
+    Also pins the same parity for every K-1205 candidate cell (admits +
+    rejects): with the flag OFF, no K-1205 cell may flip the dispatch
+    verdict away from K-1175 baseline."""
+    saved = os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    try:
+        _importlib.reload(_rp_mod)
+        # K-931 top-40 catalog parity.
+        for (M, N, K) in K931_TOP40_DISPATCH_PARITY_CELLS:
+            actual = _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16)
+            expected = _baseline_p8_routeout_28(M, N, K, torch.bfloat16)
+            assert actual == expected, (
+                f"K-931 top-40 cell ({M},{N},{K}) dispatch verdict differs "
+                f"from K-1175 baseline with flag OFF: actual={actual} "
+                f"expected={expected}")
+        # K-1205 admit cells parity (must NOT fire under flag OFF).
+        for cid, M, N, K in K1205_EN3_ADMITS_3_LIST:
+            actual = _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16)
+            expected = _baseline_p8_routeout_28(M, N, K, torch.bfloat16)
+            assert expected is False, (
+                f"K-1205 admit {cid} ({M},{N},{K}) was unexpectedly in "
+                f"K-1175 BASE_28; this test invariant is broken")
+            assert actual is False, (
+                f"K-1205 admit {cid} ({M},{N},{K}) leaked under flag OFF: "
+                f"actual={actual} K-1175-baseline={expected}")
+        # K-1205 rejected cells parity (must NOT fire under flag OFF).
+        for cid, M, N, K, _why in K1205_EN3_REJECTED_6_LIST:
+            actual = _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16)
+            expected = _baseline_p8_routeout_28(M, N, K, torch.bfloat16)
+            assert expected is False, (
+                f"K-1205 rejected cell {cid} ({M},{N},{K}) was unexpectedly "
+                f"in K-1175 BASE_28; this test invariant is broken")
+            assert actual is False, (
+                f"K-1205 rejected cell {cid} ({M},{N},{K}) leaked under "
+                f"flag OFF: actual={actual} K-1175-baseline={expected}")
+    finally:
+        if saved is not None:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved
+        _importlib.reload(_rp_mod)
+
+
+def test_k1220_flag_on_dispatch_diverges_only_on_3_admits_vs_k1175_baseline():
+    """Mirror pin for flag ON: dispatch verdict equals K-1175 baseline for
+    EVERY cell except the 3 K-1220-revalidated K-1205 admits, which flip
+    from False (baseline) to True (route-OUT)."""
+    saved = os.environ.get("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = "1"
+    try:
+        _importlib.reload(_rp_mod)
+        admit_keys = frozenset(
+            (M, N, K) for _cid, M, N, K in K1205_EN3_ADMITS_3_LIST)
+        all_cells = (
+            list(K931_TOP40_DISPATCH_PARITY_CELLS)
+            + [(M, N, K) for _cid, M, N, K in K1205_EN3_ADMITS_3_LIST]
+            + [(M, N, K) for _cid, M, N, K, _ in K1205_EN3_REJECTED_6_LIST]
+        )
+        for (M, N, K) in all_cells:
+            actual = _rp_mod._p8_mfma_issue_stall_routeout(
+                M, N, K, torch.bfloat16)
+            baseline = _baseline_p8_routeout_28(M, N, K, torch.bfloat16)
+            if (M, N, K) in admit_keys:
+                assert actual is True and baseline is False, (
+                    f"K-1205 admit ({M},{N},{K}) failed to flip baseline "
+                    f"under flag ON: actual={actual} baseline={baseline}")
+            else:
+                assert actual == baseline, (
+                    f"Non-admit cell ({M},{N},{K}) diverged from K-1175 "
+                    f"baseline under flag ON: actual={actual} "
+                    f"baseline={baseline}")
+    finally:
+        if saved is None:
+            os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+        else:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved
+        _importlib.reload(_rp_mod)
+
+
+def test_k1205_feature_flag_helper_parses_env_correctly():
+    """The _k1205_n_ext_enabled() helper must accept the documented
+    truthy values and reject everything else (defensive default-OFF)."""
+    saved = os.environ.get("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+    try:
+        for v in ("1", "true", "True", "TRUE", "yes", "Yes", "on", "ON"):
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = v
+            assert _k1205_n_ext_enabled() is True, f"value {v!r} not truthy"
+        for v in ("0", "false", "False", "no", "off", "", "  "):
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = v
+            assert _k1205_n_ext_enabled() is False, f"value {v!r} truthy"
+        os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+        assert _k1205_n_ext_enabled() is False
+    finally:
+        if saved is None:
+            os.environ.pop("TRITONBLAS_ENABLE_K1205_N_EXT", None)
+        else:
+            os.environ["TRITONBLAS_ENABLE_K1205_N_EXT"] = saved

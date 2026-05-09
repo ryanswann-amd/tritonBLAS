@@ -376,7 +376,7 @@ def R_K1037_P6_admit_wpeu1(M: int, N: int, K: int, dtype) -> bool:
 
 # K-1121 anchors (5 K-1051 PMC counter-matrix cells + 8 K-1031 leakage
 # cohort cells).  Per-cell mean speedup (hbl/tb) annotated from K-1121's
-# paired n=30 HIP-graph hot-cache on rad-mi300x-1 / MI300X / ROCm 7.2;
+# paired n=30 HIP-graph hot-cache on rad-mi300x-1 / MI300X / the K-1205-era ROCm stack;
 # range 1.158x-1.365x; cohort geomean 1.226x.
 _K1121_P8_ANCHORS_13 = frozenset({
     # ----- K-1051 PMC counter-matrix cells (overlap with K-1089 P6) -----
@@ -432,20 +432,119 @@ _K1161_E2_ADMITS_3 = frozenset({
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x  (M-axis at K-1121 anchor K)
 })
 
-# Composed 28-cell P8 envelope.  Anchors, neighbors, and K-1175/K-1161 E2
-# admits are deliberately kept as separate constants so reviewers (and
-# the manifest auditors) can see provenance at a glance; the dispatch
+# K-1205 / E_N3 N-axis extension admits.  Eight cells from the K-1205 paired
+# n=30 HIP-graph hot-cache validation on rad-mi300x-1 (c42 SSH plane outage
+# 6th recurrence; documented K-1121/K-1127/K-1142/K-1147/K-1161 fallback used)
+# of the N-floor=128 envelope:
+#
+#   E_N3 := N == 128 (one power-of-2 tier below the natural sub-1024 N floor)
+#           AND K in {256, 768, 1024} (held fixed at K-1144 K-set)
+#           AND M  in K-1121 anchor M-set
+#           AND dtype == bf16
+#
+# returned a clean POSITIVE landing verdict: 8/9 = 88.9% admit (route-OUT-
+# safe at hbl/tb >= 1.05x AND CI95-lo > 1.00), well above the 75% landing
+# threshold and *decisively diverging* from K-1161's K-axis NEGATIVE result
+# (1/6 = 16.7% K-axis admit; K-1176 confirmed arch-agnostic NEGATIVE).
+#
+# Mechanism (brief; see K-1205 gist for full analysis): MFMA-issue-rate is
+# bounded by N-tile occupancy (waves/CU at the wpeu=1 admit), not K-iters.
+# At extreme M >> N=128 aspect ratios hipBLASLt's Tensile schedule (wider
+# unroll + many waves) hides the issue-stall bottleneck more aggressively
+# than at K-1121 mid-square N=2048 tiles, so per-cell speedups widen
+# (1.144x-3.254x at N=128 vs 1.16x-1.27x at N=2048).  The single rejection
+# (EN_K768_S24, M=4480) is the smallest-M cell in the candidate set --
+# consistent with R-1161.K-FLOOR-RELAXATION-SURFACES-TB-FAVOURED-SMALL-M-
+# TAIL applied at the M-floor of the K-1121 anchor M-set, now confirmed
+# axis-agnostic at the cohort M-floor.
+#
+# Cross-arch portability risk: K-1176's MI355X probe of the K-axis cohort
+# returned 0/8 admit -- a HARD NEGATIVE on cross-arch generalization for
+# the K-axis pivot.  That precedent means the K-1205 N-axis admits MUST
+# stay gfx942-only until a paired n=30 cross-arch backtest is run; the
+# feature flag below ensures we can ship the diff but not enable it on
+# CDNA4/MI355X consumers without explicit opt-in.
+#
+# Strict-equality only (R-1131 / R-1175): no parametric envelope -- each
+# cell was directly measured at paired n=30 with hbl/tb >= 1.05x and
+# CI95-lo > 1.00x.
+#
+# **K-1220 SHRUNK SET (3 cells, not the 8-cell K-1205 candidate set).**
+# K-1205's original 8-cell admit was measured on rad-mi300x-1 against
+# the K-1205-era ROCm stack.  K-1220's revalidation backtest on rad-mi300x-splinter1
+# against a newer ROCm point-release (c42 SSH plane was refused for the 7th recurrence
+# per K-1199, so we fell back to splinter1 not radha) reproduced only
+# 3/8 = 37.5% of the K-1205 admits at the route-OUT-safe gate.  The 5
+# non-reproducing cells are a cross-stack drift signal -- per
+# **Pragmatist** + **Skeptic** review feedback we ship ONLY the cells
+# whose admit verdict survives the new measurement environment, rather
+# than landing K-1205's full set behind a flag whose flag-ON path is
+# known-broken on the target stack.  K-1205's 88.9% landing remains the
+# motivation; the 3-cell production set is the honest intersection of
+# K-1205 and K-1220 evidence.
+_K1205_EN3_ADMITS_3 = frozenset({
+    # ----- N=128 K=1024 cluster (1 admit; K-1205 5-cell cluster shrunk to 1) -----
+    (16256,  128, 1024, "torch.bfloat16"),  # EN_K1024_S30 K-1205 hbl/tb=3.024x; K-1220 hbl/tb=8.499x route-OUT-safe
+    # ----- N=128 K=256 cluster (1 admit; K-1205 2-cell cluster shrunk to 1) -----
+    (25600,  128,  256, "torch.bfloat16"),  # EN_K256_S37  K-1205 hbl/tb=1.144x; K-1220 hbl/tb=1.065x route-OUT-safe
+    # ----- N=128 K=768  cluster (1 admit; K-1205 1-cell cluster preserved) -----
+    ( 5972,  128,  768, "torch.bfloat16"),  # EN_K768_S18  K-1205 hbl/tb=1.227x; K-1220 hbl/tb=1.924x route-OUT-safe
+})
+
+
+def _k1205_n_ext_enabled() -> bool:
+    """K-1205 N-axis extension feature flag.
+
+    Reads ``TRITONBLAS_ENABLE_K1205_N_EXT`` from the environment at module
+    import time.  When unset / "0" / "false", the K-1205 N-axis extension
+    is NOT included in the dispatch envelope -- the predicate behaves
+    exactly as the K-1175 28-cell baseline (regression-safe).
+
+    When set to "1" / "true", the **K-1220 shrunk** 3-cell K-1205 admit
+    set is unioned in to give a 31-cell envelope.  Cross-stack drift
+    risk (K-1205 measured on the K-1205-era ROCm stack; K-1220 revalidation on a newer point-release only
+    reproduced 3/8 of the K-1205 admits) and cross-arch portability risk
+    (per K-1176 0/8 cross-arch failure for the analogous K-axis cohort)
+    mean downstream consumers MUST opt in explicitly per-deployment; we
+    ship the diff dark.
+    """
+    val = os.environ.get("TRITONBLAS_ENABLE_K1205_N_EXT", "")
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+_K1205_N_EXT_ENABLED = _k1205_n_ext_enabled()
+
+# Composed P8 envelope.  Default (flag OFF) = 28 cells (K-1175 baseline);
+# flag ON = 31 cells (K-1175 baseline + K-1220 shrunk 3-cell K-1205 set).
+# Anchors, neighbors, K-1175/K-1161 E2 admits, and (when enabled) K-1205
+# E_N3 admits are deliberately kept as separate named constants so reviewers
+# (and the manifest auditors) can see provenance at a glance; the dispatch
 # path consults the union.
-_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+_P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28 = (
     _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_E2_ADMITS_3
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
-    "K-1175 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate or stray "
-    "entry has crept in.")
-# Cross-check: the three sub-sets must be pairwise-disjoint by construction
-# (K-1131 perturbed AWAY from K-1121 anchors; K-1161 candidate generator
-# excluded all K-1121 anchors and K-1131 neighbors before measurement).
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28) == 28, (
+    "K-1175 P8 baseline envelope must be exactly 28 cells (13 K-1121 "
+    "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits); a duplicate "
+    "or stray entry has crept in.")
+
+if _K1205_N_EXT_ENABLED:
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
+        _P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28 | _K1205_EN3_ADMITS_3
+    )
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 31, (
+        "K-1205 P8 envelope must be exactly 31 cells (28 K-1175 baseline + "
+        "3 K-1220-revalidated K-1205 E_N3 admits) when "
+        "TRITONBLAS_ENABLE_K1205_N_EXT is set; a duplicate or stray entry "
+        "has crept in.")
+else:
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT = _P8_MFMA_ISSUE_STALL_ROUTEOUT_BASE_28
+
+# Cross-check: the four sub-sets must be pairwise-disjoint by construction.
+# K-1131 perturbed AWAY from K-1121 anchors; K-1161 candidate generator
+# excluded all K-1121 anchors and K-1131 neighbors; K-1205 E_N3 candidates
+# all have N == 128 (no prior P8 cell has N < 896, so disjointness is
+# trivially satisfied by the N=128 construction).
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
     "rules require strict disjointness from the 13 K-1121 anchors.")
@@ -453,15 +552,30 @@ assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1121 anchors.")
 assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1131 neighbors.")
+assert _K1205_EN3_ADMITS_3.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1205 E_N3 admits overlap with K-1121 anchors; E_N3 candidates have "
+    "N=128 by construction and no K-1121 anchor has N=128.")
+assert _K1205_EN3_ADMITS_3.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1205 E_N3 admits overlap with K-1131 neighbors; E_N3 candidates have "
+    "N=128 by construction and no K-1131 neighbor has N=128.")
+assert _K1205_EN3_ADMITS_3.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates have "
+    "N=128 by construction and no K-1161 E2 admit has N=128.")
+assert len(_K1205_EN3_ADMITS_3) == 3, (
+    "K-1220-revalidated K-1205 E_N3 admit envelope must be exactly 3 cells "
+    "(the splinter1 newer-stack reproducing subset of K-1205's 8-cell set).")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
-    triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
-    neighbors + K-1175/K-1161 E2 admits).
+    """K-1144 P8 (extended by K-1175 baseline; K-1205 N-axis ext gated) —
+    direct hipBLASLt route-OUT for the validated MFMA-issue-stall cohort
+    (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits, plus
+    K-1205 E_N3 N-axis admits when ``TRITONBLAS_ENABLE_K1205_N_EXT`` is
+    set in the environment).
 
-    Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
-    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
+    Returns True iff (M, N, K, dtype) matches one of the strict-equality
+    keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT` (28 cells with the K-1205
+    flag OFF, 31 cells with it ON).  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).
 

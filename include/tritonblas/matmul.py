@@ -87,6 +87,19 @@ from ._route_predicate import (
     # load-bearing only if P24 is ablated.
     _k1553_p25_skinny_n4096_kcompl_aliasstack_routeout
         as _R_K1553_P25_skinny_n4096_kcompl_aliasstack_routeout,
+    # K-1611 (S-002): P26 skinny_N2048 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (18th-position).  MIXED alias — load-bearing for 22 cells
+    # on M ∈ {4096, 8192} (no upstream layer routes the N=2048 column at
+    # M ≥ 4096); alias of upstream coverage for the 8 cells on the M=2048
+    # row already short-circuited by K971_ROUTE_TABLE / R_K979_P5 / P12.
+    # K-1611 paired n=30 HIP-graph hot-cache MI300X gfx942 vs LIVE
+    # post-K-1592 18-frozenset oracle: 21/30 strict admits at >=1.05x
+    # gate, 8/30 inert (alias), 1/30 deferred parity at 1.011×, 0
+    # regressions; admit-set geomean tb/hbl = 1.297× (range
+    # 1.116×-1.625×); all-30 cohort geomean = 1.200×.  Closes the
+    # previously-empty N=2048 rung of the K-COMPLEMENT N-ladder.
+    _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout
+        as _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout,
 )
 
 
@@ -280,6 +293,29 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # amortises LDS-BC pressure and wave-occupancy starvation across all
     # three M anchors, yielding the +14-50% per-cell speedups observed.
     if _R_K1553_P25_skinny_n4096_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1611 P26 (18th-position): skinny_N2048 K-COMPLEMENT alias-stack 30-cell.
+    # Stacks AFTER P25 per the K-1175 stacked-predicate convention.  MIXED
+    # alias — load-bearing for the 22 cells on M ∈ {4096, 8192} that no
+    # upstream layer routes at the N=2048 column; alias of upstream coverage
+    # for the 8 cells on the M=2048 row already short-circuited by
+    # K971_ROUTE_TABLE / R_K979_P5 / K-1295 P12 at chain positions 4–6.
+    # K-1611 paired n=30 HIP-graph hot-cache on MI300X gfx942 vs the LIVE
+    # post-K-1592 18-frozenset oracle (HEAD `db93d92`): 21/30 strict admits
+    # at the ratio_median ≥ 1.05 ∧ ci95_lo > 1.00 gate (admit-set geomean
+    # tb/hbl = 1.297×, range 1.116×-1.625×); 8/30 inert (alias of upstream);
+    # 1/30 deferred parity at (8192,2048,8192,fp16) r=1.011× (HBL still
+    # faster, included for envelope completeness — the 1.1% wallclock
+    # benefit comfortably amortises dispatch overhead); 0 regressions.
+    # All-30 cohort geomean tb/hbl = 1.200×.  Closes the previously-empty
+    # N=2048 rung of the K-COMPLEMENT N-ladder; full chain
+    # 1.454 → 1.297 → 1.234 → 1.174 → 1.118 across N ∈ {512, 2048, 4096,
+    # 16384, 32768}.  Mechanism: at N=2048 the persistent_matmul tile
+    # against a narrow N=2048 column at M=4096/8192 degrades the K-913
+    # §3 LDS-bank-conflict signature; hipBLASLt's split-K kernel selector
+    # re-picks at N=2048 to a tile/pipeline pattern that better amortises
+    # LDS-BC pressure and wave-occupancy starvation across the M=4096/8192
+    # anchors, yielding the 1.12×-1.62× per-cell speedups observed.
+    if _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

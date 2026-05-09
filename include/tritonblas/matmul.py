@@ -119,6 +119,12 @@ from ._route_predicate import (
     # (M ∈ {2048,4096,8192} × N=160 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
     # K-1794's N=160 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).
     _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18,
+    # P33 (24th-slot): N=224 K-COMPLEMENT verified-winner subset — 18 cells
+    # (M ∈ {2048,4096,8192} × N=224 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
+    # K-1794's N=224 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).  Both
+    # dtype rows load-bearing — no upstream alias overlap (N=224 is the first
+    # N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192).
+    _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -391,6 +397,16 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # closes the wave-misaligned N=160 dtype-mirror (BLOCK_N=128 packs N=160 into
     # one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint dominates).
     if (int(M), int(N), int(K), str(a_dtype)) in _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18: return True
+    # P33 (24th-slot): N=224 K-COMPLEMENT verified-winner subset — 18 cells from
+    # K-1794's N=224 sub-cohort (M ∈ {2048,4096,8192} × N=224 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}).  K-1794 paired n=30 HIP-graph hot-cache 3-engine sweep on
+    # MI300X / gfx942: bf16 N=224 unrouted 0/9 with cohort gmean r_oracle=0.722
+    # (first N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192-
+    # FROZENSET-MUST-EXPLICITLY-INCLUDE); fp16 N=224 unrouted 0/9 (R-K1794 fp16-
+    # mirror gap).  All 18 cells admitted as route-OUT — both dtype rows load-
+    # bearing, closes the wave-misaligned N=224 dtype-mirror (BLOCK_N=128 packs
+    # N=224 into one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint).
+    if (int(M), int(N), int(K), str(a_dtype)) in _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

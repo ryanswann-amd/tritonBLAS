@@ -3279,3 +3279,24 @@ _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p32_skinny_n160_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P33 (24th-slot): N=224 K-COMPLEMENT verified-winner subset — 18 cells from
+# K-1794's N=224 sub-cohort = M ∈ {2048,4096,8192} × N=224 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}.  K-1794 paired n=30 HIP-graph hot-cache (3-engine: tb_oracle /
+# tb_streamk / hbl) on MI300X / gfx942: bf16 N=224 was UNROUTED 0/9 (cohort gmean
+# r_oracle = 0.722 — the first observation of an N-axis cliff above N=128 per
+# K-1794 R-K1794.N224-DOES-NOT-EXTEND-FROM-N192-FROZENSET-MUST-EXPLICITLY-INCLUDE);
+# fp16 N=224 was UNROUTED 0/9 (R-K1794 fp16-mirror systemic gap).  All 18 cells
+# admitted as verified-winner route-OUT targets — both dtype rows are load-bearing
+# (no upstream alias overlap, unlike K-1810 P32 where 9 bf16 cells overlap with
+# R-K979 P5).  Mechanism: BLOCK_N=128 packs N=224 into a single wave-misaligned
+# K-block column (same K-913 §3 LDS-bank-conflict fingerprint as K-1673 P28
+# N=128, K-1810 P32 N=160, K-1775 P31 N=256, dtype-invariant per R-K1673);
+# persistent_matmul cannot trade tile reshape for atomic-reduction.  hipBLASLt's
+# split-K kernel selection clears the band by ~28% on average.
+_P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 224, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p33_skinny_n224_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

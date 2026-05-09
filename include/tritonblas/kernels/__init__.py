@@ -36,9 +36,13 @@ from .streamk_gemm_work_stealing import ws_streamk_matmul
 # FP4 kernel
 from .fp4_matmul import fp4_matmul
 
+# K-1698 prototype: persistent split-K combining BK=128 + NS=3 + persistent grid
+from .persistent_split_k_gemm import persistent_split_k_matmul, split_k_writeback
+
 # Export stages submodule
 from . import stages
 
 __all__ = ['persistent_matmul', 'ws_persistent_matmul',
            'streamk_matmul', 'ws_streamk_matmul',
+           'persistent_split_k_matmul', 'split_k_writeback',
            'fp4_matmul', 'stages']

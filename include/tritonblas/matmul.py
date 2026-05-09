@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -9,6 +10,7 @@ from torch._subclasses.fake_tensor import is_fake
 import triton
 
 from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws_streamk_matmul
+from .kernels import persistent_split_k_matmul, split_k_writeback
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
@@ -64,6 +66,119 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+
+
+# ============================================================================
+# K-1698: persistent split-K + BK=128 + NS=3 prototype
+# ----------------------------------------------------------------------------
+# Activated by env  TBLAS_K1698_SPLIT_K=<int>   (e.g. 4, 8).  When set and >1,
+# any non-quantized, no-bias matmul whose K is divisible by SPLIT_K * BK128 is
+# routed through the split-K kernel.  Forces BLOCK_SIZE_K=128, num_stages=3.
+# This is a research switch -- not on by default.
+# ============================================================================
+_K1698_SPLIT_K = int(os.environ.get("TBLAS_K1698_SPLIT_K", "0") or "0")
+_K1698_BK = int(os.environ.get("TBLAS_K1698_BK", "128"))
+_K1698_NS = int(os.environ.get("TBLAS_K1698_NS", "3"))
+# Defaults: BM=BN=64 is the only tile that fits MI300X 64KB LDS with BK=128+NS=3
+# (LDS use = (NS-1)*(BM+BN)*BK*bytes = 2*(64+64)*128*2 = 65536 = limit).
+# Override via env for sweep configurations.
+_K1698_BM = int(os.environ.get("TBLAS_K1698_BM", "64"))
+_K1698_BN = int(os.environ.get("TBLAS_K1698_BN", "64"))
+_K1698_GM = int(os.environ.get("TBLAS_K1698_GM", "8"))
+
+
+def _k1698_eligible(M, N, K, dtype, bias):
+    if _K1698_SPLIT_K <= 1:
+        return False
+    if bias is not None:
+        # bias path is supported via the writeback kernel but keep the prototype
+        # focused on the bias-free benchmark cohort first.
+        return False
+    if dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if K % (_K1698_SPLIT_K * _K1698_BK) != 0:
+        return False
+    if M % _K1698_BM != 0 or N % _K1698_BN != 0:
+        return False
+    return True
+
+
+def persistent_split_k_matmul_lt(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
+    bias: Optional[torch.Tensor] = None,
+):
+    """K-1698 prototype launcher.  Allocates a fp32 workspace, runs the
+    persistent split-K kernel with BK=128/NS=3, and the writeback kernel."""
+    M, K = a.shape
+    _, N = b.shape
+    BLK_M = _K1698_BM
+    BLK_N = _K1698_BN
+    BLK_K = _K1698_BK
+    gsize_m = _K1698_GM
+    SPLIT_K = _K1698_SPLIT_K
+    NUM_SMS = selector._hardware.N_CU
+    num_xcds = selector.num_sms if selector.num_sms > 0 else 1
+    num_stages = _K1698_NS
+    num_warps = 8
+
+    # fp32 workspace, atomic-add target
+    cp = torch.zeros((M, N), device=a.device, dtype=torch.float32)
+    even_k = (K % BLK_K) == 0
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    total_tiles = total_blocks_M * total_blocks_N
+    total_programs = NUM_SMS  # persistent grid
+    chunk_size = gsize_m * gsize_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_programs // num_xcds))
+
+    _maybe_wrap(persistent_split_k_matmul, probe_tensor=a)[(total_programs,)](
+        a, b, cp,
+        bias if bias is not None else None,
+        M, N, K,
+        a.stride(0), b.stride(1), cp.stride(0), cp.stride(1),
+        bias.stride(0) if bias is not None else 0,
+        stride_ak=a.stride(1),
+        stride_bk=b.stride(0),
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BLOCK_SIZE_K=BLK_K,
+        GROUP_SIZE_M=gsize_m,
+        SPLIT_K=SPLIT_K,
+        NUM_SMS=total_programs,
+        NUM_XCDS=num_xcds,
+        CHUNK_SIZE=chunk_size,
+        BIAS=False,  # bias is folded into writeback
+        EVEN_K=even_k,
+        CACHE_MODIFIER_A=None,
+        CACHE_MODIFIER_B=None,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=0,
+        matrix_instr_nonkdim=16,
+        kpack=1,
+    )
+
+    # Writeback kernel: convert fp32 -> output dtype + optional bias
+    grid_wb = (triton.cdiv(M, BLK_M), triton.cdiv(N, BLK_N))
+    _maybe_wrap(split_k_writeback, probe_tensor=a)[grid_wb](
+        cp, c,
+        bias if bias is not None else None,
+        M, N,
+        cp.stride(0), cp.stride(1),
+        c.stride(0), c.stride(1),
+        bias.stride(0) if bias is not None else 0,
+        BLOCK_SIZE_M=BLK_M,
+        BLOCK_SIZE_N=BLK_N,
+        BIAS=bias is not None,
+        num_warps=4,
+    )
+    return c
 
 
 def persistent_matmul_lt(
@@ -372,6 +487,10 @@ def matmul_lt(
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
 
+    M, K = a.shape
+    _, N = b.shape
+    if _k1698_eligible(M, N, K, a.dtype, None):
+        return persistent_split_k_matmul_lt(a, b, c, selector)
     if enable_streamk:
         return streamk_matmul_lt(a, b, c, selector, config, work_stealing=work_stealing)
     else:
@@ -406,6 +525,8 @@ def _matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
+    if _k1698_eligible(M, N, K, a.dtype, None):
+        return persistent_split_k_matmul_lt(a, b, out, selector)
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
@@ -464,7 +585,9 @@ def _matmul_out(
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if _k1698_eligible(M, N, K, a.dtype, None):
+        persistent_split_k_matmul_lt(a, b, out, selector)
+    elif enable_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)

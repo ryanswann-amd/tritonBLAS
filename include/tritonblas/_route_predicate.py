@@ -1997,65 +1997,28 @@ assert len(_K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30) == 30, (
 # Every prior K-COMPLEMENT predicate uses N ∈ {128, 256, 512, 1024, 16384};
 # P12 is bounded to M=N=K ∈ {2048, 4096}; P8/K971/K1335 cap at N ≤ 2048.
 # The N=32768 column has no overlap with any of them — sibling-N firewall.
-_K1513_P22_VS_P8_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1513_P22_VS_P8_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps the K-1322 51-cell P8 envelope; "
-    "P8 sub-frozensets cap at N=256 — natural disjointness, asserted "
-    "insurance per R-1329.")
-_K1513_P22_VS_K971_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(K971_ROUTE_TABLE))
-assert _K1513_P22_VS_K971_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K971_ROUTE_TABLE; K971 uses "
-    "M=N square anchors at M=N ∈ {1024, 2048} — N=32768 has no overlap.")
-_K1513_P22_VS_P12_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1513_P22_VS_P12_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1361 P12 square_mid; P12 "
-    "is bounded to M=N=K ∈ {2048,4096} — N=32768 ≠ M, R-1465 #1 zero-P12-"
-    "deferral natural-disjointness invariant extends trivially to N=32768.")
-_K1513_P22_VS_K1367_P13_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
-assert _K1513_P22_VS_K1367_P13_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1367 P13 skinny_N128; sibling-N "
-    "firewall: P13(N=128) vs P22(N=32768).")
-_K1513_P22_VS_K1397_P13_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
-assert _K1513_P22_VS_K1397_P13_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1397 P13 skinny_N256; sibling-N "
-    "firewall: P13(N=256) vs P22(N=32768).")
-_K1513_P22_VS_K1409_P15_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
-assert _K1513_P22_VS_K1409_P15_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1417 P15 skinny_N512; sibling-N "
-    "firewall: P15(N=512) vs P22(N=32768).")
-_K1513_P22_VS_K1429_P16_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29))
-assert _K1513_P22_VS_K1429_P16_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1429 P16 skinny_N1024; sibling-N "
-    "firewall: P16(N=1024) vs P22(N=32768).")
-_K1513_P22_VS_K1437_P17_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17))
-assert _K1513_P22_VS_K1437_P17_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1437 P17 skinny_N512 BASE; "
-    "sibling-N firewall: P17(N=512) vs P22(N=32768).")
-_K1513_P22_VS_K1478_P19_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30))
-assert _K1513_P22_VS_K1478_P19_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1478 P19 skinny_N16384; "
-    "sibling-N firewall: P19(N=16384) vs P22(N=32768).")
-_K1513_P22_VS_K1503_P21_DISJOINT = (
-    _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT))
-assert _K1513_P22_VS_K1503_P21_DISJOINT, (
-    "K-1513 P22 skinny_N32768 cell overlaps K-1503 P21 skinny_N256 K-mid; "
-    "sibling-N firewall: P21(N=256) vs P22(N=32768).")
+# Data-driven assert loop (K-1532 minimalist refactor): collapses the prior
+# 10 hand-written assert blocks into one table + one loop so a future P23
+# only needs to append to `_K1513_P22_DISJOINT_SIBLINGS`.
+_K1513_P22_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("K971_ROUTE_TABLE (M=N≤2048)",       K971_ROUTE_TABLE),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P15 N=512 (K-1409)",                _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P17 N=512 BASE (K-1437)",           _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+)
+for _sibling_name, _sibling_set in _K1513_P22_DISJOINT_SIBLINGS:
+    assert _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30.isdisjoint(_sibling_set), (
+        f"K-1513 P22 skinny_N32768 (N=32768) overlaps {_sibling_name}; "
+        "sibling-N firewall violated — every prior K-COMPLEMENT predicate "
+        "uses N ∈ {128,256,512,1024,16384} and P8/K971/P12 cap at N ≤ 2048, "
+        "so the N=32768 column must be disjoint by construction.")
+del _sibling_name, _sibling_set
 
 
 def _k1513_p22_skinny_n32768_routeout(M: int, N: int, K: int, dtype) -> bool:

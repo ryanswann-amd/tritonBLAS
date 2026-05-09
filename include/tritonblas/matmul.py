@@ -34,6 +34,8 @@ from ._route_predicate import (
     _k1367_p13_skinny_n128_routeout as _R_K1367_P13_skinny_n128_routeout,
     # K-1382 (S-002): P14 skinny_N256 K-COMPLEMENT 18-cell route-OUT (8th-position).
     _k1382_p14_skinny_n256_routeout as _R_K1382_P14_skinny_n256_routeout,
+    # K-1409 (S-002): P15 skinny_N512 K-COMPLEMENT 18-cell route-OUT (9th-position).
+    _k1409_p15_skinny_n512_routeout as _R_K1409_P15_skinny_n512_routeout,
 )
 
 
@@ -111,6 +113,20 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # column-narrow LDS layout). Disjoint by construction with all P1–P13
     # sub-frozensets via cross-frozenset asserts at module load.
     if _R_K1382_P14_skinny_n256_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1409 (S-002): P15 skinny_N512 K-COMPLEMENT 18-cell route-OUT (9th-position
+    # envelope). Stacks AFTER K-1382 P14 per K-1175 stacked-predicate convention;
+    # third successive sibling N-extension (K-1389 N=128 → K-1400 N=256 → K-1409
+    # N=512). Verified at paired n=30 HIP-graph hot-cache + B=10000 vectorised
+    # paired bootstrap CI95 on MI300X gfx942:
+    # 18/18 ROUTE-OUT, cohort geomean tb/hbl=1.372×, min CI95-lo=1.071,
+    # range 1.084×–1.646×. DISPROVES R-1382's null-discriminator-at-N=512
+    # prediction; the LDS-BC discriminator attenuates with N (1.678× → 1.471×
+    # → 1.372× across N=128/256/512) but every K-COMPLEMENT cell still clears
+    # the strict 1.05 / CI95-lo>1.0 admit gate. K-1131 A2 1.40 cohort floor
+    # missed by 2.8 pp; per-cell strict gate satisfied for the entire cohort.
+    # Disjoint by construction with all P1–P14 sub-frozensets via
+    # cross-frozenset asserts at module load.
+    if _R_K1409_P15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

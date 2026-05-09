@@ -37,6 +37,9 @@ from ._route_predicate import (
     # K-1417 (S-002): P15 skinny_N512 K-COMPLEMENT EXTENSION 12-cell route-OUT
     # (9th-position).
     _k1409_p15_skinny_n512_routeout as _R_K1409_P15_skinny_n512_routeout,
+    # K-1433 (S-002): P16 skinny_N1024 K-COMPLEMENT BASE 18-cell route-OUT
+    # (10th-position).
+    _k1433_p16_skinny_n1024_routeout as _R_K1433_P16_skinny_n1024_routeout,
 )
 
 
@@ -129,6 +132,20 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # construction with all P1–P14 sub-frozensets via cross-frozenset
     # asserts at module load.
     if _R_K1409_P15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1433 (S-002): P16 skinny_N1024 K-COMPLEMENT BASE 18-cell route-OUT
+    # (10th-position envelope).  Stacks AFTER K-1417 P15 per K-1175 stacked-
+    # predicate convention; productionises the K-1409-derived BASE-region
+    # extension at the next-higher N tier (N=1024) along the K-1389 → K-1400
+    # → K-1409 BASE lineage.  K-1433 paired n=30 + B=10000 vectorised
+    # bootstrap CI95 on MI300X gfx942 (OCI MI300X fallback): 18/18 ROUTE-OUT,
+    # cohort geomean tb/hbl = 1.451×, min CI95-lo = 1.069 at (2048,1024,4096,bf16),
+    # range 1.075×–1.682×; envelope grows 97 → 115 cells.  Notable
+    # scientific result: R-1409 monotone N-axis attenuation prediction
+    # REVERSED at N=1024 (1.678 → 1.471 → 1.372 → 1.451), and the K-1131
+    # A2 1.40× cohort floor that K-1409 missed by 2.8 pp is re-cleared at
+    # N=1024 BASE.  Disjoint by construction with all P1–P15 sub-frozensets
+    # via cross-frozenset asserts at module load.
+    if _R_K1433_P16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

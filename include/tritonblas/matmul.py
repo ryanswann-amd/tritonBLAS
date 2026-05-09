@@ -65,6 +65,17 @@ from ._route_predicate import (
     # load-bearing only if any upstream layer is ablated.
     _k1552_p23_skinny_n512_kcompl_aliasstack_routeout
         as _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout,
+    # K-1566 (S-002): P24 skinny_N4096 K-COMPLEMENT 30-cell route-OUT
+    # (16th-position).  Closes the previously-empty N=4096 rung of the
+    # K-COMPLEMENT N-ladder (between P21 N=2048 and P19 N=16384) on the
+    # full K-grid {2048, 4096, 8192, 16384, 32768}.  30/30 admit at the
+    # strict 1.05 gate (K-1553 paired n=30 + B=10000 vectorised paired
+    # bootstrap MI300X gfx942 vs the live post-K-1532 oracle); cohort
+    # geomean tb/hbl = 1.234×, range 1.114×-1.501×.  Sibling-N firewall
+    # disjoint with all P1-P23 except a single intentional 2-cell P12
+    # alias overlap at (4096, 4096, 4096, {bf16, fp16}); 28 NEW cells +
+    # 2 P12-alias cells.
+    _k1566_p24_skinny_n4096_routeout as _R_K1566_P24_skinny_n4096_routeout,
 )
 
 
@@ -221,6 +232,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # longK_smallSquare LDS-bank-conflict signature on the persistent_matmul
     # N=512 tile, opposite to the R-1478 #1 N-axis attenuation trajectory.
     if _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1566 P24 (16th-position): skinny_N4096 K-COMPLEMENT 30-cell route-OUT.
+    # Stacks AFTER P23 per the K-1175 stacked-predicate convention; closes
+    # the previously-empty N=4096 rung of the K-COMPLEMENT N-ladder
+    # (between P21 N=2048 territory and P19 N=16384) on the full K-grid
+    # {2048, 4096, 8192, 16384, 32768}.  30/30 admit at the strict 1.05
+    # gate (K-1553 paired n=30 + B=10000 vectorised paired bootstrap on
+    # MI300X gfx942 with TRITONBLAS_DISABLE_K971=1 vs the live post-K-1532
+    # routing oracle); cohort geomean tb/hbl = 1.234×, range 1.114×-1.501×;
+    # 0 regressions.  Per-row geomean: 1.402× (M=2048, K-913 LDS-BC band
+    # fully live because min(M,N) ≤ 2048) / 1.146× (M=4096) / 1.180×
+    # (M=8192).  Validates the R-1478 #1 N-axis attenuation chain anchor
+    # at the previously-empty N=4096 rung (full chain 1.451 → 1.234 →
+    # 1.220 → 1.174 → 1.118).  Sibling-N firewall disjoint with all P1-P23
+    # except a single intentional 2-cell P12 alias overlap at
+    # (4096, 4096, 4096, {bf16, fp16}) — P12 fires first so 28 cells are
+    # NEW route-OUT and 2 cells are alias documentation.
+    if _R_K1566_P24_skinny_n4096_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

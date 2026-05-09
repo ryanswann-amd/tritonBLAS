@@ -274,10 +274,16 @@ class GemmContext:
         a_step = self.block_k * A.stride_col
         b_step = self.block_k * B.stride_row
 
-        # Main K loop -- pointer-increment form
+        # Main K loop -- pointer-increment form. tl.multiple_of(.., (1,16))
+        # / (16,1) tells the AMD compiler the leading-dimension contiguous
+        # axis is 16-element aligned, unlocking 128-bit vectorized loads
+        # (mirrors the persistent_gemm_monolithic.py pattern; meaningful
+        # win on the K-1634 long-K cohort where load BW dominates).
         for _k_idx in range(num_k_tiles):
-            a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
-            b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
+            a = tl.load(tl.multiple_of(a_ptrs, (1, 16)),
+                        cache_modifier=self.cache_modifier_a)
+            b = tl.load(tl.multiple_of(b_ptrs, (16, 1)),
+                        cache_modifier=self.cache_modifier_b)
             if self.quantized:
                 acc += tl.dot(a, b, out_dtype=tl.int32)
             else:

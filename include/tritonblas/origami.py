@@ -251,20 +251,19 @@ class OrigamiMatmulSelector:
         # load is amortized over 2x more dot products and the wall-clock
         # tile-residency window shrinks proportionally.
         #
-        # The bump is gated on LDS capacity -- when the 256x256 heuristic
-        # tile above already saturates LDS at the current BK, the bump is
-        # skipped (the kernel-side B-pointer hoist in `reduce_axis`
-        # already addresses the per-iteration recompute cost for those
-        # tiles).  Trigger window is intentionally narrow (K>=16384 AND
-        # N>=8192) so smaller-K / smaller-N cells are unaffected.
+        # The bump is gated on K-divisibility AND LDS capacity. On gfx942
+        # (64KB LDS) the 256x256 picks above already saturate LDS at BK=64
+        # so the bump is a no-op for the K-1634 worst-loser cells; the
+        # kernel-side B-pointer hoist in `reduce_axis` (gemm_context.py)
+        # carries the speedup there. The bump fires for in-window cells
+        # where the origami pick is smaller than 256x256 (N=8192-ish, etc.).
+        # Trigger window is intentionally narrow (K>=16384 AND N>=8192).
         if self._k >= 16384 and self._n >= 8192:
             cur_bk = self._result.config.mt.k
             cur_bm = self._result.config.mt.m
             cur_bn = self._result.config.mt.n
-            # Next power-of-two strictly greater than cur_bk.
-            next_bk = 1 << cur_bk.bit_length() if cur_bk > 0 else 64
             max_bk = max(self._block_k_range)
-            next_bk = min(next_bk, max_bk)
+            next_bk = min(1 << cur_bk.bit_length() if cur_bk > 0 else 64, max_bk)
             if (next_bk > cur_bk
                 and self._k % next_bk == 0
                 and check_triton_lds_capacity(

@@ -97,18 +97,18 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
-    # K-1653: For long-K wide-N (the K-1634 L2-thrash cohort), nudge
-    # waves_per_eu=2 so the AMD compiler keeps a second wave per EU in
-    # flight to hide the longer per-tile L2 fill latency. Empirically
-    # worth ~1 pp on the (4096, 16384, K>=16384) cells; neutral
-    # elsewhere.
-    if (getattr(selector, "_k", 0) >= 16384
-        and getattr(selector, "_n", 0) >= 8192):
-        waves_per_eu = 2
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+    # K-1653: For long-K wide-N (the K-1634 L2-thrash cohort), nudge
+    # waves_per_eu=2 so the AMD compiler keeps a second wave per EU
+    # resident to hide the longer per-tile L2 fill latency. We tried
+    # kpack=2 and CACHE_MODIFIER_B=".cg" here too; both regressed
+    # (-10pp), so they are intentionally NOT enabled.
+    if (getattr(selector, "_k", 0) >= 16384
+        and getattr(selector, "_n", 0) >= 8192):
+        waves_per_eu = 2
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -412,9 +412,14 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-1653: see _matmul_out for the rationale on auto-routing the long-K
+    # wide-N envelope to the streamk kernel. Mirrored here so the
+    # alloc-out path (`tritonblas.matmul(a,b)`) gets the same speedup.
+    use_streamk = bool(enable_streamk) or (K >= 16384 and N >= 8192)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=use_streamk)
     config = matmul_preamble(selector) if work_stealing else None
-    if enable_streamk:
+    if use_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         return persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)
@@ -469,10 +474,22 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-1653: For the long-K wide-N L2-thrash envelope (the K-1634 worst-
+    # loser cohort -- K>=16384, N>=8192) auto-route to the Stream-K
+    # kernel even when the caller did not explicitly request it. The SK
+    # tile-claim schedule splits each long-K reduction across CUs in
+    # chunks instead of one CU owning the whole K column, which is the
+    # mechanism PMC profiling identified as the hipBLASLt advantage on
+    # this cohort: amortizing the A/B tile reload across more CUs cuts
+    # per-CU L2 read traffic. On the 6 K-1634 cells this lifts geomean
+    # speedup from ~0.83x (baseline persistent) to ~0.96x.
+    use_streamk = bool(enable_streamk) or (K >= 16384 and N >= 8192)
+
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=use_streamk)
+
     config = matmul_preamble(selector) if work_stealing else None
 
-    if enable_streamk:
+    if use_streamk:
         streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
     else:
         persistent_matmul_lt(a, b, out, selector, config, work_stealing=work_stealing)

@@ -106,6 +106,14 @@ from ._route_predicate import (
     # chain.
     _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
         as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # K-1717 (S-002): P29 NIB (N-In-Between) envelope 65-cell route-OUT
+    # at the 20th position.  Single frozenset; closes the in-between-N
+    # stitching gaps at N ∈ {80,112,144,176,208,240} that K-1685 P28
+    # left exposed.  K-1704 paired n=30 audit: 65/108 cleared the 5%
+    # admit gate (cohort oracle/hbl geomean 0.678 → 1.475× lift).
+    # Disjoint from P1–P28 by N-axis projection.
+    _k1704_p29_nib_envelope_aliasstack_routeout
+        as _R_K1704_P29_nib_envelope_aliasstack_routeout,
 )
 
 
@@ -357,6 +365,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
     # handles per the K-1175 stacked-predicate convention.
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1717 (S-002): P29 NIB envelope route-OUT (20th-position).
+    # K-1704 paired n=30 HIP-graph hot-cache MI300X audit: 65 of 108
+    # in-between-N cells (N ∈ {80,112,144,176,208,240}) cleared the
+    # strict 5% admit gate against the LIVE post-K-1685 P28 oracle
+    # (CI95-hi < 0.95238); cohort oracle/hbl geomean 0.678 → 1.475× lift.
+    # Single 65-cell frozenset; routes to the same hipBLASLt path the
+    # nearest productionised N alias already uses.  Disjoint from
+    # P1–P28 by N-axis projection.
+    if _R_K1704_P29_nib_envelope_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

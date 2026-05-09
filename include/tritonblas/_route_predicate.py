@@ -2447,6 +2447,16 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
+    # K-1717 P29 (20th): NIB (N-In-Between) envelope 65-cell route-OUT.
+    # K-1704 audit: 65/108 in-between-N cells cleared the 5% admit gate
+    # against the LIVE post-K-1685 P28 oracle (cohort oracle/hbl geomean
+    # 0.678 → 1.475× hbl-route lift).  Single 65-cell frozenset; closes
+    # stitching gaps at N ∈ {80,112,144,176,208,240}.  Disjoint from
+    # P1–P28 by N-axis projection.  K-1687.STITCHING-GAPS-ARE-ROUTE-OUT-
+    # FAILURES rule applies (NOT "widen the existing alias bin").
+    if _k1704_p29_nib_envelope_aliasstack_routeout(
+            int(M), int(N), int(K), a_dtype):
+        return True
     return False
 
 
@@ -3212,3 +3222,149 @@ def _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
         (int(M), int(N), int(K), str(dtype))
         in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30
     )
+
+
+
+
+# ===========================================================================
+# K-1717 (S-002) — P29 NIB (N-In-Between) envelope alias-stack 65-cell
+# route-OUT at the 20th-position slot.
+#
+# Productionises the K-1704 paired n=30 hot-cache HIP-graph MI300X audit
+# (108 cells: N ∈ {80, 112, 144, 176, 208, 240} × M ∈ {2048, 4096, 8192}
+# × K ∈ {2048, 8192, 32768} × {bf16, fp16}) against the LIVE post-K-1685
+# P28 oracle.  65 of 108 cells cleared the strict 5% admit gate (oracle/
+# hbl speedup_ci95_hi < 1/1.05 = 0.95238 — forced-hipBLASLt reliably ≥5%
+# faster than the live oracle with non-overlapping bootstrap CIs).
+# Cohort oracle/hbl geomean 0.678 → 1.475× hbl-route lift; per-N range
+# 1.38× – 1.70×.  Per-cell speedups + admit/exclude metadata captured at
+# `output/k1717_admitted_cells.json` / `output/k1717_excluded_cells.json`.
+#
+# Mechanism (K-1704 RCA): N values OFF the productionised N-ladder
+# {128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768} fall through
+# every existing alias-stack frozenset; the Origami selector picks a
+# triton persistent_matmul tile whose BLOCK_N (16/32/64) does not divide
+# N and whose K-mid LDS-bank-conflict signature dominates at K ≥ 8192.
+# The fix is purely a routing extension — the winning kernel is the
+# hipBLASLt path that the nearest productionised N alias already uses.
+# This mirrors K-1685 P28 along the N-axis (vs P28's K-axis).
+#
+# bf16 only appears at N ∈ {208, 240} because R-K979 P5 Clause-3
+# (min(M,N) ≤ 192 ∧ K ≥ 2048, bf16-only) routes-OUT bf16 upstream for
+# N ≤ 176; once minMN > 192, bf16 falls through and P29 is the catch.
+#
+# Per the K-1687 STITCHING-GAPS-ARE-ROUTE-OUT-FAILURES rule: a NEW
+# route-OUT predicate (P29) is the correct mechanism — NOT widening the
+# K-1685 P28 N=128 alias bin.  Disjoint from P28 by N-axis projection
+# (P28 is N=128-only; P29 N-axis is {80,112,144,176,208,240}).
+# ===========================================================================
+
+# K-1704-admitted route-OUT envelope (single 65-cell frozenset per the
+# K-1717 minimalist refactor).  Source-of-truth: K-1704 per-cell-gaps
+# CSV at `/home/ryaswann/mc2-workspaces/K-1704/output/`; admit gate +
+# per-cell speedups documented at
+# `/home/ryaswann/mc2-workspaces/K-1717/output/k1717_admitted_cells.json`.
+_K1704_P29_NIB_ENVELOPE = frozenset({
+    # ---- N=80   (8 fp16 cells; oracle/hbl geomean 0.670 → 1.49× lift) ----
+    (2048,  80,  2048, "torch.float16"),  # speedup=0.892 CI=[0.880,0.899]
+    (2048,  80,  8192, "torch.float16"),  # speedup=0.645 CI=[0.643,0.649]
+    (2048,  80, 32768, "torch.float16"),  # speedup=0.440 CI=[0.426,0.461]
+    (4096,  80,  8192, "torch.float16"),  # speedup=0.863 CI=[0.859,0.866]
+    (4096,  80, 32768, "torch.float16"),  # speedup=0.587 CI=[0.569,0.675]
+    (8192,  80,  2048, "torch.float16"),  # speedup=0.868 CI=[0.864,0.871]
+    (8192,  80,  8192, "torch.float16"),  # speedup=0.689 CI=[0.678,0.738]
+    (8192,  80, 32768, "torch.float16"),  # speedup=0.533 CI=[0.525,0.538]
+    # ---- N=112  (8 fp16 cells; oracle/hbl geomean 0.623 → 1.61× lift) ----
+    (2048, 112,  2048, "torch.float16"),  # speedup=0.858 CI=[0.855,0.862]
+    (2048, 112,  8192, "torch.float16"),  # speedup=0.582 CI=[0.579,0.586]
+    (2048, 112, 32768, "torch.float16"),  # speedup=0.415 CI=[0.401,0.446]
+    (4096, 112,  8192, "torch.float16"),  # speedup=0.730 CI=[0.719,0.742]
+    (4096, 112, 32768, "torch.float16"),  # speedup=0.573 CI=[0.571,0.626]
+    (8192, 112,  2048, "torch.float16"),  # speedup=0.835 CI=[0.830,0.840]
+    (8192, 112,  8192, "torch.float16"),  # speedup=0.639 CI=[0.614,0.653]
+    (8192, 112, 32768, "torch.float16"),  # speedup=0.489 CI=[0.481,0.494]
+    # ---- N=144  (9 fp16 cells; oracle/hbl geomean 0.588 → 1.70× lift) ----
+    (2048, 144,  2048, "torch.float16"),  # speedup=0.628 CI=[0.626,0.633]
+    (2048, 144,  8192, "torch.float16"),  # speedup=0.419 CI=[0.410,0.428]
+    (2048, 144, 32768, "torch.float16"),  # speedup=0.274 CI=[0.271,0.276]
+    (4096, 144,  2048, "torch.float16"),  # speedup=0.783 CI=[0.780,0.787]
+    (4096, 144,  8192, "torch.float16"),  # speedup=0.589 CI=[0.583,0.600]
+    (4096, 144, 32768, "torch.float16"),  # speedup=0.570 CI=[0.551,0.591]
+    (8192, 144,  2048, "torch.float16"),  # speedup=0.915 CI=[0.911,0.921]
+    (8192, 144,  8192, "torch.float16"),  # speedup=0.761 CI=[0.751,0.769]
+    (8192, 144, 32768, "torch.float16"),  # speedup=0.635 CI=[0.631,0.661]
+    # ---- N=176  (8 fp16 cells; oracle/hbl geomean 0.707 → 1.41× lift) ----
+    (2048, 176,  8192, "torch.float16"),  # speedup=0.715 CI=[0.705,0.735]
+    (2048, 176, 32768, "torch.float16"),  # speedup=0.494 CI=[0.479,0.516]
+    (4096, 176,  2048, "torch.float16"),  # speedup=0.930 CI=[0.920,0.933]
+    (4096, 176,  8192, "torch.float16"),  # speedup=0.723 CI=[0.715,0.757]
+    (4096, 176, 32768, "torch.float16"),  # speedup=0.538 CI=[0.525,0.554]
+    (8192, 176,  2048, "torch.float16"),  # speedup=0.938 CI=[0.934,0.942]
+    (8192, 176,  8192, "torch.float16"),  # speedup=0.774 CI=[0.734,0.835]
+    (8192, 176, 32768, "torch.float16"),  # speedup=0.670 CI=[0.667,0.680]
+    # ---- N=208  (15 cells, 8 fp16 + 7 bf16; oracle/hbl geomean 0.707) ----
+    (2048, 208,  8192, "torch.bfloat16"),  # speedup=0.755 CI=[0.752,0.760]
+    (2048, 208,  8192, "torch.float16"),   # speedup=0.758 CI=[0.755,0.770]
+    (2048, 208, 32768, "torch.bfloat16"),  # speedup=0.574 CI=[0.520,0.591]
+    (2048, 208, 32768, "torch.float16"),   # speedup=0.536 CI=[0.507,0.558]
+    (4096, 208,  2048, "torch.float16"),   # speedup=0.937 CI=[0.933,0.942]
+    (4096, 208,  8192, "torch.bfloat16"),  # speedup=0.747 CI=[0.712,0.762]
+    (4096, 208,  8192, "torch.float16"),   # speedup=0.711 CI=[0.706,0.764]
+    (4096, 208, 32768, "torch.bfloat16"),  # speedup=0.601 CI=[0.584,0.615]
+    (4096, 208, 32768, "torch.float16"),   # speedup=0.617 CI=[0.607,0.627]
+    (8192, 208,  2048, "torch.bfloat16"),  # speedup=0.882 CI=[0.873,0.886]
+    (8192, 208,  2048, "torch.float16"),   # speedup=0.879 CI=[0.875,0.883]
+    (8192, 208,  8192, "torch.bfloat16"),  # speedup=0.749 CI=[0.718,0.761]
+    (8192, 208,  8192, "torch.float16"),   # speedup=0.733 CI=[0.726,0.744]
+    (8192, 208, 32768, "torch.bfloat16"),  # speedup=0.626 CI=[0.607,0.651]
+    (8192, 208, 32768, "torch.float16"),   # speedup=0.639 CI=[0.622,0.660]
+    # ---- N=240  (17 cells, 8 fp16 + 9 bf16; oracle/hbl geomean 0.723) ----
+    (2048, 240,  2048, "torch.bfloat16"),  # speedup=0.945 CI=[0.941,0.950]
+    (2048, 240,  8192, "torch.bfloat16"),  # speedup=0.717 CI=[0.713,0.721]
+    (2048, 240,  8192, "torch.float16"),   # speedup=0.739 CI=[0.723,0.745]
+    (2048, 240, 32768, "torch.bfloat16"),  # speedup=0.545 CI=[0.515,0.554]
+    (2048, 240, 32768, "torch.float16"),   # speedup=0.518 CI=[0.495,0.529]
+    (4096, 240,  2048, "torch.bfloat16"),  # speedup=0.922 CI=[0.918,0.928]
+    (4096, 240,  2048, "torch.float16"),   # speedup=0.911 CI=[0.905,0.918]
+    (4096, 240,  8192, "torch.bfloat16"),  # speedup=0.729 CI=[0.710,0.733]
+    (4096, 240,  8192, "torch.float16"),   # speedup=0.720 CI=[0.708,0.773]
+    (4096, 240, 32768, "torch.bfloat16"),  # speedup=0.585 CI=[0.579,0.615]
+    (4096, 240, 32768, "torch.float16"),   # speedup=0.597 CI=[0.587,0.619]
+    (8192, 240,  2048, "torch.bfloat16"),  # speedup=0.878 CI=[0.874,0.883]
+    (8192, 240,  2048, "torch.float16"),   # speedup=0.874 CI=[0.869,0.880]
+    (8192, 240,  8192, "torch.bfloat16"),  # speedup=0.784 CI=[0.756,0.807]
+    (8192, 240,  8192, "torch.float16"),   # speedup=0.769 CI=[0.761,0.776]
+    (8192, 240, 32768, "torch.bfloat16"),  # speedup=0.622 CI=[0.609,0.628]
+    (8192, 240, 32768, "torch.float16"),   # speedup=0.639 CI=[0.610,0.661]
+})
+
+# Single cardinality assert is the audit handle; deviation = authoring
+# typo against the K-1704 admit set.  Sibling-N firewall, P28-disjoint
+# and P5-disjoint properties are checked by the unit-test fixture and
+# (for runtime regression) by the K-1502-family drift cadence — keeping
+# them out of module load avoids load-time bloat on every import.
+assert len(_K1704_P29_NIB_ENVELOPE) == 65, (
+    "K-1704 P29 NIB envelope must be exactly 65 cells "
+    "(8 + 8 + 9 + 8 + 15 + 17); deviation indicates an authoring typo "
+    "against the K-1704 admit set.")
+
+
+def _k1704_p29_nib_envelope_aliasstack_routeout(
+    M: int, N: int, K: int, dtype) -> bool:
+    """K-1717 P29 — direct hipBLASLt route-OUT for the K-1704-verified
+    65-cell N-in-between (NIB) envelope at N ∈ {80,112,144,176,208,240}.
+
+    Returns True iff (M, N, K, dtype) is in `_K1704_P29_NIB_ENVELOPE`.
+    O(1) frozenset membership.
+
+    Source: K-1704 paired n=30 hot-cache HIP-graph audit on MI300X /
+    gfx942 against the LIVE post-K-1685 P28 routing oracle; 65 of 108
+    cells cleared the strict 5% admit gate (CI95-hi < 0.95238); cohort
+    oracle/hbl geomean = 0.678 → 1.475× hbl-route lift.
+
+    Stacked at the 20th-position slot (after K-1673 P28 at 19th).
+    Disjoint from P1–P28 by N-axis projection (P29 N-axis is
+    {80,112,144,176,208,240}; productionised N-ladder is
+    {128,256,512,1024,2048,4096,8192,16384,32768}).
+    """
+    return (int(M), int(N), int(K), str(dtype)) in _K1704_P29_NIB_ENVELOPE

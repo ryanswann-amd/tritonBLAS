@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,36 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+# Stacked bf16 hipBLASLt route-OUT predicate. All cohort data and
+# closed-form envelopes live in the torch-free ``_route_predicate`` helper
+# so the dispatch layers can be audited / unit-tested without booting the
+# GPU stack. Stacking order: 36-cell strict-equality union -> E1 axis
+# envelope -> P5 closed-form -> legacy strict-equality anchors.
+from ._route_predicate import (
+    K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
+    R_E1_route_to_hbl as _R_E1_route_to_hbl,
+    R_P5_route_to_hbl as _R_P5_route_to_hbl,
+    _p8_route_out as _R_P8_route_out,
+)
+
+
+def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    """Stacked predicate dispatch — True iff route to hipBLASLt.
+
+    Killswitch: TRITONBLAS_DISABLE_K971=1 disables the entire stack.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_K971") == "1":
+        return False
+    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype):
+        return False
+    if _R_P8_route_out(int(M), int(N), int(K), a_dtype):
+        return True
+    if _R_E1_route_to_hbl(int(M), int(N), int(K), a_dtype):
+        return True
+    if _R_P5_route_to_hbl(int(M), int(N), int(K), a_dtype):
+        return True
+    return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
 
 
 
@@ -402,6 +433,8 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        return torch.matmul(a, b)
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -461,6 +494,9 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        torch.matmul(a, b, out=out)
+        return None
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 

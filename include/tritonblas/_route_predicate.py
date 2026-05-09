@@ -1433,7 +1433,11 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
 # The K-1429 unified cohort confirms the K-1131 A2 1.40× cohort floor is
 # re-cleared at N=1024 across both BASE and EXTREMES bands.
 #
-# Disjointness rationale (verified by frozenset.isdisjoint at module load):
+# Disjointness rationale (verified by pytest invariants in
+# tests/test_k1429_p16_skinny_n1024.py — kept out of module-load per
+# R-1406.MODULE-LOAD-ASSERTS-MAKE-PYTEST-CARDINALITY-DISJOINTNESS-DUPS-DEAD-WEIGHT
+# refinement: cardinality + cross-frozenset disjointness are pin-test
+# invariants, not import-time defensive checks):
 #   * P8 sub-frozensets — no N=1024 cells in any P8 sub-frozenset
 #     (K-1219 uses N=256, K-1205 uses N=128, others use M=N square shapes
 #     with the only square-N=1024 form being M=N=1024 — none of K-1429's
@@ -1446,7 +1450,6 @@ def _k1409_p15_skinny_n512_routeout(M: int, N: int, K: int, dtype) -> bool:
 #   * K-1367 P13 — uses N=128.
 #   * K-1397 P13 — uses N=256.
 #   * K-1417 P15 — uses N=512.
-# All asserted at module load.
 # ---------------------------------------------------------------------------
 _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30 = frozenset({
     # M=2048 row × K ∈ {2048, 4096, 8192, 16384, 32768} × {bf16, fp16}
@@ -1483,60 +1486,12 @@ _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30 = frozenset({
     (8192, 1024, 32768, "torch.bfloat16"),
     (8192, 1024, 32768, "torch.float16"),
 })
-assert len(_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30) == 30, (
-    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell frozenset must be exactly "
-    "30 cells (M ∈ {2048,4096,8192} × N=1024 × K ∈ {2048,4096,8192,16384,"
-    "32768} × {bf16,fp16}); any deviation indicates an authoring typo "
-    "against the K-1429-derived K-COMPLEMENT full-region scoping at "
-    "N=1024 (BASE ∪ EXTREMES, supersedes R-1417 #5 BASE-FIRST staging "
-    "for the verified K-1429 unified cohort).")
-# Cross-frozenset disjointness — K-1429 P16 vs prior 9-predicate stack.
-_K1429_P16_VS_P8_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1429_P16_VS_P8_DISJOINT, (
-    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps the "
-    "K-1322 51-cell P8 envelope; P8's K-1205/K-1219 N-axis sub-frozensets "
-    "use N ∈ {128, 256} — P16 uses N=1024, natural disjointness, asserted "
-    "as cheap insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-"
-    "ARE-CHEAP-INSURANCE.")
-_K1429_P16_VS_K971_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(K971_ROUTE_TABLE))
-assert _K1429_P16_VS_K971_DISJOINT, (
-    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps "
-    "K971_ROUTE_TABLE; K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses "
-    "M=N ∈ {1024, 2048} square shapes, while P16 cells all use "
-    "M ∈ {2048, 4096, 8192} with N=1024 (non-square) — natural "
-    "disjointness, asserted insurance.")
-_K1429_P16_VS_P12_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1429_P16_VS_P12_DISJOINT, (
-    "K-1429 P16 skinny_N1024 K-COMPLEMENT 30-cell envelope overlaps K-1361 "
-    "P12 square_mid; P12 cells use M=N=K ∈ {2048, 4096}; P16 cells all use "
-    "N=1024 with M ∈ {2048, 4096, 8192} (no square cells where M=N=K), "
-    "natural disjointness, asserted for completeness (A4 no-double-admit).")
-_K1429_P16_VS_K1367_P13_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
-assert _K1429_P16_VS_K1367_P13_DISJOINT, (
-    "K-1429 P16 skinny_N1024 cell overlaps K-1367 P13 skinny_N128; "
-    "P13(N=128) cells use N=128, P16 cells use N=1024 — natural "
-    "disjointness, asserted for completeness (A4 sibling-N firewall).")
-_K1429_P16_VS_K1397_P13_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
-assert _K1429_P16_VS_K1397_P13_DISJOINT, (
-    "K-1429 P16 skinny_N1024 cell overlaps K-1397 P13 skinny_N256; "
-    "P13(N=256) cells use N=256, P16 cells use N=1024 — natural "
-    "disjointness, asserted for completeness (A4 sibling-N firewall).")
-_K1429_P16_VS_K1409_P15_DISJOINT = (
-    _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30.isdisjoint(
-        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
-assert _K1429_P16_VS_K1409_P15_DISJOINT, (
-    "K-1429 P16 skinny_N1024 cell overlaps K-1417/K-1425 P15 skinny_N512 "
-    "EXTENSION; P15 cells use N=512, P16 cells use N=1024 — natural "
-    "disjointness, asserted for completeness (A4 sibling-N firewall; "
-    "the four K-COMPLEMENT predicates partition the skinny-N column-"
-    "narrow regime by N-axis at {128, 256, 512, 1024}).")
+# Cardinality (== 30) and cross-frozenset disjointness vs the 9-predicate
+# precedence stack (P8 / K971_ROUTE_TABLE / P12 / K-1367 P13 / K-1397 P13 /
+# K-1417 P15) are pin-tested in tests/test_k1429_p16_skinny_n1024.py — they
+# are NOT re-asserted at module load (R-1406 refinement: import-time
+# defensive checks for properties already covered by pytest pins are dead
+# weight on every production load).
 
 
 def _k1429_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
@@ -1561,10 +1516,11 @@ def _k1429_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
     siblings at N=128 / N=256 / N=512).
 
     Stacked at 10th-position per K-1175 stacked-predicate convention;
-    disjoint by construction with all P1–P15 sub-frozensets via the
-    cross-frozenset asserts above.  Subsumes the K-1433 BASE-only 18-cell
-    precursor (R-1417 #5 BASE-FIRST staging superseded by K-1429 unified
-    cohort verification).
+    disjoint by construction with all P1–P15 sub-frozensets — pin-tested
+    in tests/test_k1429_p16_skinny_n1024.py
+    (test_k1429_p16_disjoint_from_prior_stack).  Subsumes the K-1433
+    BASE-only 18-cell precursor (R-1417 #5 BASE-FIRST staging superseded
+    by K-1429 unified cohort verification).
     """
     return (
         (int(M), int(N), int(K), str(dtype))

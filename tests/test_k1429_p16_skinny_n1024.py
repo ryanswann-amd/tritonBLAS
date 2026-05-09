@@ -8,10 +8,10 @@ Minimal pin coverage for the K-1429 productionisation of the 30-cell
 K-1433 BASE-only 18-cell precursor by adding the 12-cell EXTREMES band
 (K ∈ {2048, 32768}) at the same 10th-position slot.
 
-Cardinality and cross-frozenset disjointness are already asserted at module
-load in `_route_predicate.py`; we do not duplicate those here (per
-R-1406.MODULE-LOAD-ASSERTS-MAKE-PYTEST-CARDINALITY-DISJOINTNESS-DUPS-DEAD-WEIGHT).
-The pytest suite focuses on the orthogonal behavioural pins:
+Cardinality and cross-frozenset disjointness vs the 9-predicate precedence
+stack are pin-tested HERE (not at module load); per R-1406 refinement,
+import-time defensive checks for properties already covered by pytest are
+dead weight on every production load.  Behavioural pins:
 
   * exact membership of the K-1429 P16 30 cells
     (M ∈ {2048,4096,8192} × N=1024 × K ∈ {2048,4096,8192,16384,32768} ×
@@ -35,8 +35,13 @@ from __future__ import annotations
 import pytest
 
 from tritonblas._route_predicate import (
+    K971_ROUTE_TABLE,
+    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4,
+    _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18,
+    _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12,
     _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT,
     _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30,
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _k1429_p16_skinny_n1024_routeout,
     k971_route_decision,
 )
@@ -72,6 +77,36 @@ def test_k1429_cardinality_is_30():
     """Defense-in-depth: explicit cardinality check that the BASE+EXTREMES
     envelope is exactly 30 cells (= 3 M × 1 N × 5 K × 2 dtype)."""
     assert len(_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30) == 30
+
+
+# ---------------------------------------------------------------------------
+# Cross-frozenset disjointness invariants (formerly module-load asserts;
+# moved here per R-1406 refinement).  Each invariant pins that the K-1429
+# 30-cell P16 envelope is disjoint from one of the 9 prior precedence
+# frozensets — required to prove "no double-admit" against the K-1175
+# stacked-predicate precedence chain.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("other_name,other_set", [
+    ("_P8_MFMA_ISSUE_STALL_ROUTEOUT",          _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("K971_ROUTE_TABLE",                       K971_ROUTE_TABLE),
+    ("_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4",   _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18", _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12", _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("_K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT",    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT),
+])
+def test_k1429_p16_disjoint_from_prior_stack(other_name, other_set):
+    """K-1429 P16 30-cell envelope must be disjoint from every prior
+    frozenset in the 9-predicate precedence chain (A4 no-double-admit).
+    By construction: P8/K-1367/K-1397/K-1409 use N ∈ {128, 256, 512},
+    K971_ROUTE_TABLE uses M=N square shapes, P12 uses M=N=K square shapes —
+    K-1429 uses N=1024 with non-square M ∈ {2048, 4096, 8192}, so the
+    intersection is empty."""
+    overlap = sorted(_K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_30 & other_set)
+    assert not overlap, (
+        f"K-1429 P16 envelope overlaps {other_name}: {overlap}; the four "
+        f"K-COMPLEMENT predicates partition the skinny-N column-narrow "
+        f"regime by N-axis at {{128, 256, 512, 1024}} — any overlap is a "
+        f"double-admit bug.")
 
 
 @pytest.mark.parametrize("M,N,K,dtype", sorted(_EXPECTED_K1429_30_CELLS))

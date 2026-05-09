@@ -138,6 +138,16 @@ from ._route_predicate import (
     # off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).  K-1832 cohort
     # geomean TB/HBL = 4.290× — the largest uplift in the alias-stack to date.
     _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
+    # P36 (27th-slot): N ∈ {320, 352} K-COMPLEMENT verified-winner subset —
+    # 34 cells (M ∈ {2048,4096,8192} × N ∈ {320,352} × K ∈ {4096,8192,16384}
+    # × {bf16,fp16} minus 2 parity cells at (2048, *, 4096, bf16)) from a
+    # 36-cell paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep.
+    # Cohort geomean TB/HBL = 1.506×, range 1.220×–1.902×; bottleneck
+    # histogram LDS_DOMINANT 36/36 (same K-913 §3 LDS-bank-conflict +
+    # R-1811 wave-misalignment fingerprint as P31 / P32 / P33 / P34 / P35).
+    # N ∈ {320, 352} are the off-by-64/-96 wave-misaligned rungs between
+    # the N=288 P35 and N=384 P30 productionised slots — sibling-N firewall.
+    _P36_SKINNY_N320_N352_KCOMPL_VERIFIED_WIN_34,
 )
 
 
@@ -445,6 +455,24 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # per K-1832 PMC delta ranking with SQ_LDS_BANK_CONFLICT ≈ 869× and
     # SQ_WAIT_INST_LDS ≈ 12.5× at the top of the discriminator list).
     if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
+    # P36 (27th-slot): N ∈ {320, 352} K-COMPLEMENT verified-winner subset — 34 cells
+    # from the 36-cell M ∈ {2048,4096,8192} × N ∈ {320,352} × K ∈ {4096,8192,16384}
+    # × {bf16,fp16} band, paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC
+    # sweep on MI300X / gfx942: TB-native lost to HBL in 34/36 cells (cohort
+    # geomean TB/HBL = 1.506×, range 1.220×–1.902×; 34/36 admit at the strict
+    # ratio ≥ 1.05  ∧  paired Student-t p < 0.05  ∧  CI95-lo > 1.000 gate).
+    # 2 parity cells excluded — both at (M=2048, K=4096, bf16): R_K979 P5
+    # closed-form Clause-3 already routes them (LIVE oracle ratios 1.001 /
+    # 0.999, p > 0.20 — they collapse to parity by construction), so admitting
+    # them to the strict-equality P36 slot would be a redundant double-admit
+    # per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST.  Same K-913 §3
+    # LDS-bank-conflict + R-1811 wave-misalignment fingerprint as P28 / P31 /
+    # P32 / P33 / P34 / P35: 36/36 LDS_DOMINANT (median SQ_WAIT_INST_LDS ratio
+    # 9.28×, median SQ_LDS_BANK_CONFLICT/inst ratio 393.9×; MFMA per-wave ratio
+    # 0.67×–0.95× with TB UNDER-issuing rules out compute-bound, VMEM per-wave
+    # 0.21×–1.05× rules out memory-BW).  N ∈ {320, 352} are the off-by-64/-96
+    # wave-misaligned rungs between N=288 P35 and N=384 P30.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_N352_KCOMPL_VERIFIED_WIN_34: return True
     return False
 
 

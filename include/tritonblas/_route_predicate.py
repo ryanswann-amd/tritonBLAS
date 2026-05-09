@@ -3359,3 +3359,59 @@ _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p35_skinny_n288_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P36 (27th-slot): N ∈ {320, 352} K-COMPLEMENT verified-winner subset — 34 cells
+# from the 36-cell paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep
+# on MI300X / gfx942 (OCI MI300X fallback per INFRA-0048).  Cohort:
+# M ∈ {2048,4096,8192} × N ∈ {320,352} × K ∈ {4096,8192,16384} × {bf16,fp16}
+# = 36 cells.  TB-native lost to HBL in 34/36 cells (cohort geomean TB/HBL =
+# 1.506×, range 1.220×–1.902×, 34/36 admit at the strict gate
+# ratio_TB/HBL ≥ 1.05  ∧  paired Student-t p < 0.05  ∧  CI95-lo > 1.000).
+# Per-N geomean: N=320 → 1.539× (17/18 win), N=352 → 1.473× (17/18 win).
+# 2 cells excluded — both at (M=2048, K=4096, bf16): (2048, 320, 4096, bf16)
+# (ratio 1.001, p=0.20, CI95=[0.989, 1.014]) and (2048, 352, 4096, bf16)
+# (ratio 0.999, p=0.94, CI95=[0.986, 1.012]).  These are within the 0.95×
+# parity band BECAUSE R_K979_P5_route_to_hbl already routes them via the
+# closed-form Clause-3 envelope (verified — see scripts/trace_routing.py);
+# the LIVE oracle is therefore already dispatching hipBLASLt for these two
+# cells and the measured ratio collapses to ~1.000 by construction.  Per
+# R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST, alias-overlapping cells
+# are excluded from new strict-equality slots to keep the K-913-class
+# slots load-bearing and free of redundant double-admit entries (mirrors
+# K-1700 P29's exclusion of (2048, 64, 4096, fp16) and the K-1843 audit
+# pattern).
+#
+# All 34 admitted cells are NEW route-OUT (no upstream alias overlap — N=320
+# and N=352 are off-by-32/-64 wave-misaligned rungs above the N=256 P31 cliff
+# and disjoint from every prior K-COMPLEMENT slot's N projection: P5 / P13
+# / P15 / P16 / P19 / P21 / P22 / P23 / P24 / P26 / P28 / P29 / P30 / P31 /
+# P32 / P33 / P34 / P35 — sibling-N firewall asserted at module load).
+#
+# Mechanism (3-pass PMC RCA — same K-913 §3 LDS-bank-conflict + R-1811
+# wave-misalignment fingerprint as P28 / P31 / P32 / P33 / P34 / P35):
+# 36/36 cells classify LDS_DOMINANT.  Per-cell PMC (TB / HBL ratio):
+#   - SQ_LDS_BANK_CONFLICT/inst   53.7× – 1.78e9× (median 393.9×; HBL≈0)
+#   - SQ_WAIT_INST_LDS            1.97× – 25.26× (median 9.28×)
+#   - SQ_INSTS_MFMA / SQ_WAVES    0.67× – 0.95× (TB does LESS MFMA; not the limiter)
+#   - SQ_INSTS_VMEM / SQ_WAVES    0.21× – 1.05× (mostly below HBL; rule out memory BW)
+# BLOCK_N=128 packs N=320 (=256+64) and N=352 (=256+96) into wave-misaligned
+# K-block columns (off-by-64/-96 N rungs above the N=256 productionised cliff);
+# persistent_matmul cannot trade tile reshape for atomic-reduction; only HBL's
+# split-K kernel selection clears the band.  Same SCHEDULER_LDS A4 failure mode
+# as the K-1681 / K-1710 / K-1781 / K-1832 wave-misaligned skinny-N class.
+# hipBLASLt's split-K kernel selection clears the band by ~1.5× geomean.
+#
+# Same fingerprint productionised at K-1673 P28 (N=128), K-1700 P29 (N=64),
+# K-1748 P30 (N ∈ {384, 768, 1536}), K-1775 P31 (N=256), K-1810 P32 (N=160),
+# K-1817 P33 (N=224), K-1831 P34 (N=96), and K-1837 P35 (N=288) — now applied
+# to N ∈ {320, 352} (the wave-misaligned rungs ABOVE N=288 and BELOW N=384).
+_P36_SKINNY_N320_N352_KCOMPL_VERIFIED_WIN_34 = frozenset(
+    (M, N, K, dt) for M in (2048, 4096, 8192)
+    for N in (320, 352)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+) - frozenset({
+    (2048, 320, 4096, "torch.bfloat16"),
+    (2048, 352, 4096, "torch.bfloat16"),
+})
+# Cardinality (==34) gated by tests/test_p36_skinny_n320_n352_alias_stack.py per
+# the minimalist split: src holds data, tests hold invariants.

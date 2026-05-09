@@ -938,7 +938,7 @@ def _k1361_p12_square_mid_routeout(M: int, N: int, K: int, dtype) -> bool:
 # K-1367 (S-002) — P13 `skinny_N128` K-COMPLEMENT route-OUT (7th-position).
 #
 # K-1379 productionises the K-1367 RETRY-winning 18-cell cohort as
-# `_K1367_P13_SKINNY_N128_ROUTEOUT_18`, layered as the
+# `_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18`, layered as the
 # 7th-position envelope in the dispatch precedence chain on top of the
 # K-1361 P12 55-cell baseline (envelope grows 55 → 73 cells; +18 admits).
 #
@@ -1005,7 +1005,7 @@ def _k1361_p12_square_mid_routeout(M: int, N: int, K: int, dtype) -> bool:
 #   * K-1361 P12 — uses M=N=K ∈ {2048, 4096} with N != 128; no collision.
 # All asserted at module load.
 # ---------------------------------------------------------------------------
-_K1367_P13_SKINNY_N128_ROUTEOUT_18 = frozenset({
+_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18 = frozenset({
     # M=2048 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
     (2048, 128,  4096, "torch.bfloat16"),
     (2048, 128,  4096, "torch.float16"),
@@ -1028,14 +1028,14 @@ _K1367_P13_SKINNY_N128_ROUTEOUT_18 = frozenset({
     (8192, 128, 16384, "torch.bfloat16"),
     (8192, 128, 16384, "torch.float16"),
 })
-assert len(_K1367_P13_SKINNY_N128_ROUTEOUT_18) == 18, (
+assert len(_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18) == 18, (
     "K-1367 P13 skinny_N128 K-COMPLEMENT frozenset must be exactly 18 cells "
     "(M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16,fp16}); "
     "any deviation indicates an authoring typo against the K-1308 bucket rule "
     "or the K-1227 wrapper-bound K-COMPLEMENT scoping.")
 # Cross-frozenset disjointness — P13 vs prior envelopes.
 _K1367_P13_VS_P8_DISJOINT = (
-    _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+    _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
 assert _K1367_P13_VS_P8_DISJOINT, (
     "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps the K-1322 51-cell P8 "
     "envelope; P8's K-1205 N=128 sub-frozenset uses K ∈ {2048, 8192} with "
@@ -1044,14 +1044,14 @@ assert _K1367_P13_VS_P8_DISJOINT, (
     "tuples must be enumerated to overlap; disjointness verified by frozenset "
     "intersection at module load).")
 _K1367_P13_VS_K971_DISJOINT = (
-    _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(K971_ROUTE_TABLE))
+    _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(K971_ROUTE_TABLE))
 assert _K1367_P13_VS_K971_DISJOINT, (
     "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
     "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ {1024, 2048}; "
     "P13 cells all use N=128 — natural disjointness, but assert as cheap "
     "insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
 _K1367_P13_VS_P12_DISJOINT = (
-    _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+    _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
 assert _K1367_P13_VS_P12_DISJOINT, (
     "K-1367 P13 skinny_N128 K-COMPLEMENT cell overlaps K-1361 P12 square_mid; "
     "P12 cells use M=N=K ∈ {2048, 4096}; P13 cells all use N=128 — natural "
@@ -1060,7 +1060,7 @@ assert _K1367_P13_VS_P12_DISJOINT, (
 
 def _k1367_p13_skinny_n128_routeout(M: int, N: int, K: int, dtype) -> bool:
     """K-1367 P13 — direct hipBLASLt route-OUT for the 18-cell skinny_N128
-    K-COMPLEMENT cohort (`_K1367_P13_SKINNY_N128_ROUTEOUT_18`).
+    K-COMPLEMENT cohort (`_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18`).
 
     Returns True iff (M, N, K, dtype) matches one of the 18 strict-equality
     keys: M ∈ {2048, 4096, 8192} × N = 128 × K ∈ {4096, 8192, 16384} ×
@@ -1080,7 +1080,7 @@ def _k1367_p13_skinny_n128_routeout(M: int, N: int, K: int, dtype) -> bool:
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1367_P13_SKINNY_N128_ROUTEOUT_18
+        in _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18
     )
 
 

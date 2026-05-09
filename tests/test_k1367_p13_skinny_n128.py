@@ -1,7 +1,7 @@
 """K-1367 P13 + K-1361 P12 pin tests — torch-free.
 
 Validates the K-1379 productionisation of the K-1367 RETRY-winning 18-cell
-`_K1367_P13_SKINNY_N128_ROUTEOUT_18` frozenset stacked as the
+`_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18` frozenset stacked as the
 7th-position envelope on top of the K-1361 P12 55-cell baseline.
 
 These tests pin:
@@ -26,7 +26,7 @@ import pytest
 from tritonblas._route_predicate import (
     K971_ROUTE_TABLE,
     _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4,
-    _K1367_P13_SKINNY_N128_ROUTEOUT_18,
+    _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18,
     _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _k1361_p12_square_mid_routeout,
     _k1367_p13_skinny_n128_routeout,
@@ -43,7 +43,7 @@ def test_p12_square_mid_cardinality_4():
 
 
 def test_p13_skinny_n128_kcomplement_cardinality_18():
-    assert len(_K1367_P13_SKINNY_N128_ROUTEOUT_18) == 18
+    assert len(_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18) == 18
 
 
 def test_envelope_total_post_p13_is_73():
@@ -57,7 +57,7 @@ def test_envelope_total_post_p13_is_73():
     total = (
         len(_P8_MFMA_ISSUE_STALL_ROUTEOUT)
         + len(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
-        + len(_K1367_P13_SKINNY_N128_ROUTEOUT_18)
+        + len(_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18)
     )
     assert total == 73, (
         f"Expected 51 + 4 + 18 = 73 strict-equality cells across P8/P12/P13; "
@@ -89,11 +89,11 @@ def _expected_p12_4_cells():
 
 def test_p13_membership_exactly_18_kcomplement_cells():
     expected = _expected_p13_18_cells()
-    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18 == expected, (
+    assert _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18 == expected, (
         "K-1367 P13 frozenset diverges from the K-COMPLEMENT bucket rule: "
         "M ∈ {2048,4096,8192} × N=128 × K ∈ {4096,8192,16384} × {bf16,fp16}.\n"
-        f"  missing : {sorted(expected - _K1367_P13_SKINNY_N128_ROUTEOUT_18)}\n"
-        f"  unknown : {sorted(_K1367_P13_SKINNY_N128_ROUTEOUT_18 - expected)}")
+        f"  missing : {sorted(expected - _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18)}\n"
+        f"  unknown : {sorted(_K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18 - expected)}")
 
 
 def test_p12_membership_exactly_4_diagonal_cells():
@@ -110,17 +110,17 @@ def test_p12_membership_exactly_4_diagonal_cells():
 # R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.
 # ---------------------------------------------------------------------------
 def test_p13_disjoint_from_p8():
-    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(
         _P8_MFMA_ISSUE_STALL_ROUTEOUT)
 
 
 def test_p13_disjoint_from_k971_route_table():
-    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(
         K971_ROUTE_TABLE)
 
 
 def test_p13_disjoint_from_p12():
-    assert _K1367_P13_SKINNY_N128_ROUTEOUT_18.isdisjoint(
+    assert _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18.isdisjoint(
         _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4)
 
 
@@ -215,7 +215,7 @@ def test_p13_admit_cell_carveout_short_circuits(enable_streamk, work_stealing, b
     # Pick a known P13 admit cell.
     a_dtype = "torch.bfloat16"
     M, N, K = 4096, 128, 8192
-    assert (M, N, K, a_dtype) in _K1367_P13_SKINNY_N128_ROUTEOUT_18
+    assert (M, N, K, a_dtype) in _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18
     routed = k971_route_decision(M, N, K, a_dtype, b_dtype,
                                  enable_streamk, work_stealing)
     assert routed is False, (
@@ -246,3 +246,51 @@ def test_no_regression_on_p8_prior_admits():
             f"P8 prior admit ({M},{N},{K},{dt}) was lost after P12 + P13 "
             f"stack; the P13 productionisation must preserve every prior "
             f"P8 sub-frozenset cell (regression firewall).")
+
+
+# ---------------------------------------------------------------------------
+# K-1389 boundary controls — adjacent non-admitted cells in the
+# skinny_N128 K-COMPLEMENT region MUST still route to triton (i.e.
+# k971_route_decision == False), proving the strict-equality frozenset
+# does NOT spill into neighbouring shapes.  Reviewer-mandated negative
+# controls per the K-1389 brief.
+# ---------------------------------------------------------------------------
+_K1389_BOUNDARY_TRITON_CELLS = [
+    # M=1024 — directly below the M=2048 cohort floor; same N=128, same K
+    # range as P13 admits.  Must route to triton: M=1024 is occupancy-bound
+    # at N=128 and the wrapper-overhead/K-time crossover does not flip yet.
+    (1024,   128,  4096, "torch.bfloat16"),
+    (1024,   128,  4096, "torch.float16"),
+    (1024,   128,  8192, "torch.bfloat16"),
+    # M=16384 — directly above the M=8192 cohort ceiling; same N=128, same
+    # K range.  Must route to triton: persistent_matmul scales linearly
+    # with M and the K-913 LDS-BC discriminator inverts past M=8192 because
+    # the per-CU wave footprint amortises the bank conflicts.
+    (16384,  128,  4096, "torch.bfloat16"),
+    (16384,  128,  8192, "torch.bfloat16"),
+    (16384,  128, 16384, "torch.bfloat16"),
+]
+
+
+@pytest.mark.parametrize("M,N,K,dtype", _K1389_BOUNDARY_TRITON_CELLS)
+def test_k1389_p13_does_not_spill_into_adjacent_n128_kcompl_cells(M, N, K, dtype):
+    """K-1389 negative control: adjacent non-admitted cells (M=1024 N=128,
+    M=16384 N=128) MUST NOT be admitted by the P13 strict-equality
+    frozenset _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18 nor by the P13
+    per-cell predicate ``_k1367_p13_skinny_n128_routeout``.
+
+    NOTE: end-to-end ``k971_route_decision`` may still return True on
+    these cells via the EARLIER R-K979 P5 closed-form structural
+    pathology predicate (which routes large-K narrow-N shapes to
+    hipBLASLt as a separate mechanism).  That is intentional and out of
+    scope for K-1389 — K-1389 is a strict-equality additive extension to
+    P13, not a re-tuning of P5.  This test isolates the P13-specific
+    no-spill claim from the end-to-end routing decision.
+    """
+    assert (M, N, K, dtype) not in _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18, (
+        f"Boundary control cell ({M},{N},{K},{dtype}) is in the P13 admit "
+        f"frozenset; the K-1389 boundary table is mis-specified.")
+    assert _k1367_p13_skinny_n128_routeout(M, N, K, dtype) is False, (
+        f"K-1389 adjacent boundary cell ({M},{N},{K},{dtype}) was admitted "
+        f"by the P13 per-cell predicate; strict-equality frozenset must NOT "
+        f"spill into adjacent M={M} cells.")

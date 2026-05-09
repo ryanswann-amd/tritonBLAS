@@ -156,3 +156,19 @@ def test_envelope_equals_full_n320_kcompl_grid():
     )
     assert FZ == full
     assert len(full) == 18
+
+
+def test_n_axis_disjoint_from_k1502_corpus():
+    """K-1545 GATE-B (corpus drift theorem precondition): every cell in the
+    P35 frozenset must have an N value disjoint from the K-1502 / K-1295 /
+    K-1316 / longK-family 132-cell reference corpus's N-axis ({1024, 2048,
+    4096, 8192, 16384}).  When this holds, the K-1545 append-only theorem
+    guarantees zero corpus drift from the P35 promotion (no GPU re-run
+    needed on K-1502 reference cells).  Folded in here per the Minimalist
+    review — N=320 is structurally outside the corpus N-axis and the pin
+    fails loudly the moment that ever changes."""
+    K1502_CORPUS_N = frozenset({1024, 2048, 4096, 8192, 16384})
+    p35_n_axis = {N for (_, N, _, _) in FZ}
+    assert p35_n_axis.isdisjoint(K1502_CORPUS_N), (
+        f"K-1545 GATE-B FAIL: P35 N-axis {p35_n_axis} overlaps K-1502 "
+        f"corpus N-axis {K1502_CORPUS_N}")

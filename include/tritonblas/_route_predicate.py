@@ -507,29 +507,83 @@ _K1205_EN3_ADMITS_8 = frozenset({
     # in tests/test_k971_route_predicate.py for the no-leak pin.
 })
 
-# Composed 36-cell P8 envelope.  Four named provenance frozensets
+# ---------------------------------------------------------------------------
+# K-1283 / K-1297 (S-002) — A1 sub-cohort targeted P8 admit-cell extension.
+# K-1283 classified the K-1132 wpeu=1 13-cell residual into A1 (LDS-wait-
+# starvation, MFMA-issue-stall dominated) and A2 (occupancy-bound, paired
+# waves ratio >= 1.7) sub-cohorts.  All five A1 *parent* cells (S18, S24,
+# S25, S29 in `_K1121_P8_ANCHORS_13`; N11 in `_K1131_P8_NEIGHBORS_12`) are
+# already routed.  K-1131 only perturbed S32 (A2), S39 (A2), S18 (A1), and
+# S24 (A1) — leaving S25 and S29 (A1 anchors) with **zero**  +/-1-power-of-2
+# perturbation coverage, plus several un-covered axes on S18 / S24.
+#
+# K-1297 closes the A1-only perturbation gap: 15 candidates evaluated under
+# the K-1131 +/-1-power-of-2 generator, filtered to (M >= 4480 per K-1142
+# floor) AND (K >= 256 per K-1161 / K-1176 floor); 9 cells admit at paired
+# n=30 HIP-graph hot-cache CI95-lo > 1.0x on rad-mi300x-1 (MI300X gfx942,
+# rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.10.0); cohort
+# geomean of admits = 1.354x; 6 candidates rejected (CI95-lo straddles 1.0x).
+# Disjointness with prior four sub-frozensets verified by construction:
+# every K-1297 admit is a K-1131-style perturbation of an A1 anchor, so it
+# differs from the parent on exactly one of the four (M, N, K, dtype) axes
+# (and parents themselves were the K-1121 anchors); none collide with the
+# K-1131 perturbations of S32/S39/S18/S24 already enumerated, none have
+# N=128 (so disjoint from K-1205), none match the three K-1161 E2 admits.
+#
+# Strict-equality only (R-1131): no parametric envelope; each cell directly
+# measured. Per-cell hbl/tb speedups + CI95 annotated below.
+# ---------------------------------------------------------------------------
+_K1283_A1_PERTURBATIONS_9 = frozenset({
+    # ----- S25 (6016, 2048, 1024) family — A1 anchor, 5/5 axes admit -----
+    (12032, 2048, 1024, "torch.bfloat16"),  # A1_S25_Mx2  hbl/tb=3.365x CI95=[3.009, 3.718] (cohort MAX)
+    ( 6016, 4096, 1024, "torch.bfloat16"),  # A1_S25_Nx2  hbl/tb=1.383x CI95=[1.351, 1.419]
+    ( 6016, 1024, 1024, "torch.bfloat16"),  # A1_S25_N/2  hbl/tb=1.202x CI95=[1.143, 1.264]
+    ( 6016, 2048, 2048, "torch.bfloat16"),  # A1_S25_Kx2  hbl/tb=1.264x CI95=[1.242, 1.286]
+    ( 6016, 2048,  512, "torch.bfloat16"),  # A1_S25_K/2  hbl/tb=1.226x CI95=[1.140, 1.302]
+    # ----- S29 (14208, 2048, 1024) family — A1 anchor, 3/6 axes admit -----
+    (28416, 2048, 1024, "torch.bfloat16"),  # A1_S29_Mx2  hbl/tb=1.185x CI95=[1.163, 1.207]
+    (14208, 4096, 1024, "torch.bfloat16"),  # A1_S29_Nx2  hbl/tb=1.143x CI95=[1.071, 1.217]
+    (14208, 2048,  512, "torch.bfloat16"),  # A1_S29_K/2  hbl/tb=1.126x CI95=[1.035, 1.245]
+    # ----- S18 (5972, 1792, 768) family — un-covered M-axis admit -----
+    (11944, 1792,  768, "torch.bfloat16"),  # A1_S18_Mx2  hbl/tb=1.155x CI95=[1.034, 1.268]
+    # NOTE: 6 K-1297 candidates were rejected (CI95-lo <= 1.0x) and are
+    # DELIBERATELY OMITTED here -- A1_S29_M/2 (7104,2048,1024) 0.982x,
+    # A1_S29_N/2 (14208,1024,1024) 1.076x, A1_S29_Kx2 (14208,2048,2048)
+    # 1.026x, A1_S18_Kx2 (5972,1792,1536) 0.877x, A1_S24_Mx2 (8960,3072,
+    # 768) 1.017x, A1_S24_N/2 (4480,1536,768) 1.163x.  The S24/S18 K-axis
+    # rejects mirror the K-1161 K-floor lesson (R-1161.K-FLOOR-RELAXATION-
+    # SURFACES-TB-FAVOURED-SMALL-M-TAIL); the S29 boundary rejects sit at
+    # the M=7104 / N=1024 / K=2048 perimeter where wpeu=1 isolation is
+    # ambiguous.  See K1283_A1_REJECTED_6_LIST in tests for no-leak pins.
+})
+
+# Composed 45-cell P8 envelope.  Five named provenance frozensets
 # (K-1121 anchors, K-1131 neighbors, K-1175/K-1161 E2 admits, K-1231/
-# K-1205 E_N3 admits) -- the dispatch path consults the union.  Per
-# R-1144.DUAL-FROZENSET-PROVENANCE and its K-1175 / K-1205 extensions,
-# source-ticket lineage is load-bearing for future reviewers (precedence-
-# inversion debugging, PMC re-classifier work, ADR audits) so each
-# measurement campaign keeps its own named set with a runtime size +
-# pairwise-disjointness check.
+# K-1205 E_N3 admits, K-1283/K-1297 A1 perturbations) -- the dispatch path
+# consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE and its
+# K-1175 / K-1205 / K-1297 extensions, source-ticket lineage is load-
+# bearing for future reviewers (precedence-inversion debugging, PMC
+# re-classifier work, ADR audits) so each measurement campaign keeps its
+# own named set with a runtime size + pairwise-disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
+    | _K1283_A1_PERTURBATIONS_9
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36, (
-    "K-1231 / K-1205 P8 envelope must be exactly 36 cells (13 K-1121 "
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 45, (
+    "K-1283 / K-1297 P8 envelope must be exactly 45 cells (13 K-1121 "
     "anchors + 12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 "
-    "N-axis admits); a duplicate or stray entry has crept in.")
-# Cross-check: the four sub-sets must be pairwise disjoint by construction.
+    "N-axis admits + 9 K-1283 A1 perturbations); a duplicate or stray "
+    "entry has crept in.")
+# Cross-check: the five sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
 # K-1121 anchors and minus all K-1131 neighbors; K-1205 E_N3 admits use
-# N=128 (no prior P8 cell has N < 896 -- disjointness by N-axis projection).
+# N=128 (no prior P8 cell has N < 896 -- disjointness by N-axis projection);
+# K-1297 A1 perturbations are K-1131-style perturbations of A1 anchors that
+# K-1131 itself did NOT enumerate (S25 / S29 / un-covered axes of S18/S24).
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
     "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
     "rules require strict disjointness from the 13 K-1121 anchors.")
@@ -548,6 +602,23 @@ assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
 assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates "
     "have N=128 by construction and no K-1161 E2 admit has N=128.")
+# K-1297 A1 perturbations cross-disjointness with the prior four sub-sets.
+assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "K-1283 A1 perturbation overlaps a K-1121 anchor; the K-1131-style "
+    "+/-1-power-of-2 perturbation generator excludes the parent anchor "
+    "by construction.")
+assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "K-1283 A1 perturbation overlaps a K-1131 neighbor; K-1297 selected "
+    "only A1-anchor perturbations on axes K-1131 did NOT enumerate (S25, "
+    "S29, plus un-covered M/K axes of S18/S24).")
+assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1161_E2_ADMITS_3), (
+    "K-1283 A1 perturbation overlaps a K-1161 E2 admit; the three E2 "
+    "admits ({(736,1792,736), (10112,2048,1024), (12160,2048,1024)}) are "
+    "structurally distinct from the K-1297 A1 perturbation cells.")
+assert _K1283_A1_PERTURBATIONS_9.isdisjoint(_K1205_EN3_ADMITS_8), (
+    "K-1283 A1 perturbation overlaps a K-1205 E_N3 admit; K-1297 cells "
+    "all have N >= 1024 (S25/S29 family) or N in {1792, 3072} (S18/S24 "
+    "family); K-1205 cells all have N=128.")
 
 
 # ---------------------------------------------------------------------------
@@ -586,12 +657,13 @@ def R_K1142_E1_route_to_hbl(M: int, N: int, K: int, dtype) -> bool:
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175 / K-1231-K-1205) — direct hipBLASLt
-    route-OUT for the quadruply-validated MFMA-issue-stall cohort
-    (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits +
-    K-1231/K-1205 E_N3 N-axis admits at N=128).
+    """K-1144 P8 (extended by K-1175 / K-1231-K-1205 / K-1283-K-1297) —
+    direct hipBLASLt route-OUT for the quintuply-validated MFMA-issue-stall
+    cohort (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits +
+    K-1231/K-1205 E_N3 N-axis admits at N=128 + K-1283/K-1297 A1 sub-cohort
+    perturbations of S25/S29 anchors and un-covered axes of S18/S24).
 
-    Returns True iff (M, N, K, dtype) matches one of the 36 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 45 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

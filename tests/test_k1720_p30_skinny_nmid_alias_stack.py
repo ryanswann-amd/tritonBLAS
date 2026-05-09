@@ -27,7 +27,7 @@ cell falls through every productionized predicate P1-P28 by construction
 N-projection {128, 256, 512, 1024, 2048, 4096, 16384, 32768}).  Sibling-
 N firewall disjoint with all P1-P28.
 
-Per-N admit shapes preserved via `_K1720_P30_PER_N_ADMITS`:
+Per-N admit shapes preserved via `_PER_N_ADMITS`:
   - N=384  : 10 cells (M ∈ {2048,4096,8192} × K ∈ {8192, 32768} ×
              {bf16, fp16}); K=2048 row excluded per R-1532 minimalist-
              admit-set (0/6 K=2048 N=384 cleared the K-1711 gate).
@@ -65,11 +65,19 @@ from tritonblas._route_predicate import (
     _K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30,
     _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30,
     _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
-    _K1720_P30_PER_N_ADMITS,
-    _K1720_P30_NEW_ROUTEOUT_34,
     _k1720_p30_skinny_nmid_kcompl_aliasstack_routeout,
     k971_route_decision,
 )
+
+
+# Per-N admit projections derived from the single source-of-truth frozenset.
+# Per R-1532 / Minimalist feedback the source file holds ONE data structure;
+# the per-N shape pins live in the test fixture below.
+_PER_N_ADMITS = {
+    n: frozenset(c for c in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+                 if c[1] == n)
+    for n in (384, 768, 1536)
+}
 
 
 # ---------------------------------------------------------------------------
@@ -82,13 +90,11 @@ def test_p30_admit_set_cardinality_is_thirty_four():
 
 
 def test_p30_per_n_admit_shapes():
-    assert len(_K1720_P30_PER_N_ADMITS[384]) == 10
-    assert len(_K1720_P30_PER_N_ADMITS[768]) == 14
-    assert len(_K1720_P30_PER_N_ADMITS[1536]) == 10
+    assert len(_PER_N_ADMITS[384]) == 10
+    assert len(_PER_N_ADMITS[768]) == 14
+    assert len(_PER_N_ADMITS[1536]) == 10
     # Combined per-N admits == the 34-cell envelope (no per-N drift).
-    union = (_K1720_P30_PER_N_ADMITS[384]
-             | _K1720_P30_PER_N_ADMITS[768]
-             | _K1720_P30_PER_N_ADMITS[1536])
+    union = _PER_N_ADMITS[384] | _PER_N_ADMITS[768] | _PER_N_ADMITS[1536]
     assert union == _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
 
 
@@ -116,8 +122,17 @@ def test_p30_admit_set_dtype_projection_is_bf16_and_fp16():
 def test_p30_zero_upstream_alias_overlap():
     """Every K-1720 P30 cell is NEW route-OUT — no upstream predicate
     fires for any cell.  This is the K-1711 §4 mechanism falsifier."""
-    assert _K1720_P30_NEW_ROUTEOUT_34 == _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
-    assert len(_K1720_P30_NEW_ROUTEOUT_34) == 34
+    new_routeout = frozenset(
+        cell for cell in _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+        if not (
+            R_K979_P5_route_to_hbl(cell[0], cell[1], cell[2], cell[3])
+            or _p8_mfma_issue_stall_routeout(cell[0], cell[1], cell[2], cell[3])
+            or R_K1142_E1_route_to_hbl(cell[0], cell[1], cell[2], cell[3])
+            or cell in K971_ROUTE_TABLE
+        )
+    )
+    assert new_routeout == _K1720_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+    assert len(new_routeout) == 34
 
 
 def test_p30_no_p5_clause3_alias_overlap():
@@ -197,7 +212,7 @@ def test_p30_disjoint_with_kcompl_predecessor(sibling_name, sibling_set):
 def test_p30_n384_subcohort_excludes_k2048_row():
     """K-1711 §5: 0/6 N=384 K=2048 cells cleared the 0.85x flag — per
     R-1532 minimalist-admit-set, those cells are NOT productionized."""
-    n384 = _K1720_P30_PER_N_ADMITS[384]
+    n384 = _PER_N_ADMITS[384]
     k_values = {cell[2] for cell in n384}
     assert k_values == {8192, 32768}
 
@@ -206,7 +221,7 @@ def test_p30_n768_subcohort_includes_full_k_grid_at_m8192():
     """K-1711 §5: N=768 is the worst-seam N-bin (78% flag); the M=8192
     row admits the full K-grid {2048, 8192, 32768} per the K-1711 admit
     set."""
-    n768 = _K1720_P30_PER_N_ADMITS[768]
+    n768 = _PER_N_ADMITS[768]
     m8192_k = {cell[2] for cell in n768 if cell[0] == 8192}
     assert m8192_k == {2048, 8192, 32768}
 
@@ -214,7 +229,7 @@ def test_p30_n768_subcohort_includes_full_k_grid_at_m8192():
 def test_p30_n1536_subcohort_admits_only_m4096_at_k2048():
     """K-1711 §5: N=1536 K=2048 admits only the 2 M=4096 cells that
     cleared the CI95 gate; M ∈ {2048, 8192} K=2048 cells fell below."""
-    n1536 = _K1720_P30_PER_N_ADMITS[1536]
+    n1536 = _PER_N_ADMITS[1536]
     k2048_m = {cell[0] for cell in n1536 if cell[2] == 2048}
     assert k2048_m == {4096}
 
@@ -222,7 +237,7 @@ def test_p30_n1536_subcohort_admits_only_m4096_at_k2048():
 def test_p30_each_subcohort_covers_both_dtypes():
     """K-1711 admit pattern: cells are paired bf16/fp16 (every per-N
     per-(M,K) admit is dtype-mirrored)."""
-    for n_bin, admits in _K1720_P30_PER_N_ADMITS.items():
+    for n_bin, admits in _PER_N_ADMITS.items():
         # Group by (M, K); each group should have both dtypes.
         grouped = {}
         for cell in admits:

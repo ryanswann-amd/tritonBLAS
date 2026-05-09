@@ -48,6 +48,14 @@ from ._route_predicate import (
     # to N=16384 (full K-grid).  30/30 admit at strict 1.05 gate; cohort
     # geomean tb/hbl = 1.174×.  Naturally disjoint with all P1-P17.
     _k1478_p19_skinny_n16384_routeout as _R_K1478_P19_skinny_n16384_routeout,
+    # K-1493 (S-002): P20 skinny_N16384 K-COMPLEMENT 30-cell route-OUT
+    # (13th-position) — sibling-slot productionization of the K-1478 P19
+    # admit envelope at the next stack slot per the K-1442 / K-1451 / K-1458
+    # / K-1474 sibling-slot pattern.  Identical 30-cell strict-equality keys
+    # as the 12th-position P19 (asserted alias-equality at module load);
+    # unreachable while P19 is enabled — by design (claims the 13th-position
+    # slot for the K-COMPLEMENT-EXTENDED follow-up).
+    _k1493_p20_skinny_n16384_routeout as _R_K1493_P20_skinny_n16384_routeout,
 )
 
 
@@ -177,6 +185,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # disjointness with all P1-P17 (sibling-N firewall + R-1465 #1
     # zero-P12-deferral invariant).
     if _R_K1478_P19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1493 P20 (13th-position): skinny_N16384 K-COMPLEMENT 30-cell route-OUT,
+    # alias-stack of the K-1478 P19 admit envelope.  Stacks AFTER K-1478 P19
+    # per K-1175 stacked-predicate convention and the K-1442 / K-1451 / K-1458
+    # / K-1474 sibling-slot productionization pattern.  Identical 30-cell
+    # strict-equality keys as the 12th-position P19 (asserted alias-equality at
+    # module load); thus unreachable while P19 is enabled — by design (claims
+    # the 13th-position slot for K-COMPLEMENT-EXTENDED follow-up; load-bearing
+    # if P19 is ever ablated).
+    if _R_K1493_P20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

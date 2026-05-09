@@ -1791,6 +1791,116 @@ def _k1478_p19_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1493 P20 — `skinny_N16384` K-COMPLEMENT route-OUT 13th-position stack
+# (re-productionization of the K-1478 admit envelope at the next stack slot
+# per the K-1442 / K-1451 / K-1458 / K-1474 sibling-slot productionization
+# pattern).
+#
+# Cells: identical to the K-1478 P19 admit set above
+# (`_K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30`) — the K-1478 paired-n=30
+# HIP-graph hot-cache sweep produced 30/30 ADMIT under the same strict gate
+# used by P17/P18/P19 (`ratio_median ≥ 1.05 ∧ bootstrap p(<1.05) < 0.01`),
+# so filtering "to strict-equality (M, N, K, dtype) tuples meeting the same
+# threshold used for P17/P18/P19" admits the full 30-cell envelope unchanged.
+# Cohort geomean tb/hbl = 1.174× (range 1.056×–1.359×).
+#
+# Why a sibling P20 frozenset for the same cells: K-1493 productionizes a
+# 13th-position parallel stack-slot for the K-1478 envelope mirroring the
+# K-1442 (P17 N=2048), K-1451 (P17 N=1024), K-1458 (P18 N=4096), and K-1474
+# (P19 N=8192) sibling-slot productionization pattern.  Short-circuit
+# semantics in `_k971_route_to_hbl` mean the 13th-position check is
+# unreachable while the 12th-position P19 check is enabled — by design.
+# This claims the P20 slot for a future K-COMPLEMENT-EXTENDED iteration
+# and provides a load-bearing slot if P19 is ever ablated.
+#
+# Disjointness: ALIAS to P19 — `isdisjoint(_K1478_P19_...)` is False by
+# construction.  Cross-frozenset asserts vs P19 are intentionally OMITTED;
+# the equality assert below makes the alias relationship explicit and
+# fail-fast against typos.  Sibling-N firewall vs P1–P17 holds transitively
+# via the P19 asserts already in this module (asserted at module load above).
+# ---------------------------------------------------------------------------
+_K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N = frozenset({
+    # M=2048 row × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 16384,  2048, "torch.bfloat16"),    # r=1.330 ci99_lo=1.325
+    (2048, 16384,  2048, "torch.float16"),     # r=1.306 ci99_lo=1.301
+    (2048, 16384,  4096, "torch.bfloat16"),    # r=1.223 ci99_lo=1.221
+    (2048, 16384,  4096, "torch.float16"),     # r=1.201 ci99_lo=1.197
+    (2048, 16384,  8192, "torch.bfloat16"),    # r=1.121 ci99_lo=1.119
+    (2048, 16384,  8192, "torch.float16"),     # r=1.099 ci99_lo=1.098
+    (2048, 16384, 16384, "torch.bfloat16"),    # r=1.079 ci99_lo=1.078
+    (2048, 16384, 16384, "torch.float16"),     # r=1.061 ci99_lo=1.059
+    (2048, 16384, 32768, "torch.bfloat16"),    # r=1.076 ci99_lo=1.075
+    (2048, 16384, 32768, "torch.float16"),     # r=1.056 ci99_lo=1.056
+    # M=4096 row × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 16384,  2048, "torch.bfloat16"),    # r=1.359 ci99_lo=1.354 (max-ratio)
+    (4096, 16384,  2048, "torch.float16"),     # r=1.358 ci99_lo=1.354
+    (4096, 16384,  4096, "torch.bfloat16"),    # r=1.238 ci99_lo=1.236
+    (4096, 16384,  4096, "torch.float16"),     # r=1.212 ci99_lo=1.210
+    (4096, 16384,  8192, "torch.bfloat16"),    # r=1.155 ci99_lo=1.155
+    (4096, 16384,  8192, "torch.float16"),     # r=1.138 ci99_lo=1.137
+    (4096, 16384, 16384, "torch.bfloat16"),    # r=1.135 ci99_lo=1.134
+    (4096, 16384, 16384, "torch.float16"),     # r=1.123 ci99_lo=1.122
+    (4096, 16384, 32768, "torch.bfloat16"),    # r=1.158 ci99_lo=1.158
+    (4096, 16384, 32768, "torch.float16"),     # r=1.135 ci99_lo=1.135
+    # M=8192 row × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 16384,  2048, "torch.bfloat16"),    # r=1.312 ci99_lo=1.310
+    (8192, 16384,  2048, "torch.float16"),     # r=1.288 ci99_lo=1.286
+    (8192, 16384,  4096, "torch.bfloat16"),    # r=1.218 ci99_lo=1.217
+    (8192, 16384,  4096, "torch.float16"),     # r=1.199 ci99_lo=1.199
+    (8192, 16384,  8192, "torch.bfloat16"),    # r=1.153 ci99_lo=1.153
+    (8192, 16384,  8192, "torch.float16"),     # r=1.143 ci99_lo=1.142
+    (8192, 16384, 16384, "torch.bfloat16"),    # r=1.119 ci99_lo=1.118
+    (8192, 16384, 16384, "torch.float16"),     # r=1.102 ci99_lo=1.102
+    (8192, 16384, 32768, "torch.bfloat16"),    # r=1.115 ci99_lo=1.114
+    (8192, 16384, 32768, "torch.float16"),     # r=1.097 ci99_lo=1.097
+})
+assert len(_K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N) == 30, (
+    "K-1493 P20 skinny_N16384 K-COMPLEMENT frozenset must be exactly 30 cells "
+    "(K-1478 admit set under the strict ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01 "
+    "gate); any deviation indicates an authoring typo against K-1478.")
+# Explicit alias-equality assert: P20 is, by design, the K-1478 admit set
+# re-stacked at 13th position (see banner above).  This catches accidental
+# divergence between the two frozensets — if either is ever updated, both
+# must be updated together (or this assert removed with a recorded ADR).
+assert (_K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N
+        == _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30), (
+    "K-1493 P20 skinny_N16384 frozenset MUST equal K-1478 P19 frozenset "
+    "by design — they are sibling stack slots over the same K-1478 admit "
+    "envelope.  Divergence implies an authoring error in one of the two.")
+
+
+def _k1493_p20_skinny_n16384_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1493 P20 — direct hipBLASLt route-OUT for the 30-cell skinny_N16384
+    K-COMPLEMENT cohort, 13th-position re-stack of the K-1478 admit envelope
+    (`_K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N`, alias-equal to the P19
+    frozenset by design).
+
+    Returns True iff (M, N, K, dtype) matches one of the 30 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 16384 × K ∈ {2048, 4096, 8192, 16384,
+    32768} × dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Mechanism: skinny-N + long-K LDS pressure on tritonblas persistent_matmul
+    vs hipBLASLt's tile selection — the persistent N=16384 tile aspect against
+    M ∈ {2048, 4096, 8192} crosses a band where hipBLASLt's split-K pattern
+    is better matched to the LDS-bank-conflict ratio.  Per-cell ratio narrows
+    monotonically as K grows (~1.36× at K=2048 → ~1.10× at K=32768) — same
+    K-axis trajectory observed at K-1465 N=8192.
+
+    Stack position: 13th-position per K-1175 stacked-predicate convention,
+    AFTER K-1478 P19 (12th-position) on the same envelope; the K-1493 P20
+    sibling-slot productionization mirrors the K-1442 / K-1451 / K-1458 /
+    K-1474 sibling-slot productionization pattern.  Membership check is
+    unreachable while P19 is enabled (short-circuit semantics) — by design.
+    See `_route_predicate.py` banner above the frozenset for the K-1493 P20
+    stack-position rationale.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1817,6 +1927,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
      11. P17 skinny_N512 K-COMPLEMENT BASE 17-cell strict-equality -> hipBLASLt.
      12. K-1478 P19 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
+     13. K-1493 P20 skinny_N16384 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt
+         (alias-stack of K-1478 P19 at the 13th-position; unreachable while
+         P19 is enabled, claimed for K-COMPLEMENT-EXTENDED future iteration).
     """
     if disable_env_set:
         return False
@@ -1907,5 +2020,15 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # (~1.36× at K=2048 → ~1.10× at K=32768).  Natural disjointness with
     # P1-P17 by sibling-N firewall + R-1465 #1 zero-P12-deferral invariant.
     if _k1478_p19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1493 P20 (13th-position): skinny_N16384 K-COMPLEMENT 30-cell route-OUT,
+    # alias-stack of the K-1478 P19 admit envelope.  Stacks AFTER K-1478 P19
+    # per K-1175 stacked-predicate convention and the K-1442 / K-1451 / K-1458
+    # / K-1474 sibling-slot productionization pattern.  Identical 30-cell
+    # strict-equality keys as the 12th-position P19 (asserted alias-equality at
+    # module load); thus unreachable while P19 is enabled — by design (claims
+    # the 13th-position slot for K-COMPLEMENT-EXTENDED follow-up; load-bearing
+    # if P19 is ever ablated).
+    if _k1493_p20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

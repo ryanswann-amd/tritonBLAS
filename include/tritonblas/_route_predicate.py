@@ -2057,6 +2057,144 @@ def _k1513_p22_skinny_n32768_routeout(M: int, N: int, K: int, dtype) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1552 (S-002) — P23 `skinny_N512` K-COMPLEMENT 30-cell alias-stack route-OUT
+# (15th-position).
+#
+# Productionizes the K-1534 verification of the N=512 K-COMPLEMENT envelope
+# (M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16,
+# fp16}) as the next stacked frozenset.  K-1534 paired n=30 HIP-graph
+# hot-cache measurement (TRITONBLAS_DISABLE_K971=1, B=10000 vectorised paired
+# bootstrap, MI300X / gfx942 / ROCm 7.2 / pytorch 2.10): 30/30 admit at the
+# strict gate (ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01); cohort geomean
+# tb/hbl = 1.454×, range 1.093×–2.111×, 0 regressions.  Per-cell ratio rises
+# monotonically with K (K=2048 ~1.10–1.24× → K=32768 ~1.43–2.11×), magnified
+# at smaller M — the K-913 longK_smallSquare LDS-bank-conflict signature on
+# the persistent_matmul N=512 tile, opposite to the R-1478 #1 N-axis
+# attenuation trajectory observed at N=16384 / N=32768.
+#
+# ALIAS-STACK (per K-1493 P20-of-P19 / K-1538 P22-of-P15+P17 convention):
+# all 30 cells are already routed by upstream layers — P15 (12 cells,
+# K-extremes 2048/32768), P17 (17 cells, K-mid 4096/8192/16384), and P5
+# (1 cell: (2048,512,4096,bf16)).  The 15th-position membership check is
+# therefore unreachable while P15+P17+P5 remain enabled — by design.  The
+# slot is load-bearing if any upstream layer is ablated and freezes the
+# K-1534 30-cell admit set under a single symbol so future N-ladder audits
+# have a dedicated handle for the N=512 cohort.  Disjointness asserts vs
+# P15 ⨄ P17 ⨄ P5 are intentionally OMITTED (alias overlap is the point);
+# sibling-N firewall vs P13(N=128/256), P16(N=1024), P19(N=16384), P22
+# (N=32768) and non-K-COMPLEMENT (P8, K971, P12) follows the K-1532
+# P22 data-driven loop pattern.
+# ---------------------------------------------------------------------------
+_K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30 = frozenset({
+    # M=2048 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 512,  2048, "torch.bfloat16"),    # r=1.093 ci95=[1.089,1.099] (P15)
+    (2048, 512,  2048, "torch.float16"),     # r=1.109 ci95=[1.102,1.112] (P15)
+    (2048, 512,  4096, "torch.bfloat16"),    # r=1.332 ci95=[1.309,1.344] (P5)
+    (2048, 512,  4096, "torch.float16"),     # r=1.320 ci95=[1.309,1.332] (P17)
+    (2048, 512,  8192, "torch.bfloat16"),    # r=1.663 ci95=[1.629,1.708] (P17)
+    (2048, 512,  8192, "torch.float16"),     # r=1.680 ci95=[1.608,1.709] (P17)
+    (2048, 512, 16384, "torch.bfloat16"),    # r=1.795 ci95=[1.760,1.833] (P17)
+    (2048, 512, 16384, "torch.float16"),     # r=1.748 ci95=[1.711,1.809] (P17)
+    (2048, 512, 32768, "torch.bfloat16"),    # r=2.111 ci95=[2.078,2.152] (P15) max
+    (2048, 512, 32768, "torch.float16"),     # r=2.057 ci95=[1.982,2.096] (P15)
+    # M=4096 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 512,  2048, "torch.bfloat16"),    # r=1.218 ci95=[1.197,1.226] (P15)
+    (4096, 512,  2048, "torch.float16"),     # r=1.204 ci95=[1.189,1.215] (P15)
+    (4096, 512,  4096, "torch.bfloat16"),    # r=1.364 ci95=[1.359,1.374] (P17)
+    (4096, 512,  4096, "torch.float16"),     # r=1.374 ci95=[1.367,1.379] (P17)
+    (4096, 512,  8192, "torch.bfloat16"),    # r=1.500 ci95=[1.457,1.525] (P17)
+    (4096, 512,  8192, "torch.float16"),     # r=1.507 ci95=[1.451,1.531] (P17)
+    (4096, 512, 16384, "torch.bfloat16"),    # r=1.671 ci95=[1.657,1.685] (P17)
+    (4096, 512, 16384, "torch.float16"),     # r=1.657 ci95=[1.644,1.665] (P17)
+    (4096, 512, 32768, "torch.bfloat16"),    # r=1.809 ci95=[1.805,1.813] (P15)
+    (4096, 512, 32768, "torch.float16"),     # r=1.753 ci95=[1.746,1.762] (P15)
+    # M=8192 row × N=512 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 512,  2048, "torch.bfloat16"),    # r=1.236 ci95=[1.224,1.243] (P15)
+    (8192, 512,  2048, "torch.float16"),     # r=1.231 ci95=[1.224,1.247] (P15)
+    (8192, 512,  4096, "torch.bfloat16"),    # r=1.337 ci95=[1.317,1.355] (P17)
+    (8192, 512,  4096, "torch.float16"),     # r=1.300 ci95=[1.289,1.324] (P17)
+    (8192, 512,  8192, "torch.bfloat16"),    # r=1.359 ci95=[1.357,1.364] (P17)
+    (8192, 512,  8192, "torch.float16"),     # r=1.331 ci95=[1.325,1.339] (P17)
+    (8192, 512, 16384, "torch.bfloat16"),    # r=1.360 ci95=[1.357,1.364] (P17)
+    (8192, 512, 16384, "torch.float16"),     # r=1.331 ci95=[1.325,1.335] (P17)
+    (8192, 512, 32768, "torch.bfloat16"),    # r=1.425 ci95=[1.419,1.430] (P15)
+    (8192, 512, 32768, "torch.float16"),     # r=1.377 ci95=[1.372,1.383] (P15)
+})
+assert len(_K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30) == 30, (
+    "K-1552 P23 skinny_N512 alias-stack frozenset must be exactly 30 cells "
+    "(M ∈ {2048,4096,8192} × N=512 × K ∈ {2048,4096,8192,16384,32768} × "
+    "{bf16,fp16}); deviation indicates a typo against the K-1534 admit set.")
+# ALIAS-STACK invariant: every cell MUST be covered by P15 ⨄ P17 ⨄ R_K979_P5
+# (otherwise this is no longer an alias and the slot would carve a new
+# admit — assertion guards against future P15/P17 contraction silently
+# upgrading P23 from documentation to load-bearing without an audit).
+_K1552_P23_ALIAS_UNION = (
+    _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT
+    | _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17
+)
+for _k1552_cell in _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30:
+    if _k1552_cell in _K1552_P23_ALIAS_UNION:
+        continue
+    _M_cell, _N_cell, _K_cell, _dtype_cell = _k1552_cell
+    assert R_K979_P5_route_to_hbl(_M_cell, _N_cell, _K_cell, _dtype_cell), (
+        f"K-1552 P23 alias-stack cell {_k1552_cell} is not covered by "
+        "P15 ⨄ P17 ⨄ P5 — alias-stack invariant violated; either the "
+        "upstream cohort contracted (audit P15/P17/P5) or the K-1534 "
+        "admit set drifted from the live oracle.")
+del _K1552_P23_ALIAS_UNION, _k1552_cell, _M_cell, _N_cell, _K_cell, _dtype_cell
+# Sibling-N firewall: P23 carries N=512 only; must be disjoint from every
+# non-N=512 K-COMPLEMENT predicate and all non-K-COMPLEMENT predicates that
+# don't already share the N=512 column.  (P15/P17 sharing is the alias.)
+_K1552_P23_DISJOINT_SIBLINGS = (
+    ("P8 (K-1322 N≤256 envelope)",        _P8_MFMA_ISSUE_STALL_ROUTEOUT),
+    ("P12 (K-1361 M=N=K∈{2048,4096})",    _K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4),
+    ("P13 N=128 (K-1367)",                _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P13 N=256 (K-1397)",                _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P16 N=1024 (K-1429)",               _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29),
+    ("P19 N=16384 (K-1478)",              _K1478_P19_SKINNY_N16384_KCOMPL_ROUTEOUT_30),
+    ("P21 N=256 K-mid (K-1503)",          _K1503_P21_SKINNY_N256_KCOMPL_KMID_ROUTEOUT),
+    ("P22 N=32768 (K-1513)",              _K1513_P22_SKINNY_N32768_KCOMPL_ROUTEOUT_30),
+)
+for _sibling_name, _sibling_set in _K1552_P23_DISJOINT_SIBLINGS:
+    assert _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30.isdisjoint(_sibling_set), (
+        f"K-1552 P23 skinny_N512 (N=512) overlaps {_sibling_name}; sibling-N "
+        "firewall violated — only the P15/P17 alias overlap is permitted.")
+del _sibling_name, _sibling_set
+
+
+def _k1552_p23_skinny_n512_kcompl_aliasstack_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1552 P23 — alias-stack hipBLASLt route-OUT for the K-1534-verified
+    30-cell skinny_N512 K-COMPLEMENT cohort
+    (`_K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30`).
+
+    ALIAS to P15 ⨄ P17 ⨄ P5 — every cell in the K-1534 envelope is already
+    routed by an upstream predicate, so this 15th-position check is
+    unreachable while P15+P17+P5 remain enabled.  Load-bearing only if any
+    upstream layer is ablated.
+
+    Source measurement: K-1534 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X / gfx942, TRITONBLAS_DISABLE_K971=1,
+    B=10000 vectorised paired bootstrap; 30/30 admit at the strict gate
+    (ratio_median ≥ 1.05 ∧ p(<1.05) < 0.01); cohort geomean tb/hbl = 1.454×,
+    range 1.093×–2.111×, 0 regressions.  Per-cell K-axis trajectory:
+    monotonic rise from K=2048 (~1.10–1.24×) to K=32768 (~1.43–2.11×),
+    magnified at smaller M (M=2048: 1.09× → 2.11×) — the K-913
+    longK_smallSquare LDS-bank-conflict signature on the persistent_matmul
+    N=512 tile layout.  Opposite to the R-1478 #1 N-axis attenuation
+    trajectory observed at N=16384 / N=32768; the N=512 column is the
+    K-axis-divergent corner of the K-COMPLEMENT N-ladder.
+
+    Stacked at 15th-position per the K-1175 stacked-predicate convention
+    after K-1513 P22; documents the N=512 cohort under a single symbol
+    per the K-1493 / K-1538 alias-stack convention.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -2087,6 +2225,10 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      14. K-1513 P22 skinny_N32768 K-COMPLEMENT 30-cell strict-equality -> hipBLASLt.
          (Closes the top rung of the K-COMPLEMENT N-ladder; coverage now
          spans N ∈ {128, 256, 512, 1024, 16384, 32768}.)
+     15. K-1552 P23 skinny_N512 K-COMPLEMENT alias-stack 30-cell strict-equality
+         -> hipBLASLt.  ALIAS to P15 ⨄ P17 ⨄ P5; documents the K-1534-
+         verified N=512 envelope under a single symbol; load-bearing only if
+         an upstream layer is ablated.
     """
     if disable_env_set:
         return False
@@ -2197,5 +2339,15 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # Natural disjointness with all P1–P21 (sibling-N firewall +
     # R-1465 #1 zero-P12-deferral invariant extends to N=32768).
     if _k1513_p22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1552 P23 (15th-position): skinny_N512 K-COMPLEMENT alias-stack 30-cell.
+    # Stacks AFTER P22 per the K-1175 stacked-predicate convention.  ALIAS to
+    # P15 ⨄ P17 ⨄ P5 (the live N=512 K-COMPLEMENT cohort already routes 30/30
+    # via earlier layers, K-1534 verification: cohort geomean tb/hbl = 1.454×,
+    # range 1.093×–2.111×, 0 regressions).  Membership check is unreachable
+    # while P15+P17 are enabled — load-bearing only if either is ablated; the
+    # slot documents the N=512 cohort under a single symbol per the K-1493 /
+    # K-1538 alias-stack convention and freezes the K-1534 admit set.
+    if _k1552_p23_skinny_n512_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

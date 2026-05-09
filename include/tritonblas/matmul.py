@@ -57,6 +57,14 @@ from ._route_predicate import (
     # at N=32768 on the full K-grid.  30/30 admit at strict 1.05 gate;
     # cohort geomean tb/hbl ≈ 1.118×.  Naturally disjoint with all P1-P21.
     _k1513_p22_skinny_n32768_routeout as _R_K1513_P22_skinny_n32768_routeout,
+    # K-1552 (S-002): P23 skinny_N512 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (15th-position).  ALIAS to P15 ⨄ P17 ⨄ P5 — the K-1534-
+    # verified N=512 envelope (cohort geomean tb/hbl = 1.454×, range
+    # 1.093×–2.111×, 0 regressions) is already routed 30/30 by upstream
+    # layers; this slot freezes the admit set under a single symbol and is
+    # load-bearing only if any upstream layer is ablated.
+    _k1552_p23_skinny_n512_kcompl_aliasstack_routeout
+        as _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout,
 )
 
 
@@ -199,6 +207,20 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # cohort geomean tb/hbl ≈ 1.118× (range ≈ 1.045×-1.298×).  Naturally
     # disjoint with all P1-P21 (sibling-N firewall + R-1465 #1 invariant).
     if _R_K1513_P22_skinny_n32768_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1552 P23 (15th-position): skinny_N512 K-COMPLEMENT alias-stack 30-cell.
+    # Stacks AFTER P22 per the K-1175 stacked-predicate convention.  ALIAS to
+    # P15 ⨄ P17 ⨄ P5 — the K-1534 N=512 envelope (cohort geomean tb/hbl =
+    # 1.454×, range 1.093×–2.111×, 0 regressions; paired n=30 HIP-graph
+    # hot-cache MI300X gfx942 with TRITONBLAS_DISABLE_K971=1 against the live
+    # post-K-1528 oracle) routes 30/30 via upstream layers, so this 15th-
+    # position membership check is unreachable while P15+P17+P5 are enabled.
+    # Slot is load-bearing only if an upstream layer is ablated; documents
+    # the N=512 cohort under a single symbol per K-1493 / K-1538 alias-stack
+    # convention.  K-axis trajectory: monotonic rise K=2048 (~1.10–1.24×)
+    # → K=32768 (~1.43–2.11×), magnified at smaller M — K-913
+    # longK_smallSquare LDS-bank-conflict signature on the persistent_matmul
+    # N=512 tile, opposite to the R-1478 #1 N-axis attenuation trajectory.
+    if _R_K1552_P23_skinny_n512_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

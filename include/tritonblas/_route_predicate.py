@@ -2415,6 +2415,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
+    # P28 (19th): skinny_N128 K-COMPLEMENT alias-stack, cohort 1.694× vs P27.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30:
+        return True
     # K-1553 17th-slot handle: no executable code — `_K1553_P25_SKINNY_
     # N4096_KCOMPL_ALIASSTACK_30` is a module-level alias of
     # `_K1566_P24_SKINNY_N4096_KCOMPL_ROUTEOUT_30` (bit-identical admit
@@ -2896,3 +2899,46 @@ def _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
 _K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30 = (
     _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30
 )
+
+
+# P28 19th-position alias-stack — skinny_N128 K-COMPLEMENT 30-cell envelope
+# (M ∈ {2048,4096,8192} × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16,
+# fp16}).  Cohort geomean tb/hbl = 1.694× (95% paired-bootstrap CI 1.51-
+# 1.92×, B=10000) vs post-P27 oracle on MI300X gfx942.  Strict superset
+# of P13 (P13 covers K ∈ {4096,8192,16384}); 6 fp16-mirror cells at K ∈
+# {2048,32768} are load-bearing.  Cohort gate ≥0.95× per K-423.
+_K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30 = frozenset({
+    # M=2048 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (2048, 128,  2048, "torch.bfloat16"),
+    (2048, 128,  2048, "torch.float16"),
+    (2048, 128,  4096, "torch.bfloat16"),
+    (2048, 128,  4096, "torch.float16"),
+    (2048, 128,  8192, "torch.bfloat16"),
+    (2048, 128,  8192, "torch.float16"),
+    (2048, 128, 16384, "torch.bfloat16"),
+    (2048, 128, 16384, "torch.float16"),
+    (2048, 128, 32768, "torch.bfloat16"),
+    (2048, 128, 32768, "torch.float16"),
+    # M=4096 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (4096, 128,  2048, "torch.bfloat16"),
+    (4096, 128,  2048, "torch.float16"),
+    (4096, 128,  4096, "torch.bfloat16"),
+    (4096, 128,  4096, "torch.float16"),
+    (4096, 128,  8192, "torch.bfloat16"),
+    (4096, 128,  8192, "torch.float16"),
+    (4096, 128, 16384, "torch.bfloat16"),
+    (4096, 128, 16384, "torch.float16"),
+    (4096, 128, 32768, "torch.bfloat16"),
+    (4096, 128, 32768, "torch.float16"),
+    # M=8192 row × N=128 × K ∈ {2048,4096,8192,16384,32768} × {bf16, fp16}
+    (8192, 128,  2048, "torch.bfloat16"),
+    (8192, 128,  2048, "torch.float16"),
+    (8192, 128,  4096, "torch.bfloat16"),
+    (8192, 128,  4096, "torch.float16"),
+    (8192, 128,  8192, "torch.bfloat16"),
+    (8192, 128,  8192, "torch.float16"),
+    (8192, 128, 16384, "torch.bfloat16"),
+    (8192, 128, 16384, "torch.float16"),
+    (8192, 128, 32768, "torch.bfloat16"),
+    (8192, 128, 32768, "torch.float16"),
+})

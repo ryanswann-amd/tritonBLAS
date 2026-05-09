@@ -94,6 +94,7 @@ from ._route_predicate import (
     # union); alias overlaps fire BEFORE P26 in the dispatch chain.
     _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout
         as _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout,
+    _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30,
 )
 
 
@@ -304,6 +305,8 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # oracle (combined with K-1559 60-cell N ∈ {4096, 8192} confirmation);
     # cohort geomean tb/hbl = 1.234×, range 1.114×-1.501×, 30/30 at strict
     # 1.05 gate — same evidence that backs the load-bearing P24 above.
+    # P28 (19th): skinny_N128 K-COMPLEMENT alias-stack, cohort 1.694× vs P27.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30: return True
     return False
 
 

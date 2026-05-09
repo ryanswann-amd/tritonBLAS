@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,31 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# K-1804: prototype N-padding dispatcher gate. When enabled (env
+# TRITONBLAS_N_PAD=1), tritonblas.matmul pads N to the next wave-aligned
+# multiple of _N_PAD_UNIT for the persistent_matmul path on shapes where the
+# wave-misalignment cohort dominates the residual gap vs hipBLASLt
+# (M>=2048, K in [4096, 16384], dtype in {bf16, fp16}, N%64!=0). The padded
+# B/output buffers are allocated zero-init so the N-tail columns are masked
+# implicitly; the user-visible output is the [:, :N] slice. Skips streamk and
+# work_stealing paths to keep the prototype scoped.
+_N_PAD_UNIT = 64
+_N_PAD_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def _n_pad_gate(M, N, K, dtype, enable_streamk, work_stealing):
+    if enable_streamk or work_stealing:
+        return 0
+    if os.environ.get("TRITONBLAS_N_PAD", "0") != "1":
+        return 0
+    if dtype not in _N_PAD_DTYPES:
+        return 0
+    if M < 2048 or not (4096 <= K <= 16384) or N % _N_PAD_UNIT == 0:
+        return 0
+    n_pad = ((N + _N_PAD_UNIT - 1) // _N_PAD_UNIT) * _N_PAD_UNIT
+    return n_pad if n_pad != N else 0
 
 
 
@@ -480,6 +506,22 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # K-1804: N-padding dispatcher gate (skipped on grad/compile paths).
+    M, K = a.shape
+    _, N = b.shape
+    n_pad = _n_pad_gate(M, N, K, a.dtype, enable_streamk, work_stealing)
+    if n_pad and not is_fake(a) and not torch.is_grad_enabled():
+        b_pad = b.new_zeros(K, n_pad)
+        b_pad[:, :N] = b
+        if out is None:
+            out_pad = a.new_empty(M, n_pad)
+            _matmul_out(a, b_pad, out_pad, enable_streamk, sk_grid, work_stealing)
+            return out_pad[:, :N].clone()
+        out_pad = a.new_empty(M, n_pad)
+        _matmul_out(a, b_pad, out_pad, enable_streamk, sk_grid, work_stealing)
+        out.copy_(out_pad[:, :N])
+        return out
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

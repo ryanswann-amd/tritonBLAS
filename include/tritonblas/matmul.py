@@ -115,36 +115,18 @@ from ._route_predicate import (
     # (M ∈ {2048,4096,8192} × N=256 × K ∈ {2048,4096,8192,16384,32768} ×
     # {bf16,fp16} minus 2 paired-n30 LOSER cells at (2048, 256, 2048, *)).
     _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28,
-    # P32 (23rd-slot): N=160 K-COMPLEMENT verified-winner subset — 18 cells
-    # (M ∈ {2048,4096,8192} × N=160 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
-    # K-1794's N=160 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).
-    _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18,
-    # P33 (24th-slot): N=224 K-COMPLEMENT verified-winner subset — 18 cells
-    # (M ∈ {2048,4096,8192} × N=224 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
-    # K-1794's N=224 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).  Both
-    # dtype rows load-bearing — no upstream alias overlap (N=224 is the first
-    # N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192).
-    _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
-    # P34 (25th-slot): N=96 K-COMPLEMENT verified-winner subset — 18 cells
-    # (M ∈ {2048,4096,8192} × N=96 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
-    # K-1818's N=96 sub-cohort (3-engine paired n=30 HIP-graph hot-cache).  Both
-    # dtype rows load-bearing — no upstream alias overlap (N=96 is the first
-    # wave-misaligned rung below the N=128 cliff per K-1818 PMC RCA).
-    _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18,
-    # P35 (26th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells
-    # (M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384} × {bf16,fp16}) from
-    # K-1832's N=288 sub-cohort (3-pass PMC paired n=30 HIP-graph hot-cache).
-    # Both dtype rows load-bearing — no upstream alias overlap (N=288 is the
-    # off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).  K-1832 cohort
-    # geomean TB/HBL = 4.290× — the largest uplift in the alias-stack to date.
-    _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
-    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells
-    # (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
-    # cells, MINUS (2048,320,4096,bf16) which is already routed by an upstream
-    # alias-stack slot per K-1843 paired-n30 measurement; ratio_TB/HBL=1.0001,
-    # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
-    # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
-    _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
+    # K-1864 (S-002): consolidated P32–P36 K-COMPLEMENT verified-winner
+    # alias-stack — ONE 89-cell frozenset replacing the 5 chained per-slot
+    # checks (P32 N=160 / P33 N=224 / P34 N=96 / P35 N=288 / P36 N=320).
+    # Cells are inlined as literal tuples (single source of truth) in
+    # `_route_predicate.py`; the legacy per-slot named frozensets
+    # (`_P3{2..6}_..._WIN_{17,18}`) survive there ONLY as N-axis projection
+    # views consumed by `tests/test_p3{2..6}_*_alias_stack.py` — the
+    # dispatcher never references them.  Per-slot mechanism / PMC RCA /
+    # provenance lives next to the canonical inlined block in
+    # `_route_predicate.py` (P32 N=160 K-1794, P33 N=224 K-1794, P34 N=96
+    # K-1818, P35 N=288 K-1832, P36 N=320 K-1843).
+    _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89,
 )
 
 
@@ -408,67 +390,24 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean HBL/TB = 1.392×, range 1.07×–2.12×, 28/28 cells pass the strict
     # ≥1.05 ∧ p<0.05 gate; the 2 (M=2048, K=2048) LOSER cells are excluded).
     if (int(M), int(N), int(K), str(a_dtype)) in _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28: return True
-    # P32 (23rd-slot): N=160 K-COMPLEMENT verified-winner subset — 18 cells from
-    # K-1794's N=160 sub-cohort (M ∈ {2048,4096,8192} × N=160 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}).  K-1794 paired n=30 HIP-graph hot-cache 3-engine sweep on
-    # MI300X / gfx942: bf16 routed 9/9 via upstream P5
-    # alias (geomean r_oracle=0.997); fp16 unrouted 0/9 (R-K1794 fp16-mirror gap).
-    # All 18 cells admitted as route-OUT — bf16 alias-overlap is intentional, fp16
-    # closes the wave-misaligned N=160 dtype-mirror (BLOCK_N=128 packs N=160 into
-    # one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint dominates).
-    if (int(M), int(N), int(K), str(a_dtype)) in _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18: return True
-    # P33 (24th-slot): N=224 K-COMPLEMENT verified-winner subset — 18 cells from
-    # K-1794's N=224 sub-cohort (M ∈ {2048,4096,8192} × N=224 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}).  K-1794 paired n=30 HIP-graph hot-cache 3-engine sweep on
-    # MI300X / gfx942: bf16 N=224 unrouted 0/9 with cohort gmean r_oracle=0.722
-    # (first N-axis cliff above N=128 per R-K1794.N224-DOES-NOT-EXTEND-FROM-N192-
-    # FROZENSET-MUST-EXPLICITLY-INCLUDE); fp16 N=224 unrouted 0/9 (R-K1794 fp16-
-    # mirror gap).  All 18 cells admitted as route-OUT — both dtype rows load-
-    # bearing, closes the wave-misaligned N=224 dtype-mirror (BLOCK_N=128 packs
-    # N=224 into one wave-misaligned K-block column → K-913 §3 LDS-BC fingerprint).
-    if (int(M), int(N), int(K), str(a_dtype)) in _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18: return True
-    # P34 (25th-slot): N=96 K-COMPLEMENT verified-winner subset — 18 cells from
-    # K-1818's N=96 sub-cohort (M ∈ {2048,4096,8192} × N=96 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}).  K-1818 PMC RCA paired n=30 HIP-graph hot-cache 3-engine sweep
-    # on MI300X / gfx942: bf16 N=96 unrouted 0/9 and fp16 N=96 unrouted 0/9 in the
-    # pre-stack measurement (no upstream alias coverage at the wave-misaligned N=96
-    # rung BELOW the N=128 cliff).  All 18 cells admitted as route-OUT — both dtype
-    # rows load-bearing, closes the wave-misaligned N=96 dtype-mirror (BLOCK_N=128
-    # packs N=96 into a single wave-misaligned K-block column with PARTIAL coverage
-    # → K-913 §3 LDS-BC fingerprint dominates AND wave-misalignment MFMA-tail
-    # inefficiency per R-1811.WAVE-MISALIGNMENT-IS-ROOT-MECHANISM).
-    if (int(M), int(N), int(K), str(a_dtype)) in _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18: return True
-    # P35 (26th-slot): N=288 K-COMPLEMENT verified-winner subset — 18 cells from
-    # K-1832's N=288 sub-cohort (M ∈ {2048,4096,8192} × N=288 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}).  K-1832 paired n=30 HIP-graph hot-cache 3-pass PMC sweep on
-    # MI300X / gfx942: bf16 N=288 unrouted 0/9 and fp16 N=288 unrouted 0/9 in the
-    # pre-stack measurement (no upstream alias coverage at the wave-misaligned N=288
-    # off-by-32 rung ABOVE the N=256 P31 cliff).  TB/HBL ratio R²=0.9999 vs K-1812
-    # on the 4 overlapping cells; cohort geomean TB/HBL = 4.290× (range 3.06×–6.46×,
-    # 18/18 admit at the strict ≥1.05 ∧ p<0.05 gate).  All 18 cells admitted as
-    # route-OUT — both dtype rows load-bearing, closes the wave-misaligned N=288
-    # dtype-mirror (same K-913 §3 LDS-BC + R-1811 wave-misalignment MFMA-tail
-    # fingerprint as P28 / P31 / P32 / P33 / P34; SCHEDULER_LDS A4 failure mode
-    # per K-1832 PMC delta ranking with SQ_LDS_BANK_CONFLICT ≈ 869× and
-    # SQ_WAIT_INST_LDS ≈ 12.5× at the top of the discriminator list).
-    if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
-    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells from
-    # K-1843's N=320 sub-cohort (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}) MINUS (2048,320,4096,bf16) which is already upstream-routed
-    # per the K-1843 paired-n30 measurement (ratio 1.0001, p=0.293, classified
-    # WITHIN_0p95X_PARITY_BAND).  K-1843 paired n=30 HIP-graph hot-cache + 3-pass
-    # rocprofv2 PMC sweep (LDS / VALU·MFMA / VMEM·L2) on MI300X / gfx942 vs
-    # K-1837 LIVE oracle (e7dfab4 + P32–P35 stacked): 17/17 cells admitted at the
-    # strict ≥1.05× ∧ p<0.05 gate; per-cell ratios 1.326×–1.911× (median 1.583×),
-    # per-N geomean = 1.545×.  Both dtype rows load-bearing — closes the
-    # wave-misaligned N=320 dtype-mirror (BLOCK_N=128 packs N=320 into the
-    # off-by-64 wave-misaligned column-narrow layout above the N=256 P31 cliff
-    # and below the N=384 P30 rung → K-913 §3 LDS-bank-conflict + R-1811
-    # wave-misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
-    # histogram: LDS_DOMINANT 36/36 across the K-1843 N∈{320,352} cohort, with
-    # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
-    # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
+    # K-1864 (S-002): consolidated P32–P36 K-COMPLEMENT verified-winner
+    # alias-stack lookup — ONE membership probe over a single 89-cell
+    # frozenset (cells inlined as literal tuples in `_route_predicate.py`)
+    # replacing the previous chain of 5 back-to-back probes
+    # (P32 N=160 / P33 N=224 / P34 N=96 / P35 N=288 / P36 N=320).
+    # Worst-case dispatch goes from O(5) hash lookups + 5 tuple builds per
+    # call → O(1) hash lookup + 1 tuple build, halting the O(n) chain-
+    # growth pattern at this position as future PMC promotions land.
+    #
+    # Bit-identical routing equivalence vs the prior 5-chain dispatch is
+    # an algebraic identity (`x in (A1 ∪ … ∪ A5)` ≡ `any(x in Ai)` for
+    # disjoint Python sets); empirical disjointness of the 5 N-axis
+    # projections is enforced by the literal cell roster
+    # (sorted({c[1] for c in canonical}) == [96, 160, 224, 288, 320] —
+    # 5 distinct integers) and exercised cell-by-cell against the legacy
+    # 5-chain reference oracle in
+    # `tests/test_k1864_p32_p36_consolidation.py`.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89: return True
     return False
 
 

@@ -456,24 +456,14 @@ _K1161_E2_ADMITS_3 = frozenset({
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2 hbl/tb=1.499x CI95=[1.496, 1.504]
 })
 
+# ---------------------------------------------------------------------------
 # K-1219 / K-1240 — E3 N-floor=256 anchor-projected admits (7 cells).
 # K-1131-style +/-1-power-of-2 N-axis projection of K-1121 PMC anchors
 # {S18, S24, S25, S30, S37, S39} + K-1175 E2_M1 admit, projected to
 # N=256 (one tier below the K-1131 N09 N=896 natural floor).  Per K-1142
-# carve-out, M >= 4480 on every cell.
-#
-# Cross-arch verification (K-1219 + K-1240 paired n=30 HIP-graph
-# hot-cache, B=10000 percentile-CI95 bootstrap on tb_time/hbl_time):
-#   * MI300X (gfx942, rad-mi300x-1):     candidate-cohort geomean tb/hbl 1.368x
-#   * MI325X (gfx942 HBM3e, rad-mi325x-1): candidate-cohort geomean tb/hbl 1.607x
-#   * MI355X (gfx950, mi355x-thor-3):    candidate-cohort geomean tb/hbl 1.652x
-# Per K-1219 R-1219.N-FLOOR-RELAXATION-IS-PORTABLE-WHEN-MFMA-ISSUE-STALL-
-# MECHANISM-IS-SHAPE-LIMITED, the MFMA-issue-stall predicate fires
-# identically at N=256 and N=512 for the same (M, K) shape (PMC evidence
-# from K-1211); lowering the N-floor 512 -> 256 is therefore safe.
-# K-1240 confirmed cross-arch portability across the gfx942/gfx950
-# family (R-1244.STACKED-PREDICATE-CROSS-ARCH-VERDICT-COMPOSES-WITHOUT-
-# INTERACTION).
+# carve-out, M >= 4480 on every cell.  Validated independently in K-1219
+# (commit f110d64 on fix/K-1219-n256, branch productionised pre-K-1282).
+# ---------------------------------------------------------------------------
 _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     # ----- E3 N=256 anchor-projected admits (M >= 4480 per K-1142) -----
     ( 5972,  256,  768, "torch.bfloat16"),  # E3_S18_N256
@@ -485,34 +475,63 @@ _K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
     (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942] / MI325X 3.526 / MI355X 2.771
 })
 
-# Composed 35-cell P8 envelope.  Anchors, neighbors, K-1175/K-1161 E2
-# admits, and K-1219/K-1240 E3 N=256 admits are deliberately kept as
-# separate constants so reviewers (and the manifest auditors) can see
-# provenance at a glance; the dispatch path consults the union.
+# ---------------------------------------------------------------------------
+# K-1227 / K-1205 — E_N3 N-axis extension admits at N=128 (8 cells).
+# Strict-equality envelope at N=128 ∧ K∈{256,768,1024} ∧ M∈anchor M-set ∧ bf16.
+# Independently validated on MI300X/MI325X/MI355X at paired n=30 HIP-graph
+# hot-cache (8/9 candidate cells admit at >= 1.05x CI95-lo).  Productionised
+# pre-K-1282 on feat/p8-envelope-extension-n128 (commit 365c119).
+# ---------------------------------------------------------------------------
+_K1205_EN3_ADMITS_8 = frozenset({
+    # ----- N=128 K=1024 cluster (5 admits; speedups 1.37x-3.25x) -----
+    ( 6016,  128, 1024, "torch.bfloat16"),  # EN_K1024_S25 hbl/tb=1.370x CI95=[1.362, 1.374] (mirror of S25)
+    ( 8064,  128, 1024, "torch.bfloat16"),  # EN_K1024_S26 hbl/tb=1.402x CI95=[1.396, 1.415] (mirror of S26)
+    (14208,  128, 1024, "torch.bfloat16"),  # EN_K1024_S29 hbl/tb=3.254x CI95=[3.234, 3.267] (mirror of S29; cohort MAX)
+    (16256,  128, 1024, "torch.bfloat16"),  # EN_K1024_S30 hbl/tb=3.024x CI95=[3.011, 3.056] (mirror of S30)
+    (22400,  128, 1024, "torch.bfloat16"),  # EN_K1024_S33 hbl/tb=2.258x CI95=[2.234, 2.269] (mirror of S33)
+    # ----- N=128 K=256 cluster (2 admits; extreme-M; speedups 1.14x-1.78x) -----
+    (25600,  128,  256, "torch.bfloat16"),  # EN_K256_S37  hbl/tb=1.144x CI95=[1.140, 1.149] (mirror of S37; cohort MIN admit)
+    (49152,  128,  256, "torch.bfloat16"),  # EN_K256_S39  hbl/tb=1.781x CI95=[1.768, 1.803] (mirror of S39)
+    # ----- N=128 K=768 cluster (1 admit; speedup 1.23x; M=4480 rejected) -----
+    ( 5972,  128,  768, "torch.bfloat16"),  # EN_K768_S18  hbl/tb=1.227x CI95=[1.226, 1.227] (mirror of S18)
+})
+
+# ---------------------------------------------------------------------------
+# K-1282 (S-002 composition) — unified P8 envelope: 28 + 7 + 8 = 43 cells.
+# Composes K-1227 (N=128, 8 admits) and K-1219 (N=256, 7 admits) onto the
+# 28-cell K-1175 P8 baseline.  N axes are disjoint (128 vs 256) and both
+# bands sit below the existing N>=896 floor of K-1121/K-1131, so by
+# construction the union is pairwise-disjoint with the prior three sets
+# (anchors, neighbors, E2).  Per-pair disjointness asserted at runtime.
+# Five named provenance frozensets so the dispatch path's union retains
+# campaign attribution at a glance for downstream auditors.
+# ---------------------------------------------------------------------------
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1219_E3_NFLOOR256_ADMITS_7
+    | _K1205_EN3_ADMITS_8
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 35, (
-    "K-1219 P8 envelope must be exactly 35 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits + 7 K-1219/K-1240 E3 "
-    "N=256 admits); a duplicate or stray entry has crept in.")
-# Cross-check: the four sub-sets must be disjoint by construction.
-# K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
-# selected from the K-931 always-uncovered top-40 catalog minus all
-# K-1121 anchors and minus all K-1131 neighbors; K-1219 E3 N=256 admits
-# are anchor projections to N=256, well below the K-1131 N09 N=896 floor.
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
+    "K-1282 unified P8 envelope must be exactly 43 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits + 7 K-1219 E3 N=256 admits + "
+    "8 K-1227/K-1205 E_N3 N=128 admits); a duplicate or stray entry has crept in.")
+# Cross-check: the five sub-sets must be pairwise disjoint by construction.
+# K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits selected from the
+# K-931 always-uncovered top-40 catalog minus anchors+neighbors; K-1219 E3
+# (N=256) and K-1227 E_N3 (N=128) anchor projections sit on disjoint N axes
+# below the K-1131 N09 N=896 natural floor.
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1131_P8_NEIGHBORS_12), (
-    "K-1144 P8 anchors and neighbors overlap; K-1131 neighbor generation "
-    "rules require strict disjointness from the 13 K-1121 anchors.")
+    "P8 anchors and neighbors overlap; neighbor generation rules require "
+    "strict disjointness from the 13 anchors.")
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1161_E2_ADMITS_3), (
-    "K-1175 K-1161 E2 admits overlap with K-1121 anchors; the K-1161 "
-    "candidate generator excluded all K-1121 anchors by construction.")
+    "E2 admits overlap with anchors; the E2 candidate generator excluded "
+    "all anchors by construction.")
 assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1175 K-1161 E2 admits overlap with K-1131 neighbors; the K-1161 "
     "candidate generator excluded all K-1131 neighbors by construction.")
+# K-1219 (N=256) cross-disjointness with the prior 28-cell envelope.
 assert _K1121_P8_ANCHORS_13.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
     "K-1219 N=256 admit overlaps a K-1121 anchor; the K-1131-style "
     "anchor projection excluded all K-1121 anchors by construction.")
@@ -522,14 +541,31 @@ assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
 assert _K1161_E2_ADMITS_3.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
     "K-1219 N=256 admit overlaps a K-1161 E2 admit; the K-1161 K-axis "
     "admits all sit at N in {1792, 2048}, not N=256.")
+# K-1227 (N=128) cross-disjointness with the prior 28-cell envelope.
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1121_P8_ANCHORS_13), (
+    "E_N3 N-axis admits overlap with anchors; E_N3 candidates have N=128 "
+    "by construction and no anchor has N=128.")
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
+    "E_N3 N-axis admits overlap with neighbors; E_N3 candidates have N=128 "
+    "by construction and no neighbor has N=128.")
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
+    "E_N3 N-axis admits overlap with E2 admits; E_N3 candidates have N=128 "
+    "by construction and no E2 admit has N=128.")
+# K-1282 cross-band disjointness: K-1227 N=128 vs K-1219 N=256 (disjoint by
+# construction since the two campaigns chose different N values).
+assert _K1205_EN3_ADMITS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1282 composition error: K-1227 N=128 admits overlap K-1219 N=256 "
+    "admits.  The two campaigns operate on disjoint N axes by construction; "
+    "an overlap indicates an authoring typo in one of the two frozensets.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175) — direct hipBLASLt route-OUT for the
-    triply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
-    neighbors + K-1175/K-1161 E2 admits).
+    """P8 (K-1282 unified) — direct hipBLASLt route-OUT for the
+    quintuply-validated MFMA-issue-stall cohort (K-1121 anchors + K-1131
+    neighbors + K-1161 E2 K-interior/M-axis admits + K-1219 E3 N=256 admits
+    + K-1227 E_N3 N=128 admits).
 
-    Returns True iff (M, N, K, dtype) matches one of the 28 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 43 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

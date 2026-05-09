@@ -1579,89 +1579,28 @@ def _k1429_p16_skinny_n1024_routeout(M: int, N: int, K: int, dtype) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# K-1437 (S-002 sibling) — P17 `skinny_N512` K-COMPLEMENT BASE route-OUT
-# (11th-position, completes N=512 column-narrow regime).
+# P17 — `skinny_N512` K-COMPLEMENT BASE-band 17-cell strict-equality
+# route-OUT (11th-position).
 #
-# K-1437 productionises the K-1409-derived 18-cell `skinny_N512` K-COMPLEMENT
-# BASE-region cohort as `_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18`,
-# stacked at the 11th position immediately after K-1429 P16 N=1024.  Together
-# with K-1417 P15 EXTREMES (12 cells at K ∈ {2048, 32768}) the two frozensets
-# partition the FULL N=512 K-COMPLEMENT region (BASE ⨄ EXTREMES = 30 cells)
-# at the K-1308 sweep grid.
-#
-# K-COMPLEMENT BASE region (matches K-1417 / K-1429 anchors, K-axis BASE band):
-#   M ∈ {2048, 4096, 8192}    (3 anchors, identical to K-1417 P15 / K-1429 P16)
-#   N = 512                    (column-narrow regime, completes N=512 closure)
-#   K ∈ {4096, 8192, 16384}    (BASE — wrapper-overhead-amortised regime)
-#   dtype ∈ {bf16, fp16}       (K-913 §3 dtype invariance preserved)
-# = 3 × 1 × 3 × 2 = 18 cells.
-#
-# Selection rationale (K-1437 iter-2/iter-3 residual decomposition vs LIVE
-# oracle at K-1429 head 0fae3c3):
-#   * K-1429 P16 N=1024 K-COMPL FULL (29 cells, 2.23×) takes 10th position;
-#     remaining residuals ranked by (cell-count × geomean):
-#       - **N=512 BASE 18-cell, geomean 1.397×, score 23.7  ← P17 (this)**
-#       - N=256 BASE 18-cell mi300x, geomean 1.509×, score 27.2 — partial
-#         cross-arch failures (5/18 mi355x cells fail strict 1.05 gate);
-#         deferred pending mi355x carve-out per K-1410 follow-up.
-#       - square_mid 8192³ admit, 2 cells, 1.331× — too narrow for P17
-#         envelope; tracked as P18 candidate (K-1404 successor).
-#   * Mirrors K-1429 PR pattern: K-1429 closed N=1024 K-COMPL FULL in one
-#     step.  K-1437 P17 closes the N=512 BASE band (EXTREMES already
-#     shipped by K-1417 P15) — N=512 K-COMPL goes 12/30 → 30/30 closed.
-#
-# Convention note (resolved K-1437 iter-3 OQ-A):
-#   The bucket-rule frozenset enumeration is the K-1417 / K-1429 canonical
-#   form: include EVERY (M, N, K, dtype) tuple matching the bucket rule,
-#   excluding only those that fail the strict 1.05 admit gate per source
-#   measurement.  P5-overlap cells are NOT pre-subtracted from the
-#   frozenset — chain ordering at runtime ensures that an earlier
-#   predicate (e.g. P5 at chain pos 4) catches the cell first; the
-#   downstream P17 hit at pos 11 is structurally unreachable but
-#   set-theoretically correct.  This matches K-1417 P15 (which included
-#   no P5-overlap rows because EXTREMES K ∈ {2048, 32768} are entirely
-#   outside the P5 range) and K-1429 P16 (which included no P5-overlap
-#   rows because N=1024 is outside P5's sub-range).  K-1437 P17 includes
-#   exactly 1 P5-overlap cell (2048, 512, 4096, bf16) per K-1418 oracle
-#   JSON; included for arithmetic completeness, harmless at runtime.
-#
-# PMC mechanism (consistent with K-913 / K-1397 / K-1417 findings):
-#   At BASE K (4096-16384) the wrapper-overhead ceiling has dissipated
-#   (R-1367.WRAPPER-OVERHEAD-CEILING-DISAPPEARS-AT-LARGE-K) but the
-#   N=512 persistent_matmul tile aspect still accumulates LDS bank
-#   conflicts beyond the K-913 §3 floor.  hipBLASLt's split-K kernel
-#   re-selects to a pattern that better matches the M ∈ {2048, 4096, 8192}
-#   anchors — same mechanism as K-1417 EXTREMES at N=512 but with smaller
-#   per-cell margin (1.26×–1.65× vs EXTREMES 1.36×–14.06×) since the
-#   wrapper overhead is no longer a multiplier in the ratio.
-#
-# Verification (paired n=30 HIP-graph hot-cache, B=10000 vectorised paired
-# bootstrap CI95 on MI300X gfx942 / OCI MI300X fallback — c42 down):
-#   17/18 ROUTE-OUT (every cell ratio_median ≥ 1.05; 1 cell P5-pre-routed
-#                    via R_K979_P5_route_to_hbl at (2048,512,4096,bf16))
-#   cohort geomean tb/hbl = **1.397×** (K-1409 paired n=30, K-1418 #2)
-#   min ratio_median       = **1.244×** at (2048, 512, 4096, fp16)
-#   max ratio_median       = **1.644×** at (4096, 512, 16384, bf16)
-#   envelope grows         126 → 144 cells (10 → 11 predicate stack)
-#
-# Disjointness rationale (verified by frozenset.isdisjoint at module load):
-#   * P8 sub-frozensets — N != 512 in any P8 anchor.
-#   * K971_ROUTE_TABLE — M=N ∈ {1024, 2048}; no N=512.
-#   * K-1361 P12 — M=N=K ∈ {2048, 4096}; N != 512.
-#   * K-1367 P13 — N=128.
-#   * K-1397 P13 — N=256.
-#   * K-1417 P15 — N=512 EXTREMES K ∈ {2048, 32768}; this P17 covers
-#                  N=512 BASE K ∈ {4096, 8192, 16384}: NATURAL-DISJOINT
-#                  by K-axis partition (BASE ⨄ EXTREMES = full K-COMPL).
-#   * K-1429 P16 — N=1024.
-# All asserted at module load.
+# Closes the N=512 column-narrow K-COMPLEMENT region begun by P15 EXTREMES
+# (12 cells at K ∈ {2048, 32768}); together the two frozensets cover the
+# full 30-cell N=512 K-COMPLEMENT region at the K-1308 sweep grid (one
+# P5-pre-routed cell — (2048,512,4096,bf16) — is excluded from this
+# frozenset because R_K979_P5 catches it earlier in the chain at position
+# 4; that cell is pinned by tests to route via P5).  17/17 admit at the
+# strict 1.05 gate; cohort geomean tb/hbl = 1.40×, range 1.24×-1.64×
+# (paired n=30 HIP-graph hot-cache, B=10000 vectorised bootstrap CI95).
+# Mechanism: at BASE K the wrapper-overhead ceiling has dissipated
+# (R-1367) but the N=512 persistent_matmul tile aspect still accumulates
+# LDS bank conflicts beyond the K-913 §3 floor; hipBLASLt's split-K
+# kernel re-selects to a pattern better matched to M ∈ {2048, 4096, 8192}.
+# Disjointness vs prior P8/K971/P12/P13(N=128)/P13(N=256)/P15/P16
+# frozensets is asserted in tests/test_k1437_p17_skinny_n512_kcompl_base.py.
 # ---------------------------------------------------------------------------
-_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18 = frozenset({
-    # M=2048 row × K ∈ {4096, 8192, 16384} × {bf16, fp16}
-    (2048, 512,  4096, "torch.bfloat16"),     # P5-overlap; included for
-                                              # frozenset-completeness, no harm
-                                              # (P5 fires at chain pos 4 < pos 11)
-    (2048, 512,  4096, "torch.float16"),      # r=1.244 ci_lo>=1.20
+_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17 = frozenset({
+    # M=2048 row (K ∈ {4096, 8192, 16384} × {bf16, fp16}; (2048,512,4096,bf16)
+    # excluded — P5-pre-routed at chain pos 4)
+    (2048, 512,  4096, "torch.float16"),      # r=1.244
     (2048, 512,  8192, "torch.bfloat16"),     # r=1.474
     (2048, 512,  8192, "torch.float16"),      # r=1.395
     (2048, 512, 16384, "torch.bfloat16"),     # r=1.633
@@ -1681,92 +1620,26 @@ _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18 = frozenset({
     (8192, 512, 16384, "torch.bfloat16"),     # r=1.370
     (8192, 512, 16384, "torch.float16"),      # r=1.344
 })
-assert len(_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18) == 18, (
-    "K-1437 P17 skinny_N512 K-COMPLEMENT BASE frozenset must be exactly 18 "
-    "cells (M ∈ {2048,4096,8192} × N=512 × K ∈ {4096,8192,16384} × {bf16,fp16}); "
-    "any deviation indicates an authoring typo against the K-1409 paired n=30 "
-    "BASE admit set (R-1437.SKINNY-N512-K-COMPLEMENT-BASE-CLOSES-N512-COLUMN).")
-# Cross-frozenset disjointness — K-1437 P17 vs prior 10-predicate stack.
-_K1437_P17_VS_P8_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
-assert _K1437_P17_VS_P8_DISJOINT, (
-    "K-1437 P17 skinny_N512 BASE cell overlaps P8 envelope; P8 anchors use "
-    "N ∈ {128, 256} or M=N square — P17 uses N=512 non-square. "
-    "Natural disjointness, asserted insurance.")
-_K1437_P17_VS_K971_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(K971_ROUTE_TABLE))
-assert _K1437_P17_VS_K971_DISJOINT, (
-    "K-1437 P17 N=512 BASE cell overlaps K971_ROUTE_TABLE; K971 uses M=N ∈ "
-    "{1024, 2048}; P17 cells all use N=512 — natural disjointness.")
-_K1437_P17_VS_P12_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
-assert _K1437_P17_VS_P12_DISJOINT, (
-    "K-1437 P17 N=512 BASE cell overlaps K-1361 P12; P12 cells M=N=K ∈ "
-    "{2048, 4096}; P17 uses N=512, natural disjointness.")
-_K1437_P17_VS_K1367_P13_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(
-        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
-assert _K1437_P17_VS_K1367_P13_DISJOINT, (
-    "K-1437 P17 N=512 BASE cell overlaps K-1367 P13 N=128; P13(N=128) cells "
-    "use N=128, P17 uses N=512 — natural disjointness (A4 sibling-N firewall).")
-_K1437_P17_VS_K1397_P13_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(
-        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
-assert _K1437_P17_VS_K1397_P13_DISJOINT, (
-    "K-1437 P17 N=512 BASE cell overlaps K-1397 P13 N=256; P13(N=256) cells "
-    "use N=256, P17 uses N=512 — natural disjointness (A4 sibling-N firewall).")
-_K1437_P17_VS_K1409_P15_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(
-        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
-assert _K1437_P17_VS_K1409_P15_DISJOINT, (
-    "K-1437 P17 N=512 BASE overlaps K-1417 P15 N=512 EXTREMES; "
-    "BASE K ∈ {4096, 8192, 16384} vs EXTREMES K ∈ {2048, 32768} — natural "
-    "K-axis disjointness, asserted (BASE ⨄ EXTREMES = full N=512 K-COMPL).")
-_K1437_P17_VS_K1429_P16_DISJOINT = (
-    _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18.isdisjoint(
-        _K1429_P16_SKINNY_N1024_KCOMPL_ROUTEOUT_29))
-assert _K1437_P17_VS_K1429_P16_DISJOINT, (
-    "K-1437 P17 N=512 BASE overlaps K-1429 P16 N=1024 FULL; "
-    "P17 uses N=512, P16 uses N=1024 — natural disjointness "
-    "(A4 sibling-N firewall).")
 
 
 def _k1437_p17_skinny_n512_kcompl_base_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1437 P17 — direct hipBLASLt route-OUT for the 18-cell skinny_N512
-    K-COMPLEMENT BASE-region cohort
-    (`_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18`).
+    """P17 — direct hipBLASLt route-OUT for the 17-cell skinny_N512
+    K-COMPLEMENT BASE-band cohort.
 
-    Returns True iff (M, N, K, dtype) matches one of the 18 strict-equality
-    keys: M ∈ {2048, 4096, 8192} × N = 512 × K ∈ {4096, 8192, 16384} ×
-    dtype ∈ {torch.bfloat16, torch.float16}.  Completes the N=512 column-
-    narrow K-COMPLEMENT closure begun by K-1417 P15 EXTREMES (12 cells at
-    K ∈ {2048, 32768}); together the two frozensets partition the full
-    N=512 K-COMPLEMENT region at the K-1308 sweep grid.
+    Returns True iff (M, N, K, dtype) is a member of
+    ``_K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17``: M ∈ {2048, 4096,
+    8192} × N = 512 × K ∈ {4096, 8192, 16384} × dtype ∈ {bf16, fp16},
+    excluding (2048, 512, 4096, bf16) which is P5-routed at chain pos 4.
 
-    Source measurement: K-1409 paired n=30 HIP-graph hot-cache benchmarks
-    on MI300X / gfx942 (OCI MI300X fallback per
-    R-1409.OCI-AMD-ARAD-MI300X-IS-ESTABLISHED-FALLBACK; c42 down) with
-    B=10000 vectorised paired bootstrap CI95 (numpy advanced-indexing per
-    R-1298 / R-1367); 17/18 admit at strict 1.05 gate (1 P5-pre-routed cell
-    included for arithmetic completeness — chain pos 4 << pos 11), cohort
-    geomean tb/hbl = 1.397×, range 1.244×–1.644×.
-
-    Mechanism: at BASE K the wrapper-overhead ceiling has dissipated
-    (R-1367.WRAPPER-OVERHEAD-CEILING-DISAPPEARS-AT-LARGE-K) but the N=512
-    persistent_matmul tile aspect still accumulates LDS bank conflicts
-    beyond the K-913 §3 floor; hipBLASLt's split-K kernel re-selects to a
-    pattern that better matches the M ∈ {2048, 4096, 8192} anchors — same
-    mechanism as K-1417 EXTREMES at N=512 but with smaller per-cell margin
-    (1.24×–1.64× vs EXTREMES 1.36×–14.06×) since the wrapper overhead is
-    no longer a multiplier in the ratio.
-
-    Stacked at 11th-position per K-1175 stacked-predicate convention;
-    disjoint by construction with all P1–P16 sub-frozensets via the
-    cross-frozenset asserts above.
+    Source: paired n=30 HIP-graph hot-cache benchmarks on MI300X (gfx942)
+    with B=10000 vectorised paired bootstrap CI95.  17/17 admit at strict
+    1.05; cohort geomean tb/hbl = 1.40×, range 1.24×-1.64×.  Stacked at
+    11th-position per the K-1175 stacked-predicate convention; disjointness
+    vs prior P1-P16 sub-frozensets is exercised by the test suite.
     """
     return (
         (int(M), int(N), int(K), str(dtype))
-        in _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_18
+        in _K1437_P17_SKINNY_N512_KCOMPL_BASE_ROUTEOUT_17
     )
 
 
@@ -1794,7 +1667,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       8. K-1397 P13 skinny_N256 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
       9. K-1417 P15 skinny_N512 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
      10. K-1429 P16 skinny_N1024 K-COMPLEMENT 29-cell strict-equality -> hipBLASLt.
-     11. K-1437 P17 skinny_N512 K-COMPLEMENT BASE 18-cell strict-equality -> hipBLASLt.
+     11. P17 skinny_N512 K-COMPLEMENT BASE 17-cell strict-equality -> hipBLASLt.
     """
     if disable_env_set:
         return False
@@ -1868,18 +1741,12 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # Envelope grows 97 → 126 cells.
     if _k1429_p16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype):
         return True
-    # K-1437 P17 (11th-position): skinny_N512 K-COMPLEMENT BASE 18-cell
-    # route-OUT.  Stacks AFTER K-1429 P16 per K-1175 stacked-predicate
-    # convention; closes the K-1417 P15 EXTREMES sibling at N=512 BASE
-    # band (K ∈ {4096, 8192, 16384}) — N=512 K-COMPLEMENT goes from
-    # 12/30 (40%, EXTREMES only) to 30/30 (100%, BASE ⨄ EXTREMES).
-    # Mechanism: at BASE K the wrapper-overhead ceiling has dissipated
-    # (R-1367.WRAPPER-OVERHEAD-CEILING-DISAPPEARS-AT-LARGE-K) but the
-    # N=512 persistent_matmul tile aspect still accumulates LDS bank
-    # conflicts beyond the K-913 §3 floor; hipBLASLt's split-K kernel
-    # re-selects to a pattern that better matches the M ∈ {2048, 4096,
-    # 8192} anchors.  Per-cell ratios 1.244×–1.644×; cohort geomean
-    # 1.397×; envelope grows 126 → 144 cells (10 → 11 predicate stack).
+    # P17 (11th-position): skinny_N512 K-COMPLEMENT BASE 17-cell route-OUT.
+    # Stacks AFTER P16 per the K-1175 stacked-predicate convention; closes
+    # the P15 N=512 EXTREMES sibling at the BASE K band (K ∈ {4096, 8192,
+    # 16384}) so N=512 K-COMPLEMENT goes from 12/30 (P15 EXTREMES only) to
+    # 29/30 (P15 ⨄ P17, with one P5-pre-routed cell shared).  Per-cell
+    # ratios 1.24×-1.64×; cohort geomean 1.40×.
     if _k1437_p17_skinny_n512_kcompl_base_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

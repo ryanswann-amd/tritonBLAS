@@ -43,23 +43,35 @@ the modular bank-collision pattern without changing the K-loop count
 (unlike kpack=2, which K-612/K-646/K-683 showed regresses long-K shapes
 through latency-hiding collapse - see ``project_context/tritonblas/lessons.md``).
 
-Envelope (load-bearing safety)
-------------------------------
-Strictly admit only the K-1617/K-1633-verified shape envelope:
+Envelope (load-bearing safety, narrowed by K-1640 paired n=30 evidence)
+-----------------------------------------------------------------------
+The K-1640 paired n=30 HIP-graph hot-cache sweep on the 6 K-1629 worst
+cells found that the bank-conflict mitigation is **only** statistically
+beneficial on the square-skinny corner (M == K, N == 128). On the other
+five admit candidates the change is statistical noise or a small
+regression (paired-t in [-4.13, +1.70]). We therefore narrow the
+admit envelope from the original "N in {128,256}, K in [1024,16384]"
+shape rectangle to the single proven-winning cell pattern:
 
-  * N in {128, 256}                           # the K-COMPLEMENT skinny axis
-  * K in [1024, 16384]                        # K-COMPLEMENT range; tail K
-                                              # below 1024 is amortised by
-                                              # the persistent loop epilogue
-                                              # which the new path does not
-                                              # touch
-  * BLOCK_M in {128, 256}, BLOCK_N in {128, 256}
-  * BLOCK_K in {32, 64}                       # the K-COMPLEMENT-selected
-                                              # tile granularity
+  * N == 128                                  # the only width that won
+  * M == K                                    # the only square-skinny
+                                              # M:K ratio with paired-t > 2
+  * K in [2048, 16384]                        # extrapolation cap; we have
+                                              # ground-truth only at K=4096,
+                                              # so we admit one octave each
+                                              # side and cap at the
+                                              # K-1633 catalogue ceiling
+  * BLOCK_M in {128, 256}, BLOCK_N == 128
+  * BLOCK_K in {32, 64}
 
 Anything else falls through to the baseline persistent_matmul launch path
 unchanged. In particular:
 
+  * N == 256: refused (K-1640 sweep showed paired-t in [-4.13, -0.50] on
+    all three measured cells — not the targeted bank-conflict regime)
+  * M != K (skinny-rect rather than square-skinny): refused (K-1640 sweep
+    showed (M=4096,K=2048) at -1.93% paired-t=-2.63 and (M=4096,K=8192)
+    at noise; only the square-skinny corner won)
   * N >= 512: baseline (the 17 P26 production frozensets live here -
     this gate must not perturb their selection)
   * Quantized GEMM: baseline (32x32 MFMA is not certified for the int8
@@ -80,15 +92,28 @@ Rationale references
 
 from typing import Tuple
 
-# K-COMPLEMENT envelope bounds. These come from K-1633's cell catalogue
-# and K-1617's N-bucket verification; do not widen without re-running the
-# 17-frozenset P26 regression sweep.
-_LDS_PADDED_N_VALUES = (128, 256)
-_LDS_PADDED_K_LO = 1024
+# K-COMPLEMENT envelope bounds, NARROWED by K-1640 iter-2 paired n=30
+# evidence to the single (M==K, N==128) square-skinny corner that showed a
+# statistically-significant win (paired-t = +3.87, +3.04% median speedup
+# on cell (4096,128,4096); see workspace gist). The previous, wider
+# envelope (N in {128,256}, K in [1024,16384]) admitted 5 cells where the
+# change was noise or net-negative — those are now refused.
+#
+# Do not widen without:
+#   (a) re-running the 17-frozenset P26 regression sweep, AND
+#   (b) showing paired-t > 2 on the new cells AND no per-cell paired-t < -2.
+_LDS_PADDED_N_VALUES = (128,)
+_LDS_PADDED_K_LO = 2048
 _LDS_PADDED_K_HI = 16384
 _LDS_PADDED_BLOCK_M_VALUES = (128, 256)
-_LDS_PADDED_BLOCK_N_VALUES = (128, 256)
+_LDS_PADDED_BLOCK_N_VALUES = (128,)
 _LDS_PADDED_BLOCK_K_VALUES = (32, 64)
+# Square-skinny ratio gate. M and K may differ by at most this factor
+# (i.e. 0.5 <= M/K <= 2). The (4096,128,4096) winning cell has M/K=1;
+# the regressing (4096,128,2048) cell has M/K=2 and the noise
+# (4096,128,8192) cell has M/K=0.5 — both at the edge. We therefore
+# admit only EXACTLY M==K to stay strictly inside the proven point.
+_LDS_PADDED_REQUIRE_M_EQ_K = True
 
 # The codegen knobs the variant path will swap in. These constants are
 # intentionally exported so the gist & tests can assert on them and so
@@ -162,6 +187,14 @@ def should_use_lds_padded_path(
     # Sanity: block_m must not exceed M (otherwise the P26 oracle would
     # not have selected this tile and we'd be in a degenerate corner).
     if block_m > M:
+        return False
+
+    # K-1640 iter-2 narrowing: only the M==K square-skinny corner showed
+    # a statistically-significant win in the paired n=30 sweep. The
+    # off-diagonal M:K ratios (1:2, 2:1) either regressed or showed
+    # noise. Refusing those keeps the gate strictly inside the proven
+    # point.
+    if _LDS_PADDED_REQUIRE_M_EQ_K and M != K:
         return False
 
     return True

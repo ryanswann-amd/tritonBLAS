@@ -29,18 +29,30 @@ from tritonblas.kernels.lds_padded_envelope import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# K-1629 worst cells — 6 (M, N, K, BM, BN, BK) tuples that drove this gate.
-# These tile assignments mirror the P26 oracle's selection on N∈{128,256}
-# K-COMPLEMENT cells (BM=128 or 256, BN matches N, BK=64).
+# K-1640 iter-2 ADMITTED cell — the single (M==K, N==128) square-skinny
+# corner that showed a statistically-significant win (paired-t = +3.87,
+# +3.04% median speedup) in the K-1640 paired n=30 HIP-graph hot-cache
+# sweep. This is the only cell the production gate now admits.
 # ─────────────────────────────────────────────────────────────────────────────
-K1629_WORST_CELLS = [
-    # (M,    N,   K,    BM,  BN,  BK)
-    (4096,  128, 2048,  128, 128, 64),
+K1640_ADMIT_CELLS = [
+    # (M,    N,   K,    BM,  BN,  BK)  — the proven winner
     (4096,  128, 4096,  128, 128, 64),
-    (4096,  128, 8192,  128, 128, 64),
-    (8192,  256, 2048,  256, 256, 64),
-    (8192,  256, 4096,  256, 256, 64),
-    (8192,  256, 8192,  256, 256, 64),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# K-1640 iter-2 REFUSED cells — the 5 K-1629 cells that the wider iter-1
+# envelope admitted but the paired sweep showed were noise or net-negative.
+# These MUST now fall through to baseline so we don't ship code that we
+# measured as regressing them.
+# ─────────────────────────────────────────────────────────────────────────────
+K1640_REFUSED_K1629_CELLS = [
+    # (M,    N,   K,    BM,  BN,  BK,  reason)
+    (4096,  128, 2048,  128, 128, 64, "M!=K (M:K=2:1); paired-t=-2.63 (regress)"),
+    (4096,  128, 8192,  128, 128, 64, "M!=K (M:K=1:2); paired-t=+1.70 (noise)"),
+    (8192,  256, 2048,  256, 256, 64, "N=256 not admitted; paired-t=-1.54"),
+    (8192,  256, 4096,  256, 256, 64, "N=256 not admitted; paired-t=-0.50 (noise)"),
+    (8192,  256, 8192,  256, 256, 64, "N=256 not admitted; paired-t=-4.13 (regress)"),
 ]
 
 
@@ -55,10 +67,23 @@ K1633_N512_CONTROL_CELLS = [
 ]
 
 
-@pytest.mark.parametrize("M,N,K,BM,BN,BK", K1629_WORST_CELLS)
-def test_admits_k1629_worst_cells(M, N, K, BM, BN, BK):
+@pytest.mark.parametrize("M,N,K,BM,BN,BK", K1640_ADMIT_CELLS)
+def test_admits_k1640_proven_winner(M, N, K, BM, BN, BK):
     assert should_use_lds_padded_path(M, N, K, BM, BN, BK), (
-        f"K-1629 worst cell ({M},{N},{K},{BM},{BN},{BK}) should be admitted"
+        f"K-1640 proven-winner cell ({M},{N},{K},{BM},{BN},{BK}) should "
+        f"still be admitted (this is the only cell the iter-2 narrowed "
+        f"gate admits — losing it loses the entire PR)"
+    )
+
+
+@pytest.mark.parametrize("M,N,K,BM,BN,BK,reason", K1640_REFUSED_K1629_CELLS)
+def test_refuses_iter1_cells_that_iter2_sweep_showed_were_not_wins(
+    M, N, K, BM, BN, BK, reason,
+):
+    assert not should_use_lds_padded_path(M, N, K, BM, BN, BK), (
+        f"Cell ({M},{N},{K},{BM},{BN},{BK}) was admitted by the iter-1 "
+        f"envelope but the K-1640 paired n=30 sweep showed: {reason}. "
+        f"The iter-2 narrowed gate must REFUSE it."
     )
 
 
@@ -71,9 +96,12 @@ def test_refuses_n512_control_cells(M, N, K, BM, BN, BK):
 
 
 def test_refuses_n_outside_envelope():
-    # N=512, 1024, 2048, 4096, 8192 — all production-routed
-    for n in (512, 1024, 2048, 4096, 8192):
-        assert not should_use_lds_padded_path(4096, n, 4096, 128, min(n, 256), 64)
+    # N=256, 512, 1024, 2048, 4096, 8192 — all refused by the iter-2 gate
+    # (N=256 was refused because the K-1640 paired sweep showed no win)
+    for n in (256, 512, 1024, 2048, 4096, 8192):
+        assert not should_use_lds_padded_path(4096, n, 4096, 128, min(n, 256), 64), (
+            f"N={n} must be refused by the iter-2 gate"
+        )
 
 
 def test_refuses_n64_below_envelope():
@@ -83,34 +111,46 @@ def test_refuses_n64_below_envelope():
 
 
 def test_refuses_short_k():
-    # K<1024: K-COMPLEMENT lower bound — short-K is amortised by the
-    # persistent loop epilogue, this path does not target it
+    # K<2048: K-1640 narrowed lower bound — we have no ground-truth
+    # measurement at K<2048, and even at K=2048 the (M=4096,N=128,K=2048)
+    # cell regressed -1.93%.
+    assert not should_use_lds_padded_path(4096, 128, 1024, 128, 128, 64)
     assert not should_use_lds_padded_path(4096, 128, 512, 128, 128, 64)
-    assert not should_use_lds_padded_path(4096, 256, 768, 256, 256, 64)
 
 
 def test_refuses_long_k_above_envelope():
     # K>16384: not in the K-1617/K-1633 catalogue — deliberately conservative
-    assert not should_use_lds_padded_path(4096, 128, 32768, 128, 128, 64)
+    assert not should_use_lds_padded_path(16384, 128, 32768, 128, 128, 64)
 
 
 def test_refuses_unusual_block_k():
     # The K-COMPLEMENT cells select BK in {32,64}; BK=128 is the long-K
-    # corner that the routing oracle assigns to a different path
+    # corner that the routing oracle assigns to a different path. Use
+    # M==K to isolate the BK gate from the M==K gate.
     assert not should_use_lds_padded_path(4096, 128, 4096, 128, 128, 128)
-    assert not should_use_lds_padded_path(4096, 256, 8192, 256, 256, 16)
+    assert not should_use_lds_padded_path(8192, 128, 8192, 128, 128, 16)
+
+
+def test_refuses_unequal_M_K():
+    # The iter-2 narrowing requires M==K (square-skinny corner). Verify
+    # both off-diagonal directions are refused even when N, BM, BN, BK
+    # all sit inside the rest of the envelope.
+    assert not should_use_lds_padded_path(4096, 128, 8192, 128, 128, 64), \
+        "M:K = 1:2 must be refused"
+    assert not should_use_lds_padded_path(8192, 128, 4096, 128, 128, 64), \
+        "M:K = 2:1 must be refused"
 
 
 def test_refuses_quantized():
     # int8/fp8 has its own epilogue contract; not certified for 32x32 MFMA
-    M, N, K, BM, BN, BK = K1629_WORST_CELLS[0]
+    M, N, K, BM, BN, BK = K1640_ADMIT_CELLS[0]
     assert not should_use_lds_padded_path(M, N, K, BM, BN, BK, quantized=True)
 
 
 def test_refuses_bias():
     # Bias epilogue not re-verified against the 32x32 MFMA layout for
     # skinny-N — conservative refusal.
-    M, N, K, BM, BN, BK = K1629_WORST_CELLS[0]
+    M, N, K, BM, BN, BK = K1640_ADMIT_CELLS[0]
     assert not should_use_lds_padded_path(M, N, K, BM, BN, BK, bias=True)
 
 

@@ -1074,13 +1074,143 @@ def _k1367_p13_skinny_n128_routeout(M: int, N: int, K: int, dtype) -> bool:
     ≈ 1.45 vs HBL = 0; positive-filter-check + fail-loud sweep verified
     HBL LDS_BC = 0 is real measurement).
 
-    Stacked LAST (7th-position) per K-1175 stacked-predicate convention;
+    Stacked at 7th-position per K-1175 stacked-predicate convention;
     disjoint by construction with all P1–P12 sub-frozensets via the
     cross-frozenset asserts above.
     """
     return (
         (int(M), int(N), int(K), str(dtype))
         in _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18
+    )
+
+
+# ---------------------------------------------------------------------------
+# K-1397 (S-002) — P13 `skinny_N256` K-COMPLEMENT route-OUT (8th-position).
+#
+# K-1402 productionises the K-1397-winning 12-cell `skinny_N256` cohort as
+# `_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12`, layered as the 8th-position
+# envelope in the dispatch precedence chain on top of the K-1389 P13 73-cell
+# baseline (envelope grows 73 → 85 cells; +12 admits).
+#
+# Bucket scope: K-1365's post-P12 4-bucket decomposition surfaced
+# `skinny_N256` as the last residual-addressable bucket after P12/P13/N128
+# closed `skinny_N128`.  The K-1397 measurement campaign demonstrated that
+# the same `wrapper-overhead-ceiling-disappears-at-large-K` argument
+# (R-1367.WRAPPER-OVERHEAD-CEILING-DISAPPEARS-AT-LARGE-K-WHERE-TB-TIME-DOMINATES-30US-TRITONOP)
+# generalises to N=256 column-narrow GEMMs, but the K-axis admit set sits
+# at the EXTREMES of the K-1308 sweep grid (K=2048 and K=32768) where the
+# aspect ratio either (a) starves persistent_matmul's tile parallelism with
+# too few K-tiles per CU (K=2048 small-K starvation) or (b) overflows LDS
+# bank-conflict capacity at the persistent N=256 tile width (K=32768 large-K
+# saturation).  The complementary mid-K band (K ∈ {4096, 8192, 16384}) is
+# already routed correctly by tritonblas persistent_matmul; the K-COMPLEMENT
+# is exactly the {K=2048, K=32768} pair (codified as
+# R-1397.SKINNY-N256-K-COMPLEMENT-IS-EXTREMES-NOT-MID-BAND).
+#
+# K-COMPLEMENT region:
+#   M ∈ {2048, 4096, 8192}   (3 anchors, same as K-1367 N=128 row)
+#   N = 256                   (column-narrow regime, +1 column step from N=128)
+#   K ∈ {2048, 32768}         (extremes — small-K starvation + large-K LDS-BC)
+#   dtype ∈ {bf16, fp16}      (K-913 §3 dtype invariance preserved)
+# = 3 × 1 × 2 × 2 = 12 cells.
+#
+# PMC mechanism (consistent with K-913 longK_smallSquare findings):
+#   hipBLASLt's split-K kernel selection wins over tritonblas
+#   persistent_matmul at extreme aspect ratios where LDS bank conflicts
+#   dominate the persistent N=256 tile layout (TB SQ_LDS_BC/inst remains
+#   high at N=256, HBL split-K trades LDS pressure for atomic-reduction).
+#
+# Disjointness rationale (verified by frozenset.isdisjoint at module load):
+#   * P8 sub-frozensets — K-1121/K-1131/K-1161/K-1283 use M >= 4480 (P13
+#     uses M ∈ {2048, 4096} below threshold; M=8192 cells are admitted by
+#     P8 only at specific (N,K) tuples enumerated in K-1121 anchors which
+#     do not include N=256, K ∈ {2048, 32768}).  K-1219 N=256 sub-frozenset
+#     uses K ∈ {1024, 2048} with M ∈ {1024, 2048} — partial overlap candidate
+#     at (2048, 256, 2048, *); verified disjoint by frozenset.isdisjoint at
+#     module load (K-1219 specific tuples must be enumerated to overlap).
+#   * K971_ROUTE_TABLE — K-905/K-971 anchors use M=N ∈ {1024, 2048};
+#     K-1335 uses M=N ∈ {1024, 2048}; neither has N=256, no collision.
+#   * K-1361 P12 — uses M=N=K ∈ {2048, 4096} with N != 256; no collision.
+#   * K-1367 P13 — uses N=128; K-1397 uses N=256; natural disjointness.
+# All asserted at module load.
+# ---------------------------------------------------------------------------
+_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12 = frozenset({
+    # M=2048 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (2048, 256,  2048, "torch.bfloat16"),
+    (2048, 256,  2048, "torch.float16"),
+    (2048, 256, 32768, "torch.bfloat16"),
+    (2048, 256, 32768, "torch.float16"),
+    # M=4096 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (4096, 256,  2048, "torch.bfloat16"),
+    (4096, 256,  2048, "torch.float16"),
+    (4096, 256, 32768, "torch.bfloat16"),
+    (4096, 256, 32768, "torch.float16"),
+    # M=8192 row × K ∈ {2048, 32768} × {bf16, fp16}
+    (8192, 256,  2048, "torch.bfloat16"),
+    (8192, 256,  2048, "torch.float16"),
+    (8192, 256, 32768, "torch.bfloat16"),
+    (8192, 256, 32768, "torch.float16"),
+})
+assert len(_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12) == 12, (
+    "K-1397 P13 skinny_N256 K-COMPLEMENT frozenset must be exactly 12 cells "
+    "(M ∈ {2048,4096,8192} × N=256 × K ∈ {2048,32768} × {bf16,fp16}); "
+    "any deviation indicates an authoring typo against the K-1365 post-P12 "
+    "4-bucket decomposition or the K-1397 K-COMPLEMENT extremes scoping.")
+# Cross-frozenset disjointness — K-1397 P13 vs prior envelopes.
+_K1397_P13_VS_P8_DISJOINT = (
+    _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1397_P13_VS_P8_DISJOINT, (
+    "K-1397 P13 skinny_N256 K-COMPLEMENT cell overlaps the K-1322 51-cell P8 "
+    "envelope; K-1219's N=256 sub-frozenset uses K ∈ {1024, 2048} with "
+    "M ∈ {1024, 2048} — only (2048, 256, 2048, *) is an on-paper collision "
+    "candidate; specific K-1219 tuples must be enumerated to overlap.  "
+    "Disjointness verified by frozenset intersection at module load.")
+_K1397_P13_VS_K971_DISJOINT = (
+    _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12.isdisjoint(K971_ROUTE_TABLE))
+assert _K1397_P13_VS_K971_DISJOINT, (
+    "K-1397 P13 skinny_N256 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
+    "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N ∈ {1024, 2048}; "
+    "K-1397 cells all use N=256 — natural disjointness, but assert as cheap "
+    "insurance per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.")
+_K1397_P13_VS_P12_DISJOINT = (
+    _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1397_P13_VS_P12_DISJOINT, (
+    "K-1397 P13 skinny_N256 K-COMPLEMENT cell overlaps K-1361 P12 square_mid; "
+    "P12 cells use M=N=K ∈ {2048, 4096}; K-1397 cells all use N=256 — natural "
+    "disjointness, asserted for completeness (A4 no-double-admit).")
+_K1397_P13_VS_K1367_P13_DISJOINT = (
+    _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
+assert _K1397_P13_VS_K1367_P13_DISJOINT, (
+    "K-1397 P13 skinny_N256 cell overlaps K-1367 P13 skinny_N128; "
+    "K-1367 cells use N=128, K-1397 cells use N=256 — natural disjointness, "
+    "asserted for completeness (A4 no-double-admit; the two K-COMPLEMENT "
+    "predicates partition the skinny-N column-narrow regime by N-axis).")
+
+
+def _k1397_p13_skinny_n256_routeout(M: int, N: int, K: int, dtype) -> bool:
+    """K-1397 P13 — direct hipBLASLt route-OUT for the 12-cell skinny_N256
+    K-COMPLEMENT cohort (`_K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 12 strict-equality
+    keys: M ∈ {2048, 4096, 8192} × N = 256 × K ∈ {2048, 32768} ×
+    dtype ∈ {torch.bfloat16, torch.float16}.
+
+    Source measurement: K-1397 paired n=30 HIP-graph hot-cache benchmarks
+    on MI300X / gfx942 with B=10000 vectorised paired bootstrap CI95;
+    12/12 ROUTE-OUT, per-cell speedups span 1.04× to 1.12×.  Mechanism is
+    hipBLASLt's split-K kernel selection winning over tritonblas
+    persistent_matmul at extreme aspect ratios where LDS bank conflicts
+    dominate the persistent N=256 tile layout (consistent with K-913
+    longK_smallSquare PMC findings).
+
+    Stacked at 8th-position per K-1175 stacked-predicate convention;
+    disjoint by construction with all P1–P13(N=128) sub-frozensets via the
+    cross-frozenset asserts above.
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12
     )
 
 
@@ -1105,6 +1235,7 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
       5. K-905 / K-971 / K-1335 strict-equality LDS-BC anchor table -> hipBLASLt.
       6. K-1361 P12 square_mid 4-cell strict-equality -> hipBLASLt.
       7. K-1367 P13 skinny_N128 K-COMPLEMENT 18-cell strict-equality -> hipBLASLt.
+      8. K-1397 P13 skinny_N256 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt.
     """
     if disable_env_set:
         return False
@@ -1146,5 +1277,15 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # the K-1308 skinny_N128 K-COMPLEMENT region (K >= 4096 above the 30 µs
     # triton_op wrapper-overhead ceiling) at cohort geomean tb/hbl = 1.678×.
     if _k1367_p13_skinny_n128_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1397 P13 (8th-position): skinny_N256 K-COMPLEMENT 12-cell route-OUT.
+    # Stacks AFTER K-1367 P13 per K-1175 stacked-predicate convention; closes
+    # the last K-1365 post-P12 4-bucket residual (skinny_N256 at K-axis
+    # extremes K ∈ {2048, 32768}) where hipBLASLt's split-K kernel selection
+    # wins over tritonblas persistent_matmul (LDS bank conflicts dominate at
+    # the persistent N=256 tile layout — consistent with K-913
+    # longK_smallSquare PMC findings).  Per-cell speedups 1.04×–1.12×;
+    # envelope grows 73 → 85 cells.
+    if _k1397_p13_skinny_n256_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

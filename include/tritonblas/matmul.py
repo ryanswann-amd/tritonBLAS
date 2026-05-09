@@ -48,6 +48,10 @@ from ._route_predicate import (
     # (12th-position).
     _k1465_p19_skinny_n8192_routeout
         as _R_K1465_P19_skinny_n8192_routeout,
+    # K-1498 (S-002): P20 skinny_N16384 K-COMPLEMENT 12-cell route-OUT
+    # (13th-position; SHRUNK from K-1478's 30-cell prediction).
+    _k1498_p20_skinny_n16384_routeout
+        as _R_K1498_P20_skinny_n16384_routeout,
 )
 
 
@@ -195,6 +199,34 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # frozenset asserts at module load (N-axis projection: P19 N=8192 vs
     # prior {128,256,512,1024,2048} columns).
     if _R_K1465_P19_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1498 (S-002): P20 skinny_N16384 K-COMPLEMENT 12-cell direct hipBLASLt
+    # route-OUT (13th-position).  Stacks AFTER K-1474 P19 per the K-1175
+    # stacked-predicate convention.
+    #
+    # K-1498 SHRUNK FROM K-1478's predicted 30-cell envelope after re-
+    # measurement on MI300X gfx942 / the current ROCm / hipBLASLt / Triton 3.6.0
+    # (rad-mi300x-splinter1 May 2026) found that K-1478's predicted speedups
+    # DID NOT REPRODUCE on the current stack: re-measured envelope geomean
+    # was 1.084x (vs 1.174x predicted); 18/30 cells either route TB-faster
+    # (K=2048 column at parity, K=32768 column TB up to 35% faster, mid-K
+    # M=2048/4096 rows TB up to 21% faster) or fail the relaxed 1.05/1.04
+    # admit gate.  The K-1474 small-K starvation pattern at N=8192 does NOT
+    # reproduce at N=16384 (the wider tile amortises launch overhead even at
+    # K=2048).
+    #
+    # Productionised set (this commit): the 12 cells where re-measurement
+    # shows ratio_median >= 1.05 AND CI95-lo >= 1.04.  Monotone diagonal
+    # that grows with M:
+    #   M=2048: K=16384 only (2 cells, both dtypes)
+    #   M=4096: K in {8192, 16384} (4 cells)
+    #   M=8192: K in {4096, 8192, 16384} (6 cells)
+    # Cohort geomean tb/hbl = 1.084x; range 1.077x-1.093x; min CI95-lo =
+    # 1.0771 at (2048, 16384, 16384, fp16); max ratio_median = 1.0927 at
+    # (4096, 16384, 8192, bf16).  Envelope grows 133 -> 145 cells.
+    # Disjoint by construction with all P1-P19 sub-frozensets via cross-
+    # frozenset asserts at module load (N-axis projection: P20 N=16384 vs
+    # prior {128,256,512,1024,2048,8192} columns).
+    if _R_K1498_P20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

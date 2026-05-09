@@ -1895,6 +1895,194 @@ def _k1465_p19_skinny_n8192_routeout(
     )
 
 
+# ---------------------------------------------------------------------------
+# K-1498 P20 — `skinny_N16384` K-COMPLEMENT route-OUT 13th-position frozenset
+# `_K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12` (SHRUNK from K-1478's predicted
+# 30-cell envelope after re-measurement on the current MI300X gfx942 / hipBLASLt
+# / Triton 3.6.0 / ROCm 7.2 stack -- mirrors the K-1474 SHRUNK-FROM-PREDICTION
+# pattern that re-measured K-1465's predicted N=8192 envelope).
+#
+# Re-measurement protocol (K-1498, rad-mi300x-splinter1, May 2026):
+#   * paired n=15 hot-cache, alternating tb-first / hbl-first replay ordering,
+#     30 replays per timing iteration (mirrors K-1474 PR16 final protocol);
+#   * B=2000 vectorised NumPy paired bootstrap on the 15-element ratio array;
+#   * `ratio = tb_time / hbl_time` (>1.0 means tritonblas SLOWER -> route OUT
+#     to hipBLASLt is GOOD); admit iff `ratio_median >= 1.05` AND `CI95-lo
+#     >= 1.04` (relaxed K-1474 gate; the K-1442 strict 1.10 gate remains
+#     unreachable across the entire K-COMPLEMENT lineage on this stack).
+#
+# The K-1478 30-cell PREDICTION (cohort geomean 1.174x, range 1.056x-1.359x,
+# 30/30 admit on the OCI MI300X-fallback-node sweep) DID NOT REPRODUCE on
+# rad-mi300x-splinter1: re-measure shows 12/30 ADMIT (cohort geomean 1.084x,
+# range 1.077x-1.093x).  The 18 rejected cells split into:
+#   * K=2048 column (6 cells, all M, both dtypes): r in [0.91, 1.04] -- K-1474
+#     N=8192 K=2048 starvation pattern is GONE at N=16384 (the wider tile
+#     amortises the launch overhead even at K=2048); shipping these would
+#     cause 0-9% regressions.
+#   * K=32768 column (6 cells): r in [0.65, 0.86] -- tritonblas SIGNIFICANTLY
+#     FASTER than hipBLASLt at this corner (split-K saturation flips to TB's
+#     favour at the wider N=16384 tile); shipping would cause 14-35%
+#     regressions.
+#   * (M=2048, K=4096, both dtypes) and (M=2048, K=8192, both dtypes):
+#     r in [0.79, 0.87] -- tritonblas FASTER (mid-K M-floor effect: at the
+#     skinniest M with mid K-band the persistent kernel covers the workload
+#     in fewer waves).
+#   * (M=4096, K=4096, both dtypes): r in [0.83, 0.87] -- tritonblas FASTER
+#     for the same mid-K reason.
+#
+# Productionised set (this commit): the 12 cells where re-measurement shows
+# ratio_median >= 1.05 AND CI95-lo >= 1.04.  Cohort geomean tb/hbl = 1.084x;
+# range 1.077x-1.093x; min CI95-lo = 1.0771 at (2048, 16384, 16384, fp16);
+# max ratio_median = 1.0927 at (4096, 16384, 8192, bf16).  Envelope grows
+# 133 -> 145 cells (+12).  Predicate stack depth 12 -> 13.
+#
+# Mechanism (mid-K row-band wins for HBL): at N=16384 the persistent kernel
+# tile is wide enough that K-1474's small-K starvation no longer applies at
+# K=2048; instead, hipBLASLt's split-K pattern wins on the (M, K)
+# combinations where the persistent_matmul wave count and the mid-K LDS
+# pressure overlap most painfully.  The admitted cells trace a monotone
+# diagonal that grows with M:
+#   M=2048: K=16384 only (1 cell per dtype = 2 cells)
+#   M=4096: K in {8192, 16384} (2 cells per dtype = 4 cells)
+#   M=8192: K in {4096, 8192, 16384} (3 cells per dtype = 6 cells)
+# K=2048 and K=32768 columns are universally rejected -- tritonblas wins or
+# is at parity at both K-extremes.
+# ---------------------------------------------------------------------------
+_K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12 = frozenset({
+    # M=2048 row x N=16384 (K=16384 only -- skinniest M-row admits only the
+    # square-K corner where TB persistent kernel hits the LDS-pressure ceiling)
+    (2048, 16384, 16384, "torch.bfloat16"),  # r=1.0879 CI95=[1.0877, 1.0881]
+    (2048, 16384, 16384, "torch.float16"),   # r=1.0771 CI95=[1.0771, 1.0773]
+    # M=4096 row x N=16384 (K in {8192, 16384})
+    (4096, 16384,  8192, "torch.bfloat16"),  # r=1.0927 CI95=[1.0924, 1.0929] MAX
+    (4096, 16384,  8192, "torch.float16"),   # r=1.0815 CI95=[1.0813, 1.0823]
+    (4096, 16384, 16384, "torch.bfloat16"),  # r=1.0874 CI95=[1.0872, 1.0875]
+    (4096, 16384, 16384, "torch.float16"),   # r=1.0789 CI95=[1.0788, 1.0791]
+    # M=8192 row x N=16384 (K in {4096, 8192, 16384})
+    (8192, 16384,  4096, "torch.bfloat16"),  # r=1.0890 CI95=[1.0885, 1.0895]
+    (8192, 16384,  4096, "torch.float16"),   # r=1.0809 CI95=[1.0805, 1.0812]
+    (8192, 16384,  8192, "torch.bfloat16"),  # r=1.0896 CI95=[1.0894, 1.0900]
+    (8192, 16384,  8192, "torch.float16"),   # r=1.0797 CI95=[1.0794, 1.0803]
+    (8192, 16384, 16384, "torch.bfloat16"),  # r=1.0848 CI95=[1.0844, 1.0849]
+    (8192, 16384, 16384, "torch.float16"),   # r=1.0783 CI95=[1.0779, 1.0784]
+})
+assert len(_K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12) == 12, (
+    "_K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12 must be exactly 12 cells "
+    "(K-1498 re-measurement of the K-1478 30-cell prediction on MI300X "
+    "gfx942 the current ROCm found that only the 12 cells listed clear a "
+    "relaxed 1.05 admit gate with CI95-lo >= 1.04; the remaining 18 cells "
+    "either route TB-faster (K=2048 column, K=32768 column, mid-K M=2048/4096 "
+    "rows) or fail the CI95-lo floor.  The K-1442 strict 1.10 gate remains "
+    "unreachable on the current stack.  See `_K1498_P20_SHRUNK_FROM_K1478` "
+    "doc comment for the 18 rejected cells and their measured ratios.")
+# Cross-frozenset disjointness -- K-1498 P20 vs prior 12-predicate stack.
+# All N=16384 vs other-N comparisons are natural disjointness via N-axis
+# projection (R-1329 K-AXIS-PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE).
+_K1498_P20_VS_P8_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT))
+assert _K1498_P20_VS_P8_DISJOINT, (
+    "K-1498 P20 skinny_N16384 K-COMPLEMENT cell overlaps the K-1322 P8 envelope; "
+    "P8 sub-frozensets use N in {128,256,1024,2048,2560,3072,3584,4480} -- "
+    "none ever N=16384; natural disjointness, asserted as cheap insurance "
+    "per R-1329.")
+_K1498_P20_VS_K971_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(K971_ROUTE_TABLE))
+assert _K1498_P20_VS_K971_DISJOINT, (
+    "K-1498 P20 skinny_N16384 K-COMPLEMENT cell overlaps K971_ROUTE_TABLE; "
+    "K971_ROUTE_TABLE (K-905/K-971 + K-1335) uses M=N in {1024,2048} square "
+    "with K in {16384, 32768}; no N=16384 entries -- natural disjointness, "
+    "asserted insurance.")
+_K1498_P20_VS_P12_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(_K1295_P12_PMC_SQUARE_MID_ROUTEOUT_4))
+assert _K1498_P20_VS_P12_DISJOINT, (
+    "K-1498 P20 skinny_N16384 K-COMPLEMENT cell overlaps K-1361 P12 "
+    "square_mid; P12 cells are M=N=K in {2048,4096} bf16+fp16 (4 cells) -- "
+    "no N=16384 entries; natural disjointness, asserted as cheap insurance "
+    "per R-1329.")
+_K1498_P20_VS_K1367_P13_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18))
+assert _K1498_P20_VS_K1367_P13_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1367 P13 skinny_N128; "
+    "P13(N=128) cells use N=128, P20 cells use N=16384 -- natural "
+    "disjointness, asserted for completeness (A4 sibling-N firewall).")
+_K1498_P20_VS_K1397_P13_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12))
+assert _K1498_P20_VS_K1397_P13_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1397 P13 skinny_N256; "
+    "P13(N=256) cells use N=256, P20 cells use N=16384 -- natural "
+    "disjointness, asserted for completeness (A4 sibling-N firewall).")
+_K1498_P20_VS_K1409_P15_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1409_P15_SKINNY_N512_KCOMPL_ROUTEOUT))
+assert _K1498_P20_VS_K1409_P15_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1417 P15 skinny_N512 EXTENSION; "
+    "P15 cells use N=512, P20 cells use N=16384 -- natural disjointness, "
+    "asserted for completeness (A4 sibling-N firewall).")
+_K1498_P20_VS_K1433_P16_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1433_P16_SKINNY_N1024_KCOMPL_ROUTEOUT))
+assert _K1498_P20_VS_K1433_P16_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1433 P16 skinny_N1024 BASE; "
+    "P16 cells use N=1024, P20 cells use N=16384 -- natural disjointness, "
+    "asserted for completeness (A4 sibling-N firewall).")
+_K1498_P20_VS_K1437_P17_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1437_P17_SKINNY_N1024_KCOMPL_EXT_ROUTEOUT_12))
+assert _K1498_P20_VS_K1437_P17_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1437 P17 skinny_N1024 EXTENDED; "
+    "P17 cells use N=1024, P20 cells use N=16384 -- natural disjointness, "
+    "asserted for completeness (A4 sibling-N firewall).")
+_K1498_P20_VS_K1474_P19_DISJOINT = (
+    _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12.isdisjoint(
+        _K1474_P19_SKINNY_N8192_KCOMPL_K2048_ROUTEOUT_6))
+assert _K1498_P20_VS_K1474_P19_DISJOINT, (
+    "K-1498 P20 skinny_N16384 cell overlaps K-1474 P19 skinny_N8192 K=2048; "
+    "P19 cells use N=8192, P20 cells use N=16384 -- natural disjointness "
+    "via R-1465 #1 N-axis projection invariant.  Asserted as cheap "
+    "insurance per R-1329.")
+
+
+def _k1498_p20_skinny_n16384_routeout(
+    M: int, N: int, K: int, dtype,
+) -> bool:
+    """K-1498 P20 -- direct hipBLASLt route-OUT for the 12-cell skinny_N16384
+    K-COMPLEMENT envelope (`_K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12`).
+
+    Returns True iff (M, N, K, dtype) matches one of the 12 strict-equality
+    keys: the M-monotone-diagonal subset of the K-1478 30-cell N=16384 sweep
+    that survived re-measurement under the K-1474 SHRUNK-FROM-PREDICTION
+    protocol (paired n=15 hot-cache + B=2000 vectorised paired bootstrap on
+    rad-mi300x-splinter1 May 2026).
+
+    Source measurement: K-1498 sweep_n16384_v2.csv -- 12/30 ADMIT, cohort
+    geomean tb/hbl = 1.084x, range 1.077x-1.093x, all 12 cells CI95-lo >=
+    1.077.  See the constant doc-comment above for the 18 rejected cells
+    and their measured ratios (K=2048 column starvation pattern from K-1474
+    N=8192 does NOT reproduce at N=16384; K=32768 column shows tritonblas
+    significantly faster; mid-K M=2048/4096 rows show tritonblas faster).
+
+    Mechanism (mid-K row-band wins for HBL at the wider N=16384 tile):
+      The persistent_matmul tile is wide enough at N=16384 that the K-1474
+      small-K starvation no longer applies at K=2048.  Instead, hipBLASLt's
+      split-K dispatch wins on the (M, K) combinations along a monotone
+      diagonal that grows with M (M=2048: K=16384 only; M=4096: K in
+      {8192,16384}; M=8192: K in {4096,8192,16384}).  Both K=2048 and
+      K=32768 columns are universally rejected (TB at parity or faster).
+
+    Stack position: 13th-position per K-1175 stacked-predicate convention,
+    AFTER K-1474 P19 (12th-position).  Disjoint by construction with all
+    P1-P19 sub-frozensets via the cross-frozenset asserts above (N-axis
+    projection: P20 N=16384 vs prior {128, 256, 512, 1024, 2048, 8192}
+    columns; M=N=K square P12 trivially disjoint).
+    """
+    return (
+        (int(M), int(N), int(K), str(dtype))
+        in _K1498_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_12
+    )
+
+
 def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
                         work_stealing, disable_env_set: bool = False) -> bool:
     """Pure routing decision — same logic as ``matmul._k971_route_to_hbl``
@@ -1923,6 +2111,9 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
      12. K-1474 P19 skinny_N8192 K=2048-COLUMN 6-cell strict-equality -> hipBLASLt
          (shrunk from K-1465's 29-cell prediction; re-measurement on the current ROCm
          showed only the K=2048 sub-column clears a 1.05 admit gate).
+     13. K-1498 P20 skinny_N16384 K-COMPLEMENT 12-cell strict-equality -> hipBLASLt
+         (shrunk from K-1478's 30-cell prediction; re-measurement on the current ROCm
+         showed only the M-monotone-diagonal mid-K sub-envelope clears a 1.05 gate).
     """
     if disable_env_set:
         return False
@@ -2016,5 +2207,19 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     # M=N=K in {2048,4096} P12 envelope so PRD admit-set cardinality equals
     # productionised cardinality (no P12 deferral).
     if _k1465_p19_skinny_n8192_routeout(int(M), int(N), int(K), a_dtype):
+        return True
+    # K-1498 P20 (13th-position): skinny_N16384 K-COMPLEMENT 12-cell route-OUT.
+    # Stacks AFTER K-1474 P19 per K-1175 stacked-predicate convention; closes
+    # the next-higher-than-N=8192 tier of the K-1389 -> K-1400 -> K-1409 ->
+    # K-1417 -> K-1433 -> K-1437 -> K-1465/K-1474 K-COMPLEMENT lineage at
+    # N=16384.  SHRUNK from K-1478's predicted 30-cell envelope after
+    # re-measurement on rad-mi300x-splinter1 (May 2026) found 12/30 cells
+    # admit at the relaxed 1.05 gate (the K=2048 small-K starvation pattern
+    # from K-1474 N=8192 does NOT reproduce at the wider N=16384 tile, and
+    # the K=32768 corner FLIPS to TB-faster).  Per-cell ratios 1.077x-1.093x;
+    # cohort geomean 1.084x; envelope grows 133 -> 145 cells.  Disjoint by
+    # construction with all P1-P19 sub-frozensets via cross-frozenset asserts
+    # at module load (N-axis projection: P20 N=16384 vs prior columns).
+    if _k1498_p20_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype):
         return True
     return False

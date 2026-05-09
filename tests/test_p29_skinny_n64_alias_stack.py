@@ -29,6 +29,7 @@ are unreachable under normal dispatch — load-bearing only if the
 upstream P5 layer is ablated.
 """
 import pytest
+import torch
 
 from tritonblas._route_predicate import (
     K971_ROUTE_TABLE,
@@ -41,6 +42,7 @@ from tritonblas._route_predicate import (
     _k1700_p29_skinny_n64_kcompl_aliasstack_routeout,
     k971_route_decision,
 )
+from tritonblas.matmul import _k971_route_to_hbl
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +281,67 @@ def test_p29_does_not_fire_on_p26_n2048_cells():
         assert not _k1700_p29_skinny_n64_kcompl_aliasstack_routeout(
             M, N, K, dtype
         ), f"P29 fires on K-1611 P26 cell {cell} — sibling-N firewall violated."
+
+
+# ---------------------------------------------------------------------------
+# (i) CRITICAL-PATH INTEGRATION — exercises the actual shipped dispatch
+#     helper `tritonblas.matmul._k971_route_to_hbl` (the load-bearing
+#     entry point used by `tritonblas.matmul`) on the canonical P29
+#     NEW fp16 admit cell.  Catches the case where the 20th-position
+#     dispatch wiring inside `_k971_route_to_hbl` is removed or moved
+#     behind a short-circuiting upstream predicate.  Stronger than the
+#     `k971_route_decision` test (h) because it routes through the
+#     production helper, not the audit-handle copy.
+# ---------------------------------------------------------------------------
+def test_p29_dispatch_helper_routes_canonical_n64_fp16_cell():
+    # Canonical NEW admit (the K-1687 worst-seam fp16 cell).  Not
+    # covered by any upstream predicate (P5 is bf16-only at the
+    # `_dtype_is_bf16` early return; no prior P-frozenset targets
+    # N=64) so a True verdict is *load-bearing on the P29 wiring*.
+    M, N, K = 4096, 64, 8192
+    assert _k971_route_to_hbl(
+        M, N, K, torch.float16, torch.float16,
+        enable_streamk=False, work_stealing=False,
+    ) is True, (
+        "P29 20th-position dispatch wiring missing or shadowed: "
+        "_k971_route_to_hbl returned False for the canonical NEW fp16 "
+        "admit cell (4096, 64, 8192).  Either the P29 import / call "
+        "was dropped from matmul.py or an upstream predicate is now "
+        "vetoing the cell.")
+
+
+@pytest.mark.parametrize(
+    "cell", sorted(_K1700_P29_NEW_ROUTEOUT_15)
+)
+def test_p29_dispatch_helper_routes_every_new_fp16_cell(cell):
+    # Every NEW fp16 cell (the load-bearing 15) must route via
+    # `_k971_route_to_hbl` — not just `k971_route_decision`.  Any
+    # False here means the production dispatch never fires for the
+    # cell even though the audit-handle predicate says it should.
+    M, N, K, dtype_str = cell
+    dtype = torch.float16 if dtype_str == "torch.float16" else torch.bfloat16
+    assert _k971_route_to_hbl(
+        M, N, K, dtype, dtype,
+        enable_streamk=False, work_stealing=False,
+    ) is True, (
+        f"P29 NEW fp16 cell {cell} not routed by _k971_route_to_hbl; "
+        "the 20th-position dispatch wiring in matmul.py is broken.")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="end-to-end matmul needs a CUDA device")
+def test_p29_public_matmul_runs_and_matches_torch_on_n64_fp16_cell():
+    """Public `tritonblas.matmul` must complete without error on a P29
+    NEW admit cell and match `torch.matmul` to within hipBLASLt's fp16
+    tolerance.  This is the user-facing contract the route-OUT change
+    is supposed to preserve — if it fails, the dispatch is broken at
+    the integration level even if predicate unit tests pass."""
+    import tritonblas
+    torch.manual_seed(0)
+    M, N, K = 4096, 64, 8192  # canonical NEW admit
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    out_tb = tritonblas.matmul(a, b)
+    out_ref = torch.matmul(a, b)
+    # hipBLASLt fp16 GEMM at K=8192 accumulator drift tolerance.
+    torch.testing.assert_close(out_tb, out_ref, atol=5e-1, rtol=1e-2)

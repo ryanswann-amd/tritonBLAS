@@ -94,6 +94,18 @@ from ._route_predicate import (
     # union); alias overlaps fire BEFORE P26 in the dispatch chain.
     _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout
         as _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout,
+    # K-1673 (S-002): P28 skinny_N128 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (19th-position, load-bearing).  Closes the LAST untested
+    # small-N rung (N=128) of the K-COMPLEMENT N-ladder at the dtype-
+    # mirror gap (fp16 K ∈ {2048, 32768}); 30/30 admit at the strict 1.05
+    # gate (K-1673 paired n=30 HIP-graph hot-cache MI300X gfx942 vs the
+    # live post-K-1647 P27 oracle); cohort geomean tb/hbl = 1.694×, range
+    # 1.162×-2.890×.  6 NEW cells (all fp16, K ∈ {2048, 32768}) + 24
+    # alias cells (15 bf16 via R-K979 P5 Clause-3 + 9 fp16 K-mid via
+    # K-1367 P13 N=128); alias overlaps fire BEFORE P28 in the dispatch
+    # chain.
+    _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
+        as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
 )
 
 
@@ -304,6 +316,47 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # oracle (combined with K-1559 60-cell N ∈ {4096, 8192} confirmation);
     # cohort geomean tb/hbl = 1.234×, range 1.114×-1.501×, 30/30 at strict
     # 1.05 gate — same evidence that backs the load-bearing P24 above.
+    # K-1633 18th-slot handle: no executable code — the K-1633-named alias
+    # `_K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30` lives in
+    # _route_predicate.py as a single module-level rebinding of P23's
+    # frozenset (K-1552), since the K-1633 admit set is bit-identical to
+    # P23 and P23 fires first at the 15th slot.  Per K-1581 / K-1489
+    # minimalist precedent we do not add a duplicate predicate call for
+    # an unreachable alias.  K-1633 re-measurement provenance: paired
+    # n=30 HIP-graph hot-cache MI300X gfx942 vs the live post-K-1611 P26
+    # oracle; 30/30 admit at the strict 1.05 gate, cohort geomean tb/hbl
+    # ≥ 1.45× — same shape that backs the load-bearing P23 above.
+    # K-1673 (S-002): P28 skinny_N128 K-COMPLEMENT alias-stack 30-cell
+    # route-OUT (19th-position, load-bearing).  Closes the LAST untested
+    # small-N rung (N=128) of the K-COMPLEMENT N-ladder at the dtype-
+    # mirror gap (fp16 K ∈ {2048, 32768}) on the M ∈ {2048, 4096, 8192}
+    # rows; coverage now spans the FULL N-ladder {128, 256, 512, 1024,
+    # 2048, 4096, 8192, 16384, 32768} for both bf16 and fp16.  K-1673
+    # paired n=30 HIP-graph hot-cache + B=10000 vectorised paired
+    # bootstrap on MI300X gfx942 (OCI useocpm2m-097-099 amd-rccl
+    # partition / ROCm 7.2 / pytorch 2.10) against the LIVE post-K-1647
+    # P27 routing oracle: 30/30 admit at the strict ratio_median ≥ 1.05
+    # ∧ p(<1.05) < 0.01 gate; cohort geomean tb/hbl = 1.694×, range
+    # 1.162×-2.890×, 0 regressions.  Per-row geomean: 1.889× (M=2048,
+    # K-913 LDS-BC band fully live because min(M,N) = 128) / 1.458×
+    # (M=4096) / 1.767× (M=8192).  ALIAS-STACK structure: 6 NEW cells +
+    # 24 alias cells (15 bf16 via R-K979 P5 Clause-3 minMN ≤ 192 ∧ K ≥
+    # 2048 + 9 fp16 K ∈ {4096, 8192, 16384} via K-1367 P13 N=128); alias
+    # overlaps fire BEFORE P28 in the dispatch chain so the 24 alias
+    # cells are documentation; the 6 NEW cells (all fp16 mirror at K ∈
+    # {2048, 32768}) are the load-bearing portion that close the dtype-
+    # mirror gap left by P5's bf16-only `_dtype_is_bf16` early-return
+    # and P13's K-mid-only K-grid coverage.  Mechanism (K-1673 PMC RCA):
+    # TB SQ_LDS_BANK_CONFLICT/inst = 1.45-2.13 cyc (vs HBL = 0.000
+    # exactly); the K-913 §3 dtype-invariant LDS-BC signature on the
+    # N=128 column-narrow tile.  Why not share P21 N=256 / P23 N=512:
+    # at N=128 the BLOCK_N=128 tile has 1 K-block column and ALL
+    # accumulator lanes serialise on one bank group (LDS_BC ≈ 1.45-2.13
+    # cyc/inst); at N=256 the same tile has 2 K-block columns and the
+    # LDS bank arbitration round-robins across 2 swizzle phases (LDS_BC
+    # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
+    # handles per the K-1175 stacked-predicate convention.
+    if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

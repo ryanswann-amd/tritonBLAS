@@ -1,0 +1,40 @@
+{
+  "cohort": "bf16",
+  "n": 30,
+  "aligned": {
+    "n_cells": 6,
+    "gmean_ratio_base": 0.12104129646611857,
+    "gmean_ratio_pad": 0.11840388638231901,
+    "gmean_speedup_pad_vs_base": 0.9782106589998586,
+    "max_rel_err": 0.0
+  },
+  "misaligned": {
+    "n_cells": 6,
+    "gmean_ratio_base": 0.14555198389095858,
+    "gmean_ratio_pad": 0.12033081776241002,
+    "gmean_speedup_pad_vs_base": 0.826720560899787,
+    "max_rel_err": 0.0
+  },
+  "gated": {
+    "n_cells": 6,
+    "gmean_ratio_base": 0.14555198389095858,
+    "gmean_ratio_pad": 0.12033081776241002,
+    "gmean_speedup_pad_vs_base": 0.826720560899787,
+    "max_rel_err": 0.0
+  },
+  "not_gated": {
+    "n_cells": 6,
+    "gmean_ratio_base": 0.12104129646611857,
+    "gmean_ratio_pad": 0.11840388638231901,
+    "gmean_speedup_pad_vs_base": 0.9782106589998586,
+    "max_rel_err": 0.0
+  },
+  "all": {
+    "n_cells": 12,
+    "gmean_ratio_base": 0.1327320640741235,
+    "gmean_ratio_pad": 0.11936346373422621,
+    "gmean_speedup_pad_vs_base": 0.8992813045351902,
+    "max_rel_err": 0.0
+  },
+  "bit_exact_max_rel_err": 0.0
+}

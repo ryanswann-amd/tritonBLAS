@@ -3282,3 +3282,48 @@ _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9 = frozenset(
 )
 # Cardinality (==9) gated by tests/test_k1800_p32_skinny_n192_fp16_kcompl_aliasstack.py
 # per the K-1748 minimalist split: src holds data, tests hold invariants.
+
+
+# K-1814 P33 (24th-slot): N ∈ {96, 160, 224} K-COMPLEMENT alias-stack — extends
+# the K-1800 P32 dtype-mirror pattern across the K-1794 cross-band envelope.
+# 34-cell admit set: 9 bf16 N=224 + 9 fp16 N=224 + 9 fp16 N=160 + 7 fp16 N=96.
+# bf16 N∈{96,160} excluded — already routed by P28's broader K-COMPLEMENT
+# envelope upstream (K-1794 paired n=30: bf16 N=96 18/18 routed geomean 0.999;
+# bf16 N=160 18/18 routed geomean 0.997).  bf16 N=224 INCLUDED — first observed
+# N-axis cliff in P28's coverage above N=128 (K-1794 paired n=30: bf16 N=224
+# 0/9 routed, geomean 0.722; R-K1794.N224-DOES-NOT-EXTEND-FROM-N192-FROZENSET).
+# fp16 N=96 admit set EXCLUDES the (2048,96,8192) and (8192,96,8192) cells
+# where TB-oracle is decisively faster than HBL (K-1814 paired n=30: ratio_med
+# 1.643x and 2.733x respectively, paired-t p<<0.05 in TB's favor) — these
+# K-mid M-extreme fp16 N=96 cells are a TB win zone, NOT a route-OUT candidate.
+# Audit (K-1814, paired n=30 HIP-graph hot-cache, MI300X gfx942 OCI fallback
+# per INFRA-0048): 34/34 admitted cells satisfy the strict K-1800 ship gate
+# (HBL median >= 1.05x TB-direct AND paired t-test p<0.05); cohort ratio_med
+# range [0.318, 0.881] pre-route, geomean 0.703.  Mechanism per K-1781/K-1795
+# PMC: wave-misaligned skinny-N values (96/160/224 are not multiples of 64)
+# trigger LDS bank conflicts on the column-narrow LDS layout that
+# persistent_matmul adopts at minMN <= 256.  P33 sidesteps the bottleneck
+# entirely by delegating to hipBLASLt -- exactly as P5 Clause-3 already does
+# for the bf16 row at minMN <= 192.  Sibling-N disjoint vs P28 (N=128),
+# P29 (N=64), P30 (N in {384,768,1536}), P31 (N in {32,48,80}), P32 (N=192),
+# and P21 (N=256) by N-axis projection.
+_K1814_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34 = frozenset(
+    # bf16 N=224: 9 cells (R-K979 P5 dtype-mirror gap at N=224)
+    [(M, 224, K, "torch.bfloat16")
+     for M in (2048, 4096, 8192) for K in (4096, 8192, 16384)]
+    # fp16 N=224: 9 cells (dtype sibling of bf16 N=224 above)
+    + [(M, 224, K, "torch.float16")
+       for M in (2048, 4096, 8192) for K in (4096, 8192, 16384)]
+    # fp16 N=160: 9 cells (R-K979 P5 dtype-mirror gap at N=160; bf16 N=160
+    # already routed by K-1673 P28's broader K-COMPLEMENT envelope)
+    + [(M, 160, K, "torch.float16")
+       for M in (2048, 4096, 8192) for K in (4096, 8192, 16384)]
+    # fp16 N=96: 7 cells; (M=2048,K=8192) and (M=8192,K=8192) excluded
+    # (TB-oracle wins decisively at K=8192 K-mid M-extremes).
+    + [(M, 96, K, "torch.float16")
+       for (M, K) in ((2048, 4096), (2048, 16384),
+                      (4096, 4096), (4096, 8192), (4096, 16384),
+                      (8192, 4096), (8192, 16384))]
+)
+# Cardinality (==34) gated by tests/test_k1814_p33_skinny_n96_n160_n224_kcompl_aliasstack.py
+# per the K-1748 minimalist split: src holds data, tests hold invariants.

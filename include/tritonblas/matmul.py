@@ -118,6 +118,12 @@ from ._route_predicate import (
     # K-1800 P32 (23rd-slot): N=192 fp16 K-COMPLEMENT alias-stack — 9 cells
     # closing the dtype-mirror gap left by R-K979 P5 Clause-3's bf16-only gate.
     _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9,
+    # K-1814 P33 (24th-slot): N ∈ {96, 160, 224} K-COMPLEMENT alias-stack —
+    # 34 admit cells (9 bf16 N=224 + 9 fp16 N=224 + 9 fp16 N=160 + 7 fp16 N=96)
+    # extending the K-1800 P32 dtype-mirror pattern across the K-1794 wave-
+    # misaligned skinny-N cross-band envelope; bf16 N=224 is the first observed
+    # N-axis cliff above N=128 in P28's coverage.
+    _K1814_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34,
 )
 
 
@@ -388,6 +394,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # already routed-OUT upstream at chain pos 4).  Verified by K-1800 paired
     # n=30 HIP-graph hot-cache + 6-cell N∈{128,256} adjacency guard band.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1800_P32_SKINNY_N192_FP16_KCOMPL_ALIASSTACK_9: return True
+    # K-1814 P33 (24th-slot): N ∈ {96, 160, 224} K-COMPLEMENT alias-stack
+    # (34 admit cells; cohort ratio_med pre-route geomean 0.703×, range
+    # [0.318,0.881]).  Mirrors P32's dtype-mirror fix at the next-wider
+    # cross-band envelope per K-1794 R-K1794.N224-DOES-NOT-EXTEND-FROM-N192
+    # finding.  bf16 N ∈ {96,160} already routed via K-1673 P28 upstream;
+    # fp16 N=96 (M=2048,K=8192)/(M=8192,K=8192) excluded as TB win zone.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1814_P33_SKINNY_N96_N160_N224_KCOMPL_ALIASSTACK_34: return True
     return False
 
 

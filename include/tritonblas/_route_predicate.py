@@ -18,7 +18,7 @@ import os
 # structurally collide with K-950 LAND cells (e.g. (1024,1024,16384,bf16) is
 # both a K-912 LAND and a K-905 route-OUT — only an exact tuple can express
 # "fire on this exact shape but not on its baseline-LAND twin").
-K971_ROUTE_TABLE = frozenset({
+_K905_K971_LDS_BC_ANCHORS_8 = frozenset({
     (1024, 1024, 16384, "torch.bfloat16"),  # K-905 baseline
     (1024, 1024, 16384, "torch.float16"),
     (1024, 1024, 32768, "torch.bfloat16"),  # K-971 (K-905 N4: hbl/off=1.73x)
@@ -28,6 +28,90 @@ K971_ROUTE_TABLE = frozenset({
     (2048, 2048, 32768, "torch.bfloat16"),  # K-971 (K-905 N5: hbl/off=1.38x)
     (2048, 2048, 32768, "torch.float16"),
 })
+
+# ---------------------------------------------------------------------------
+# K-1335 / K-1326 (S-002) — longK_smallSquare bf16 route-OUT extension
+# (the 5th-position dispatch predicate; K971_ROUTE_TABLE).
+#
+# K-1335 productionizes K-1326's `P9_longK_smallSquare_routeOUT` proposal as
+# a 4-cell strict-equality extension to the K-905/K-971 LDS-bank-conflict
+# (LDS-BC) anchor family.  Cells were identified by K-1308's per-shape
+# residual decomposition of the K-1322 51-cell P8 envelope sweep:
+# `longK_smallSquare` (M=N∈{1024, 2048}, K∈{4096, 8192}, bf16; 4 cells,
+# residual mean 0.695, aggregate gap 2.779) is the worst residual bucket
+# AND zero admit predicate fires on any of these cells (any-pred-fired = N
+# for the bucket).  K-1326 then attributed the bottleneck via PMC features
+# carried over from the K-913 baseline triage:
+#
+#   LDS_BC      1.78 cyc/inst  (vs 0.00 on hbl baseline)
+#   MFMA%       9.33%          (vs 15.85% on hbl baseline)
+#   SQ_INSTS_LDS  4.00x inflated vs hbl
+#
+# This is the same LDS-bank-conflict fingerprint as K-905 / K-930 / K-971
+# (mechanism-shape-invariant per K-913 §3, ±19% across the 4-cell
+# neighborhood) — NOT the K-1144 P8 MFMA-issue-stall pathology (different
+# counter signature).  Per R-1329.MECHANISTIC-DISAMBIGUATION-OF-PREDICATE-
+# ATTACHMENT-POINT, the attachment site must match the mechanism, so the 4
+# K-1335 admits attach to the K-905/K-971 LDS-BC envelope (the 5th-position
+# dispatch predicate `K971_ROUTE_TABLE`), NOT to the K-1322 51-cell P8
+# `_P8_MFMA_ISSUE_STALL_ROUTEOUT` envelope.  The K-1322 P8 envelope and its
+# 6 named sub-frozensets remain byte-identical; the dispatch ladder
+# precedence is unchanged.
+#
+# The autotune in-kernel path has converged on a single config that is
+# structurally LDS-bank-conflict-bound — K-1308's cross-branch ratio
+# invariant (4-pred ratio == main ratio within paired-n30 ±3% CV) holds
+# on these 4 cells, ruling out any (BM, BN, BK, WPEU, NS, NW) catalog
+# perturbation that could close the gap.  Route-OUT is the only remaining
+# mechanism (R-1329.CROSS-BRANCH-RATIO-INVARIANT-IMPLIES-ROUTE-OUT-ONLY).
+#
+# Verification (paired n=30 HIP-graph hot-cache, B=10000 paired bootstrap,
+# MI300X / gfx942 dedicated, 4 admit cells + 4 K-axis-neighbor controls):
+#   - 4-cell admit-set geomean: ~1.30x route-OUT win (CI95 strictly > 1.0)
+#   - 4-cell neighbor controls: no significant regression (CI95-hi >= 0)
+# Per R-1329.ADMIT-ON-DEDICATED-GPU-NOT-COTENANT, paired n=30 selection
+# uses dedicated-GPU measurement; co-tenant measurements admissible only
+# as the regression-firewall lower bound.
+#
+# Disjointness (K-axis projection per R-1329.K-AXIS-PROJECTION-DISJOINTNESS-
+# ASSERTS-ARE-CHEAP-INSURANCE): K-1335 K∈{4096, 8192}; K-905/K-971
+# K∈{16384, 32768} — natural K-axis separator, asserted at module load.
+# bf16-only by design (K-913 anchor + K-1326 bucket are bf16; fp16 parity
+# tracked separately on the K-1093 / K-1125 line).
+# ---------------------------------------------------------------------------
+_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4 = frozenset({
+    (1024, 1024,  4096, "torch.bfloat16"),  # K-1326 A1; K-913 PMC anchor neighborhood (LDS_BC 1.78 cyc/inst)
+    (1024, 1024,  8192, "torch.bfloat16"),  # K-1326 A2; K-913 PMC anchor (1024,1024,8192) bf16
+    (2048, 2048,  4096, "torch.bfloat16"),  # K-1326 A3; same LDS-BC fingerprint per K-913 §3 ±19%
+    (2048, 2048,  8192, "torch.bfloat16"),  # K-1326 A4; same LDS-BC fingerprint per K-913 §3 ±19%
+})
+
+# Composed K-905/K-971/K-1335 LDS-BC route-OUT table (the 5th-position
+# dispatch predicate).  Two named provenance frozensets; consulted as a
+# strict-equality union by `_k971_route_to_hbl` after P8 / E1 / P6 / P5.
+# Per R-1144.DUAL-FROZENSET-PROVENANCE (lifted to the LDS-BC envelope per
+# R-1329.MECHANISTIC-DISAMBIGUATION-OF-PREDICATE-ATTACHMENT-POINT), each
+# measurement campaign keeps its own named set with a runtime cardinality
+# pin and a K-axis-projection disjointness assert.
+K971_ROUTE_TABLE = (
+    _K905_K971_LDS_BC_ANCHORS_8
+    | _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4
+)
+assert len(K971_ROUTE_TABLE) == 12, (
+    "K-1335 unified LDS-BC route-OUT table must be exactly 12 cells "
+    "(8 K-905/K-971 anchors + 4 K-1335 longK_smallSquare admits); a "
+    "duplicate or stray entry has crept in.")
+assert len(_K905_K971_LDS_BC_ANCHORS_8) == 8
+assert len(_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4) == 4
+# K-axis-projection disjointness: K-1335 K∈{4096, 8192}; K-905/K-971
+# K∈{16384, 32768}.  Cheap module-load-time assert per R-1329.K-AXIS-
+# PROJECTION-DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE.
+assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
+    _K905_K971_LDS_BC_ANCHORS_8), (
+    "K-1335 longK_smallSquare admits overlap K-905/K-971 LDS-BC anchors; "
+    "K-axis-projection disjointness (K-1335 K∈{4096, 8192} vs K-905/K-971 "
+    "K∈{16384, 32768}) is the structural separator and a violation "
+    "indicates an authoring typo in one of the two frozensets.")
 
 
 def _dtype_is_bf16(dtype) -> bool:
@@ -665,6 +749,22 @@ assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1205_EN3_ADMITS_8), (
 assert _K1283_A1_PERTURBATIONS_8.isdisjoint(_K1219_E3_NFLOOR256_ADMITS_7), (
     "K-1283 A1 perturbation overlaps a K-1219 E3 N=256 admit; K-1297 "
     "cells all have N >= 1024; K-1219 cells all have N=256.")
+# K-1335 cross-predicate disjointness: K-1335 longK_smallSquare admits live
+# on the LDS-BC `K971_ROUTE_TABLE` (5th-position dispatch predicate) and
+# MUST NOT collide with any K-1322 P8 sub-frozenset.  K-1335 cells have
+# M=N∈{1024,2048} and K∈{4096,8192}; every K-1322 P8 sub-frozenset's M-axis
+# floor or N-axis selector excludes this region by construction (K-1121 /
+# K-1131 / K-1161 / K-1283 use M >= 4480 with shape constraints; K-1205
+# uses N=128; K-1219 uses N=256).  Disjointness is asserted on the
+# (M,N,K,dtype) tuple after stripping the dtype back to a 4-tuple
+# representation since both frozensets share the same key shape.
+_K1335_VS_P8_DISJOINT = _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
+    _P8_MFMA_ISSUE_STALL_ROUTEOUT)
+assert _K1335_VS_P8_DISJOINT, (
+    "K-1335 longK_smallSquare admit overlaps the K-1322 51-cell P8 "
+    "MFMA-issue-stall envelope; the two predicates target distinct "
+    "hardware bottlenecks (LDS-BC vs MFMA-issue-stall per K-913 / "
+    "K-1326 / R-1329) and must remain disjoint by construction.")
 
 
 # ---------------------------------------------------------------------------

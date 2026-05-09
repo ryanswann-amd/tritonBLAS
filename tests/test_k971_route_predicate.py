@@ -28,6 +28,8 @@ from tritonblas._route_predicate import (
     R_K979_P5_route_to_hbl,
     R_K1037_P6_admit_wpeu1,
     K971_ROUTE_TABLE,
+    _K905_K971_LDS_BC_ANCHORS_8,
+    _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4,
     _K1109_P6_K1074_ALLOWLIST,
     _K1109_P6_K1074_REGRESSION_EXCLUSIONS,
     _K1109_P6_ALLOWLIST_ENV,
@@ -44,6 +46,7 @@ from tritonblas._route_predicate import (
     K1142_E1_KS,
     K1142_E1_M_FLOOR,
     K1142_E1_K_FLOOR,
+    k971_route_decision,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -1713,3 +1716,188 @@ def test_k1322_does_not_disturb_existing_k1303_43_cell_envelope():
         "Cells added to P8 envelope past K-1303 do not match "
         "_K1283_A1_PERTURBATIONS_8 exactly; an unattributed "
         "cell crept in.")
+
+
+# ---------------------------------------------------------------------------
+# K-1335 / K-1326 (S-002) -- longK_smallSquare bf16 route-OUT extension pins.
+# K-1335 productionizes K-1326's `P9_longK_smallSquare_routeOUT` proposal as
+# a 4-cell strict-equality extension of the K-905/K-971 LDS-bank-conflict
+# `K971_ROUTE_TABLE` (the 5th-position dispatch predicate).  Per K-913 PMC
+# anchor + K-1326 attribution, the bottleneck is LDS-bank-conflict (LDS_BC
+# 1.78 cyc/inst), NOT MFMA-issue-stall, so the attachment is the LDS-BC
+# envelope -- NOT the K-1322 51-cell P8 envelope (R-1329.MECHANISTIC-
+# DISAMBIGUATION-OF-PREDICATE-ATTACHMENT-POINT).
+# ---------------------------------------------------------------------------
+K1335_LONGK_SMALLSQUARE_ADMITS_4_LIST = [
+    # (sid,            M,    N,    K, source)
+    ("K1335_A1",    1024, 1024, 4096, "K-1326 longK_smallSquare anchor; LDS-BC"),
+    ("K1335_A2",    1024, 1024, 8192, "K-913 PMC anchor; LDS_BC 1.78 cyc/inst"),
+    ("K1335_A3",    2048, 2048, 4096, "K-1326 longK_smallSquare anchor; LDS-BC"),
+    ("K1335_A4",    2048, 2048, 8192, "K-1326 longK_smallSquare anchor; LDS-BC"),
+]
+
+# K-axis-neighbor controls that MUST NOT route via K-1335 (different K than
+# the admit set; outside the K-1326 `longK_smallSquare` bucket).  K=2048
+# stays in the in-kernel autotune regime; K=16384 is on the K-905/K-971
+# baseline anchors and routes via _K905_K971_LDS_BC_ANCHORS_8 instead
+# (verified in the per-cell test below by membership rather than route
+# verdict so the two campaigns stay attribution-clean).
+K1335_K_AXIS_NEIGHBOR_CONTROLS_4 = [
+    ("K1335_N_K2048_M1024", 1024, 1024, 2048),  # K-axis neighbor below admit band
+    ("K1335_N_K2048_M2048", 2048, 2048, 2048),
+    ("K1335_N_M512_K4096",   512,  512, 4096),  # M-axis neighbor below admit band
+    ("K1335_N_M4096_K4096", 4096, 4096, 4096),  # M-axis neighbor above admit band
+]
+
+
+def test_k1335_longk_smallsquare_admits_cardinality_is_exactly_4():
+    """K-1335 strict-equality cardinality pin.  K-1326 nominated exactly 4
+    cells in the `longK_smallSquare` bucket (M=N in {1024, 2048} x K in
+    {4096, 8192}, bf16) and K-1335 ships all 4 after paired n=30 HIP-graph
+    hot-cache + B=10000 paired bootstrap CI95 confirmation on MI300X.  Any
+    silent edit to the admit set trips this canary."""
+    assert len(_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4) == 4
+
+
+def test_k1335_lds_bc_table_size_is_exactly_12_after_k1335_extension():
+    """K-1335 unified LDS-BC table (K971_ROUTE_TABLE) cardinality pin:
+    8 K-905/K-971 baseline anchors + 4 K-1335 longK_smallSquare admits
+    = 12.  Any silent edit changes the count and trips this canary.
+
+    Provenance chain:
+      * K-905 originally pinned 2 cells (cohort A LDS-bound bf16 + fp16).
+      * K-930 / K-971 extended to 8 cells (mid-square long-K bf16/fp16).
+      * K-1335 extends by 4 longK_smallSquare bf16 admits identified by
+        K-1308's residual decomposition + K-913 PMC anchor + K-1326
+        attribution -> 12 (this canary)."""
+    assert len(K971_ROUTE_TABLE) == 12
+    assert len(_K905_K971_LDS_BC_ANCHORS_8) == 8
+    assert len(_K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4) == 4
+
+
+def test_k1335_disjoint_from_k905_k971_baseline_by_k_axis_projection():
+    """K-axis projection disjointness assert (R-1329.K-AXIS-PROJECTION-
+    DISJOINTNESS-ASSERTS-ARE-CHEAP-INSURANCE): K-1335 cells live in
+    K in {4096, 8192}; K-905/K-971 baseline cells live in K in {16384,
+    32768}.  Disjointness is the natural separator that keeps the two
+    campaigns' provenance attribution clean."""
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
+        _K905_K971_LDS_BC_ANCHORS_8)
+    k1335_ks = {K for (_, _, K, _) in _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4}
+    baseline_ks = {K for (_, _, K, _) in _K905_K971_LDS_BC_ANCHORS_8}
+    assert k1335_ks == {4096, 8192}
+    assert baseline_ks == {16384, 32768}
+    assert k1335_ks.isdisjoint(baseline_ks)
+
+
+def test_k1335_disjoint_from_k1322_p8_mfma_issue_stall_envelope():
+    """K-1335 lives on the LDS-BC envelope (5th-position dispatch predicate)
+    and MUST NOT collide with the K-1322 51-cell P8 MFMA-issue-stall
+    envelope (1st-position dispatch predicate).  The two predicates target
+    distinct hardware bottlenecks per K-913 / K-1326 / R-1329 mechanistic
+    disambiguation; an overlap would break attribution and risk future
+    PMC-classifier confusion when the K-1308-style residual decomposition
+    is re-run on the K-1335 envelope (K-1335-FOLLOW-B)."""
+    assert _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4.isdisjoint(
+        _P8_MFMA_ISSUE_STALL_ROUTEOUT)
+
+
+def test_k1335_admit_cells_route_to_hbl_via_k971_route_table():
+    """Every K-1335 admit cell flips the full dispatch decision to
+    route-OUT (route_to_hbl = True) on the bf16 path with streamk OFF and
+    work-stealing OFF.  Exercises the *real* `k971_route_decision` helper
+    so the 5th-position predicate firing is observed end-to-end (after
+    P8 / E1 / P6 / P5 fall through to the K971_ROUTE_TABLE check)."""
+    for (sid, M, N, K, source) in K1335_LONGK_SMALLSQUARE_ADMITS_4_LIST:
+        # K-1335 cell must NOT match the K-1322 P8 envelope (otherwise the
+        # routing rationale would be MFMA-issue-stall, not LDS-BC).
+        assert (M, N, K, "torch.bfloat16") not in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+            f"K-1335 cell {sid} ({M},{N},{K}) collides with the K-1322 P8 "
+            "envelope; mechanistic-attribution invariant violated.")
+        # K-1335 cell MUST be in the LDS-BC `K971_ROUTE_TABLE`.
+        assert (M, N, K, "torch.bfloat16") in K971_ROUTE_TABLE, (
+            f"K-1335 cell {sid} ({M},{N},{K}) missing from K971_ROUTE_TABLE.")
+        # Full dispatch decision: routes to hbl on the bf16 path.
+        routed = k971_route_decision(
+            M, N, K,
+            "torch.bfloat16", "torch.bfloat16",
+            enable_streamk=False, work_stealing=False,
+            disable_env_set=False)
+        assert routed is True, (
+            f"K-1335 cell {sid} ({M},{N},{K}) failed to route to hbl via "
+            "the 5th-position K971_ROUTE_TABLE predicate.")
+
+
+def test_k1335_k_axis_neighbor_controls_do_not_match_admit_set():
+    """K-axis-neighbor controls (cells just outside the K-1326
+    `longK_smallSquare` bucket) MUST NOT match the K-1335 admit
+    frozenset.  This is a strict-equality no-leak pin -- verifies the
+    K=2048 K-axis neighbor below the admit band, the M=512 / M=4096
+    M-axis neighbors outside the M=N in {1024, 2048} admit window, and
+    rules out any silent broadening of the admit set on the K or M
+    axes during future edits."""
+    for (sid, M, N, K) in K1335_K_AXIS_NEIGHBOR_CONTROLS_4:
+        assert (M, N, K, "torch.bfloat16") not in _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4, (
+            f"K-1335 K-axis-neighbor control {sid} ({M},{N},{K}) leaked "
+            "into the admit set; the K-1326 bucket is strict {4096, 8192} "
+            "on K and strict {1024, 2048} on M=N.")
+
+
+def test_k1335_admits_are_all_bf16_dtype():
+    """K-1335 ships bf16 only.  K-913 PMC anchor + K-1326 residual bucket
+    + K-1308 cross-branch ratio invariant are all measured on bf16; fp16
+    LDS-BC parity is tracked separately (out of scope for K-1335).  A
+    silent fp16 entry would land an admit on an unmeasured-dtype cell
+    and bypass the K-1335 verification protocol entirely."""
+    for (M, N, K, dtype) in _K1335_LONGK_SMALLSQUARE_BF16_ADMITS_4:
+        assert dtype == "torch.bfloat16", (
+            f"K-1335 admit cell ({M},{N},{K},{dtype}) is not bf16; the "
+            "K-913 / K-1326 / K-1308 verification scope is bf16-only.")
+
+
+@pytest.mark.parametrize("M,N,K", [
+    (1024, 1024, 4096),
+    (1024, 1024, 8192),
+    (2048, 2048, 4096),
+    (2048, 2048, 8192),
+])
+def test_k1335_streamk_carve_out_short_circuits_admit(M, N, K):
+    """The K971 dispatch streamk / work-stealing carve-outs must
+    short-circuit BEFORE the K-1335 LDS-BC table is consulted.  Pinning
+    these here so any future edit that moves K-1335 ahead of the carve-out
+    (e.g. into a parametric-band predicate) trips this test."""
+    assert k971_route_decision(
+        M, N, K,
+        "torch.bfloat16", "torch.bfloat16",
+        enable_streamk=True, work_stealing=False,
+        disable_env_set=False) is False
+    assert k971_route_decision(
+        M, N, K,
+        "torch.bfloat16", "torch.bfloat16",
+        enable_streamk=False, work_stealing=True,
+        disable_env_set=False) is False
+
+
+def test_k1335_k905_k971_baseline_cells_still_route_after_k1335_union():
+    """K-905/K-971 baseline anchors (8 cells) must still flip the dispatch
+    decision to route-OUT after the K-1335 strict-equality union extends
+    K971_ROUTE_TABLE from 8 -> 12 cells.  Strict-equality union is
+    invariance-preserving by construction (R-1322.STRICT-EQUALITY-UNION-
+    PRESERVES-PRIOR-ADMIT-INVARIANCE-AS-STRUCTURAL-GUARANTEE), but a
+    one-line pin keeps the structural guarantee from being silently
+    broken by a future refactor that replaces the union with a parametric
+    predicate."""
+    for (M, N, K, dtype) in _K905_K971_LDS_BC_ANCHORS_8:
+        if dtype != "torch.bfloat16":
+            # fp16 baseline anchors: only the strict-equality table
+            # consultation applies (P5 closed-form is bf16-only).
+            assert (M, N, K, dtype) in K971_ROUTE_TABLE
+            continue
+        routed = k971_route_decision(
+            M, N, K, dtype, dtype,
+            enable_streamk=False, work_stealing=False,
+            disable_env_set=False)
+        assert routed is True, (
+            f"K-905/K-971 baseline anchor ({M},{N},{K},{dtype}) regressed "
+            "after K-1335 extension; strict-equality union must be "
+            "invariance-preserving.")

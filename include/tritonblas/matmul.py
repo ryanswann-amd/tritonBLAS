@@ -48,10 +48,9 @@ from ._route_predicate import (
     # to N=16384 (full K-grid).  30/30 admit at strict 1.05 gate; cohort
     # geomean tb/hbl = 1.174×.  Naturally disjoint with all P1-P17.
     _k1478_p19_skinny_n16384_routeout as _R_K1478_P19_skinny_n16384_routeout,
-    # K-1489 P20 (13th-position): alias-stack of K-1478 P19 admit envelope per
-    # K-1490 sibling-slot productionization (unreachable while P19 enabled —
-    # reserved slot for K-COMPLEMENT-EXTENDED follow-up).
-    _K1478_P20_SKINNY_N16384_KCOMPL_ROUTEOUT_N as _K1489_P20,
+    # K-1489 13th-slot is RESERVED — no symbol imported.  See the comment
+    # block above the K-1489 P20 placeholder in _route_predicate.py for the
+    # reviewer rationale (unanimous REVISE on the prior alias-of-P19 attempt).
 )
 
 
@@ -181,8 +180,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # disjointness with all P1-P17 (sibling-N firewall + R-1465 #1
     # zero-P12-deferral invariant).
     if _R_K1478_P19_skinny_n16384_routeout(int(M), int(N), int(K), a_dtype): return True
-    # K-1489 P20 (13th-position): alias-stack of K-1478 P19; reserved slot.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1489_P20: return True
+    # K-1489 13th-slot RESERVED — no executable code (placeholder only).
     return False
 
 

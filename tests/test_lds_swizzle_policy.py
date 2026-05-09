@@ -27,20 +27,78 @@ PMC decomposition further showed the residual ~10% gap is dominated by
 the recommended next axis is deeper prefetch staging (BK 64->128 with tile
 narrowing), which is out of scope for this PR.
 
-Purpose of this test
---------------------
-This is a runtime regression guard. It builds a small cohort-shaped GEMM,
-runs it through ``tritonblas.matmul`` (which goes through the same
-``persistent_matmul_lt`` launch path that holds the ``kpack = 1`` literal),
-and asserts numerical agreement with ``torch.matmul``. If a future edit
-silently flips ``kpack`` away from 1, the explanatory comment block in
-``matmul.py`` is the institutional memory; this test ensures the path is
-still numerically valid after any LDS-swizzle / kpack edit.
+Purpose of these tests
+----------------------
+Two complementary regression guards:
+
+1. ``test_kpack_pinned_to_one_in_source`` -- a *static* assertion that the
+   ``kpack = N`` literal in BOTH ``persistent_matmul_lt`` and
+   ``streamk_matmul_lt`` is exactly ``1``. This is the contract that the
+   PR is built around: a future contributor flipping the literal to 2
+   trips this test even if numerical equivalence is preserved (as it
+   would be -- kpack=2 is mathematically identical, just slower).
+
+2. ``test_persistent_matmul_cohort_cell_matches_torch`` -- a *runtime*
+   numerical-correctness guard on a small cohort-shaped GEMM, so the
+   path that actually consumes the pinned literal is exercised.
 """
+
+import importlib
+import inspect
+import re
 
 import pytest
 import torch
 import tritonblas
+
+# Resolve the submodule explicitly: ``tritonblas.matmul`` is shadowed in
+# ``tritonblas/__init__.py`` by the re-exported ``matmul`` function, so a
+# bare ``from tritonblas import matmul`` would bind the function, not the
+# module that defines ``persistent_matmul_lt`` / ``streamk_matmul_lt``.
+_tb_matmul_module = importlib.import_module("tritonblas.matmul")
+
+
+# --- (1) static policy pin --------------------------------------------------
+#
+# We introspect the source of the two persistent-matmul launch wrappers and
+# assert that the ``kpack = <int>`` literal is exactly 1. This is the
+# institutional-memory anchor for K-1652's falsified-kpack=2 finding: a future
+# contributor flipping the literal cannot silently revert without tripping
+# this assertion, even though kpack=2 would still produce numerically
+# identical output (so a pure equivalence test would not catch it).
+
+_KPACK_LITERAL_RE = re.compile(r"^\s*kpack\s*=\s*(\d+)\s*(?:#.*)?$", re.MULTILINE)
+
+
+@pytest.mark.parametrize(
+    "fn_name",
+    ["persistent_matmul_lt", "streamk_matmul_lt"],
+)
+def test_kpack_pinned_to_one_in_source(fn_name):
+    """K-1652/K-1672: the ``kpack`` literal in the persistent-matmul launch
+    wrappers must remain ``1``. PMC evidence: kpack=2 introduces 8.4M LDS
+    bank conflicts/kernel and regresses the M=N=4096 cohort ~9%. See the
+    comment block above the literal in ``include/tritonblas/matmul.py``.
+    """
+    fn = getattr(_tb_matmul_module, fn_name)
+    src = inspect.getsource(fn)
+    matches = _KPACK_LITERAL_RE.findall(src)
+    assert matches, (
+        f"could not locate a `kpack = <int>` literal in {fn_name}; "
+        "if the launch wrapper was refactored, update this test AND the "
+        "K-1652/K-1672 comment anchor in include/tritonblas/matmul.py."
+    )
+    bad = [v for v in matches if int(v) != 1]
+    assert not bad, (
+        f"{fn_name} has kpack={bad[0]} but K-1652 PMC evidence requires "
+        "kpack=1 on the M=N=4096 cohort (kpack=2 -> 8.4M bank conflicts/kernel, "
+        "~9% cohort regression). See the comment block above the kpack literal "
+        "in include/tritonblas/matmul.py and the gist linked from K-1672 before "
+        "changing this value."
+    )
+
+
+# --- (2) runtime numerical correctness --------------------------------------
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

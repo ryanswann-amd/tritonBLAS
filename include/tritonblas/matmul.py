@@ -94,22 +94,22 @@ from ._route_predicate import (
     # union); alias overlaps fire BEFORE P26 in the dispatch chain.
     _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout
         as _R_K1611_P26_skinny_n2048_kcompl_aliasstack_routeout,
-    # K-1673 (S-002): P28 skinny_N128 K-COMPLEMENT alias-stack 30-cell
-    # route-OUT (19th-position, load-bearing for the 6-cell fp16 mirror
-    # sub-cohort).  Closes the dtype-symmetry gap left by K-1367 P13
+    # P28 skinny_N128 K-COMPLEMENT alias-stack 30-cell route-OUT
+    # (19th-position, load-bearing for the 6-cell fp16 mirror
+    # sub-cohort).  Closes the dtype-symmetry gap left by P13_N128
     # (7th-slot, 18 cells, K ∈ {4096, 8192, 16384} only) by extending
     # the N=128 K-COMPLEMENT cohort to the K-EXTREMES K ∈ {2048,
     # 32768} on the full M-grid {2048, 4096, 8192} × {bf16, fp16}.
-    # K-1673 paired n=30 HIP-graph hot-cache vs the live post-K-1647
-    # P27 oracle: 30/30 lose to hipBLASLt by ≥10% (cohort geomean
-    # 1.694×).  6 NEW fp16 cells + 24 alias cells (15 bf16
-    # alias-of-R-K979-P5 ∪ 18 alias-of-K-1367-P13_N128).  Mechanism
-    # (R-1673 dtype-invariance proof, 36 rocprofv2 captures): K-913 §3
-    # LDS-bank-conflict fingerprint reproduces BIT-IDENTICALLY across
-    # dtypes — the LDS swizzle topology lives below the dtype lane mux
-    # so the routing predicate must mirror across dtype.
-    _k1673_p28_skinny_n128_kcompl_aliasstack_routeout
-        as _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout,
+    # Paired n=30 HIP-graph hot-cache vs the live post-P27 oracle
+    # pre-patch: 30/30 lose to hipBLASLt by ≥10% (cohort geomean
+    # 1.694×).  6 NEW fp16 cells + 24 alias cells (15 bf16 alias-of-P5
+    # ∪ 18 alias-of-P13_N128).  Mechanism (dtype-invariance proof, 36
+    # rocprofv2 captures): the LDS-bank-conflict fingerprint reproduces
+    # BIT-IDENTICALLY across dtypes — the LDS swizzle topology lives
+    # below the dtype lane mux so the routing predicate must mirror
+    # across dtype.
+    _p28_skinny_n128_kcompl_aliasstack_routeout
+        as _R_P28_skinny_n128_kcompl_aliasstack_routeout,
 )
 
 
@@ -316,32 +316,32 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # which fires at the 15th slot (P15+P17+P5 already cover the 30
     # cells).  Per K-1489 reviewer precedent we do not add a duplicate
     # predicate call for an unreachable alias.
-    # K-1673 P28 (19th-position): skinny_N128 K-COMPLEMENT alias-stack
-    # 30-cell route-OUT.  Stacks AFTER P26/P27 per the K-1175 stacked-
+    # P28 (19th-position): skinny_N128 K-COMPLEMENT alias-stack
+    # 30-cell route-OUT.  Stacks AFTER P26/P27 per the stacked-
     # predicate convention; closes the dtype-symmetry gap left by
-    # K-1367 P13 (7th-slot, 18 cells, K ∈ {4096, 8192, 16384} only) by
+    # P13_N128 (7th-slot, 18 cells, K ∈ {4096, 8192, 16384} only) by
     # extending the N=128 K-COMPLEMENT cohort to the K-EXTREMES K ∈
     # {2048, 32768} on the full M-grid {2048, 4096, 8192} × {bf16,
-    # fp16}.  K-1673 paired n=30 vs the live post-K-1647 P27 oracle:
+    # fp16}.  Paired n=30 vs the live post-P27 oracle pre-patch:
     # 30/30 lose to hipBLASLt by ≥10% (cohort geomean 1.694×, worst
     # 2.890× at (8192,128,2048,fp16)).  ALIAS-STACK structure: 6 NEW
     # cells (the fp16 mirror at K ∈ {2048, 32768} which slip through
-    # every existing predicate) + 24 alias cells (15 bf16 alias-of-
-    # R-K979-P5 ∪ 18 K∈{4096,8192,16384} alias-of-K-1367-P13_N128,
-    # intersection 9, union 24).  R-K979 P5 fires at the 4th-slot and
-    # K-1367 P13 fires at the 7th-slot, well before P28 — the 24 alias
-    # cells are documentation; the 6 NEW fp16 cells are the load-
-    # bearing portion.  Mechanism (R-1673 dtype-invariance proof, 36
-    # rocprofv2 captures): K-913 §3 LDS-bank-conflict fingerprint
-    # reproduces BIT-IDENTICALLY across dtypes (TB BC_cpi ∈ [1.4545,
-    # 2.133] vs HBL = 0.000 exactly; bf16 and fp16 rows at the same
-    # MNK emit BIT-IDENTICAL TB BC_cpi / LDS-inst-per-wave / cycles-
-    # per-wave to within 0.1%).  The LDS swizzle topology lives below
-    # the dtype lane mux, so the routing predicate must mirror across
+    # every existing predicate) + 24 alias cells (15 bf16 alias-of-P5
+    # ∪ 18 K∈{4096,8192,16384} alias-of-P13_N128, intersection 9,
+    # union 24).  P5 fires at the 4th-slot and P13_N128 fires at the
+    # 7th-slot, well before P28 — the 24 alias cells are
+    # documentation; the 6 NEW fp16 cells are the load-bearing
+    # portion.  Mechanism (dtype-invariance proof, 36 rocprofv2
+    # captures): the LDS-bank-conflict fingerprint reproduces
+    # BIT-IDENTICALLY across dtypes (TB BC_cpi ∈ [1.4545, 2.133] vs
+    # HBL = 0.000 exactly; bf16 and fp16 rows at the same MNK emit
+    # BIT-IDENTICAL TB BC_cpi / LDS-inst-per-wave / cycles-per-wave
+    # to within 0.1%).  The LDS swizzle topology lives below the
+    # dtype lane mux, so the routing predicate must mirror across
     # dtype.  Why hipBLASLt wins on extreme skinny long-K: split-K /
     # stream-K kernel selection vs tritonblas persistent_matmul which
-    # is L2/VMEM bound at N ≤ 256 per K-1634 / K-1629.
-    if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
+    # is L2/VMEM bound at N ≤ 256.
+    if _R_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
     # K-1553 17th-slot handle: no executable code — the K-1553-named alias
     # `_K1553_P25_SKINNY_N4096_KCOMPL_ALIASSTACK_30` lives in
     # _route_predicate.py as a single module-level rebinding of P24's

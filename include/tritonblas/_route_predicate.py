@@ -420,25 +420,27 @@ _K1131_P8_NEIGHBORS_12 = frozenset({
     ( 4480, 3072, 1536, "torch.bfloat16"),  # N12 S24 K*2  IN_COHORT
 })
 
-# K-1180 / K-1161 axis-extension cells (3 cells, bf16).  K-1161's E2 axis
-# audit (K-floor 256->128 + K=512 K-interior gap fill) yielded a
-# NEGATIVE_AXIS_PIVOT verdict overall, but 3 cells cleared the K-1007
-# admission floor (>= 1.05x, CI95-lo > 1.00) at paired n=30 HIP-graph
-# hot-cache on rad-mi300x-1.  K-1180 ships only those 3.  K-floor
-# relaxation is NOT staged (R-1161 small-M tail guard preserved).
-_K1161_P8_EXTENSIONS_3 = frozenset({
+# Composed 28-cell P8 envelope: 13 K-1121 anchors + 12 K-1131 neighbors +
+# 3 K-1180 / K-1161 axis-extension cells (inlined per Minimalist review --
+# the 3 cells are too few to merit a separate named constant; the round-
+# trip dispatch pin in tests already provides per-cell provenance).
+#
+# K-1161 E2 axis audit (K-floor 256->128 + K=512 K-interior gap fill)
+# yielded a NEGATIVE_AXIS_PIVOT verdict overall (small-M Triton-favoured
+# tail at K=512), but 3 individual cells cleared the K-1007 admission
+# floor (>= 1.05x, CI95-lo > 1.00) at paired n=30 HIP-graph hot-cache on
+# rad-mi300x-1.  K-1180 ships only those 3 cells, by strict equality.
+# K-floor relaxation is NOT staged (R-1161 small-M tail guard preserved).
+_P8_MFMA_ISSUE_STALL_ROUTEOUT = _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | frozenset({
+    # ----- K-1180 / K-1161 axis-extension cells (3 cells, bf16) -----
     (  736, 1792,  736, "torch.bfloat16"),  # E2_I4  ~1.315x  K-interior K=736
     (10112, 2048, 1024, "torch.bfloat16"),  # E2_M1  ~1.759x  M-extension at E1 K=1024
     (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2  ~1.499x  M-extension at E1 K=1024
 })
-
-# Composed 28-cell P8 envelope (13 anchors + 12 neighbors + 3 extensions).
-_P8_MFMA_ISSUE_STALL_ROUTEOUT = (
-    _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12 | _K1161_P8_EXTENSIONS_3
-)
 assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 28, (
-    "K-1144/K-1180 P8 envelope must be exactly 28 cells (13+12+3); "
-    "a duplicate or stray entry has crept in.")
+    "K-1144/K-1180 P8 envelope must be exactly 28 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 axis-extensions); a duplicate or stray "
+    "entry has crept in.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:

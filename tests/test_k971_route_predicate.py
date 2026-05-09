@@ -35,7 +35,6 @@ from tritonblas._route_predicate import (
     _P8_MFMA_ISSUE_STALL_ROUTEOUT,
     _K1121_P8_ANCHORS_13,
     _K1131_P8_NEIGHBORS_12,
-    _K1161_P8_EXTENSIONS_3,
 )
 from tritonblas.matmul import _k971_route_to_hbl
 
@@ -908,23 +907,55 @@ def test_k1144_p8_disable_env_var_short_circuits():
             os.environ["TRITONBLAS_DISABLE_K971"] = saved
 
 
-def test_k1180_p8_does_not_leak_into_k1161_negative_axis_pivot_cells():
-    """K-1161's NEGATIVE_AXIS_PIVOT verdict was driven by 5 cells below
-    the K-1007 admission floor (2 K-floor cells K=96/192 at M=512, and
-    3 K=512 K-interior cells at small M).  K-1180 must NOT silently
-    re-introduce them via a parametric K-floor relaxation predicate --
-    only the 3 K-1161-confirmed cells admit, by strict equality."""
-    k1161_negative_cells = [
-        ("E2_K1", 512, 2048,  96),  # 0.810x route-IN-safe (TB-favoured)
-        ("E2_K2", 512, 2048, 192),  # 1.020x ambiguous (CI straddles floor)
-        ("E2_I1", 192, 2048, 512),  # 0.868x route-IN-safe
-        ("E2_I2", 156, 1792, 512),  # 0.914x route-IN-safe
-        ("E2_I3", 160, 3072, 512),  # 0.907x route-IN-safe
-    ]
-    for cid, M, N, K in k1161_negative_cells:
-        assert _p8_mfma_issue_stall_routeout(M, N, K, torch.bfloat16) is False, (
-            f"K-1180 P8 leaked into K-1161 NEGATIVE_AXIS_PIVOT cell {cid} "
-            f"({M},{N},{K})")
+def test_k1180_p8_envelope_is_strictly_additive_vs_k1144_25_cell_baseline():
+    """K-1180 structural contract: the K-1180 P8 envelope is a STRICT
+    SUPERSET of the K-1144 25-cell baseline (13 K-1121 anchors + 12
+    K-1131 neighbors), and the only added cells are exactly the 3
+    K-1161-confirmed axis-extensions.
+
+    This is the load-bearing structural argument that justifies skipping
+    paired n=30 GPU re-measurement of the K-931 always-uncovered top-40
+    regression-guard catalog: because the diff is a pure frozenset add
+    (no removals, no parametric clauses), and the K-1144 baseline already
+    pinned no-leak into K-931 controls (see
+    ``test_k1144_p8_does_not_leak_into_k931_control_cells``), the
+    dispatch path for every non-P8 cell -- including every K-931 cell --
+    is bit-identical to the K-1144 baseline.  The ≥0.98x lower-bound
+    regression-guard criterion holds by construction (lower bound = 1.0x).
+
+    Pairs with the K-1144 round-trip pin
+    ``test_k1180_p8_dispatch_routes_all_28_cells_out_to_hbl`` to give
+    full additive-diff coverage in two complementary directions:
+      * additive (this test): K-1144 cells still route, +3 added cells.
+      * non-additive guard: K-931 controls + K-1161 NEGATIVEs still don't
+        route (covered by the existing K-1144 K-931 no-leak test plus the
+        K-1144 ``test_k1144_p8_does_not_match_perturbations_outside_envelope``
+        which already pins generic non-membership).
+    """
+    k1144_25_cell_baseline = _K1121_P8_ANCHORS_13 | _K1131_P8_NEIGHBORS_12
+    assert len(k1144_25_cell_baseline) == 25, (
+        "K-1144 baseline must remain 25 cells (13 + 12, disjoint).")
+    # Strict superset: every K-1144 cell is still in the K-1180 envelope.
+    assert k1144_25_cell_baseline.issubset(_P8_MFMA_ISSUE_STALL_ROUTEOUT), (
+        "K-1180 must be a strict superset of the K-1144 25-cell baseline; "
+        "a regression has dropped a previously-shipped cell.")
+    # Exactly 3 added cells, no fewer and no more.
+    added = _P8_MFMA_ISSUE_STALL_ROUTEOUT - k1144_25_cell_baseline
+    assert len(added) == 3, (
+        f"K-1180 must add exactly 3 cells over K-1144 baseline; got {len(added)}.")
+    # The added cells are exactly the 3 K-1161 axis-extensions, by strict
+    # tuple equality (codifies the cell-selection decision against the
+    # PRD's K∈{128,512} hypothesis: K-1161's measurement campaign
+    # rejected the K∈{128,512} relaxation as NEGATIVE_AXIS_PIVOT, and
+    # only these 3 cells survived the K-1007 admission gate).
+    expected_added = frozenset({
+        (  736, 1792,  736, "torch.bfloat16"),  # E2_I4
+        (10112, 2048, 1024, "torch.bfloat16"),  # E2_M1
+        (12160, 2048, 1024, "torch.bfloat16"),  # E2_M2
+    })
+    assert added == expected_added, (
+        f"K-1180 added cells diverge from the 3 K-1161-confirmed extensions; "
+        f"got {sorted(added)}, expected {sorted(expected_added)}.")
 
 
 def test_k1144_p8_does_not_match_perturbations_outside_envelope():

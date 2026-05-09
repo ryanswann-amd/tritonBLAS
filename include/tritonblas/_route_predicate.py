@@ -494,23 +494,48 @@ _K1205_EN3_ADMITS_8 = frozenset({
     ( 5972,  128,  768, "torch.bfloat16"),  # EN_K768_S18  hbl/tb=1.227x CI95=[1.226, 1.227] (mirror of S18)
 })
 
-# Composed 36-cell P8 envelope.  Four named provenance frozensets (anchors,
-# neighbors, K-1175/K-1161 E2 admits, K-1205 E_N3 admits) -- the dispatch
-# path consults the union.  Per R-1144.DUAL-FROZENSET-PROVENANCE rule and
-# its K-1175 extension, source-ticket lineage is load-bearing for future
-# reviewers (precedence-inversion debugging, PMC re-classifier work, ADR
-# audits) so each measurement campaign keeps its own named set with a
-# runtime size + disjointness check.
+# K-1219 / K-1240 / K-1266 — E3 N-floor=256 anchor-projected admits (7 cells).
+# K-1131-style +/-1-power-of-2 N-axis projection of K-1121 PMC anchors
+# {S18, S24, S25, S30, S37, S39} + K-1175 E2_M1 admit, projected to
+# N=256 (one tier below the K-1131 N09 N=896 natural floor; orthogonal to
+# K-1205's N=128 tier).  Per K-1142 carve-out, M >= 4480 on every cell.
+# Cross-arch verification (K-1219 + K-1240 paired n=30, K-1266 productionized):
+#   * MI300X (gfx942):   candidate-cohort geomean tb/hbl 1.368x (extension 1.255x)
+#   * MI325X (gfx942):   candidate-cohort geomean tb/hbl 1.607x
+#   * MI355X (gfx950):   candidate-cohort geomean tb/hbl 1.652x
+# Per R-1219.N-FLOOR-RELAXATION-IS-PORTABLE-WHEN-MFMA-ISSUE-STALL-MECHANISM-
+# IS-SHAPE-LIMITED, the MFMA-issue-stall predicate fires identically at N=256
+# and N=512 for the same (M, K) shape (PMC evidence from K-1211).
+_K1219_E3_NFLOOR256_ADMITS_7 = frozenset({
+    # ----- E3 N=256 anchor-projected admits (M >= 4480 per K-1142) -----
+    ( 5972,  256,  768, "torch.bfloat16"),  # E3_S18_N256
+    ( 4480,  256,  768, "torch.bfloat16"),  # E3_S24_N256
+    ( 6016,  256, 1024, "torch.bfloat16"),  # E3_S25_N256  MI300X tb/hbl 1.215 CI95=[1.206,1.224]
+    (16256,  256, 1024, "torch.bfloat16"),  # E3_S30_N256  MI300X tb/hbl 2.274 CI95=[2.260,2.291]
+    (25600,  256,  256, "torch.bfloat16"),  # E3_S37_N256
+    (49152,  256,  256, "torch.bfloat16"),  # E3_S39_N256
+    (10112,  256, 1024, "torch.bfloat16"),  # E3_E2M1_N256 MI300X tb/hbl 2.926 CI95=[2.911,2.942]
+})
+
+# Composed 43-cell P8 envelope.  Five named provenance frozensets (anchors,
+# neighbors, K-1175/K-1161 E2 admits, K-1205 E_N3 N=128 admits, K-1219/K-1266
+# E3 N=256 admits) -- the dispatch path consults the union.  Per
+# R-1144.DUAL-FROZENSET-PROVENANCE rule and its K-1175 extension, source-
+# ticket lineage is load-bearing for future reviewers (precedence-inversion
+# debugging, PMC re-classifier work, ADR audits) so each measurement
+# campaign keeps its own named set with a runtime size + disjointness check.
 _P8_MFMA_ISSUE_STALL_ROUTEOUT = (
     _K1121_P8_ANCHORS_13
     | _K1131_P8_NEIGHBORS_12
     | _K1161_E2_ADMITS_3
     | _K1205_EN3_ADMITS_8
+    | _K1219_E3_NFLOOR256_ADMITS_7
 )
-assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36, (
-    "K-1205 P8 envelope must be exactly 36 cells (13 K-1121 anchors + "
-    "12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 admits); "
-    "a duplicate or stray entry has crept in.")
+assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43, (
+    "K-1285 P8 envelope must be exactly 43 cells (13 K-1121 anchors + "
+    "12 K-1131 neighbors + 3 K-1161 E2 admits + 8 K-1205 E_N3 N=128 "
+    "admits + 7 K-1219/K-1266 E3 N=256 admits); a duplicate or stray "
+    "entry has crept in.")
 # Cross-check: the four sub-sets must be pairwise disjoint by construction.
 # K-1131 perturbed AWAY from K-1121 anchors; K-1161 E2 admits were
 # selected from the K-931 always-uncovered top-40 catalog minus all
@@ -535,14 +560,22 @@ assert _K1205_EN3_ADMITS_8.isdisjoint(_K1131_P8_NEIGHBORS_12), (
 assert _K1205_EN3_ADMITS_8.isdisjoint(_K1161_E2_ADMITS_3), (
     "K-1205 E_N3 admits overlap with K-1161 E2 admits; E_N3 candidates have "
     "N=128 by construction and no K-1161 E2 admit has N=128.")
+# K-1219/K-1266 E3 N=256 admits live on a separate N tier from all four
+# prior frozensets (K-1121: N>=896; K-1131: N>=896; K-1161: N in {1792, 2048};
+# K-1205: N=128) so disjointness is structural by N value alone.
+assert _K1219_E3_NFLOOR256_ADMITS_7.isdisjoint(_P8_MFMA_ISSUE_STALL_ROUTEOUT - _K1219_E3_NFLOOR256_ADMITS_7), (
+    "K-1219/K-1266 E3 N=256 admit overlaps a prior P8 cell; all prior "
+    "P8 cells have N in {128, 896, 1024, 1792, 2048} -- N=256 must be "
+    "disjoint by construction.")
 
 
 def _p8_mfma_issue_stall_routeout(M: int, N: int, K: int, dtype) -> bool:
-    """K-1144 P8 (extended by K-1175 and K-1205) — direct hipBLASLt route-OUT
-    for the quadruply-validated MFMA-issue-stall cohort (K-1121 anchors +
-    K-1131 neighbors + K-1175/K-1161 E2 admits + K-1205 E_N3 N-axis admits).
+    """K-1144 P8 (extended by K-1175, K-1205, and K-1219/K-1266) — direct
+    hipBLASLt route-OUT for the quintuply-validated MFMA-issue-stall cohort
+    (K-1121 anchors + K-1131 neighbors + K-1175/K-1161 E2 admits + K-1205
+    E_N3 N=128 admits + K-1219/K-1266 E3 N=256 admits).
 
-    Returns True iff (M, N, K, dtype) matches one of the 36 strict-equality
+    Returns True iff (M, N, K, dtype) matches one of the 43 strict-equality
     keys in :data:`_P8_MFMA_ISSUE_STALL_ROUTEOUT`.  bf16-only by design
     (the entire K-1121 / K-1131 source measurement scope is bf16; fp16
     parity is tracked separately on the K-1093 / K-1125 line).

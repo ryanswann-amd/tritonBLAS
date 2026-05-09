@@ -692,7 +692,9 @@ def test_k1144_p8_envelope_size_is_exactly_36_after_k1205_extension():
     above the 75% landing threshold).  See _K1205_EN3_ADMITS_8 docstring
     for the N-axis extension mechanism (N=128 mirror of K-1121 anchors;
     diverges from K-1161 K-axis NEGATIVE pattern)."""
-    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 36
+    # K-1285 layered K-1219/K-1266 7-cell N=256 route-OUT extension on top
+    # of K-1227's 36-cell envelope: 36 + 7 = 43 cells.
+    assert len(_P8_MFMA_ISSUE_STALL_ROUTEOUT) == 43
     assert len(_K1121_P8_ANCHORS_13) == 13
     assert len(_K1131_P8_NEIGHBORS_12) == 12
     assert len(_K1161_E2_ADMITS_3) == 3

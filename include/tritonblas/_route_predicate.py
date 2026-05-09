@@ -3300,3 +3300,30 @@ _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18 = frozenset(
 )
 # Cardinality (==18) gated by tests/test_p33_skinny_n224_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P34 (25th-slot): N=96 K-COMPLEMENT verified-winner subset — 18 cells from
+# K-1818's N=96 sub-cohort = M ∈ {2048,4096,8192} × N=96 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}.  K-1818 PMC RCA sweep (paired n=30 HIP-graph hot-cache, 3-engine
+# tb_oracle / tb_streamk / hbl) on MI300X / gfx942 (the "N=96 wave-misaligned
+# skinny-N cohort" characterised by K-1818): bf16 N=96 unrouted 0/9 (cohort gmean
+# r_oracle < 1.0 systemically — no upstream alias coverage at N=96 below the
+# K-1685 P28 N=128 rung); fp16 N=96 unrouted 0/9 (R-K1794 fp16-mirror systemic
+# gap below N=128 cliff).  All 18 cells admitted as verified-winner route-OUT
+# targets — both dtype rows are load-bearing (no upstream alias overlap, mirrors
+# K-1817 P33 N=224 discipline rather than K-1810 P32 N=160 alias-overlap pattern).
+# Mechanism (K-913 §3 LDS-bank-conflict, dtype-invariant per R-K1673): BLOCK_N=128
+# packs N=96 into a single wave-misaligned K-block column with PARTIAL coverage
+# (fewer accumulator lanes than N=128) → SQ_LDS_BANK_CONFLICT/inst stays elevated
+# AND MFMA-tail inefficiency from wave-misalignment (off-by-32 N rung per
+# R-1811.WAVE-MISALIGNMENT-IS-ROOT-MECHANISM); persistent_matmul cannot trade
+# tile reshape for atomic-reduction.  hipBLASLt's split-K kernel selection clears
+# the band by ~30% on average (geomean ≥1.05× over pre-stack TB-native per K-1818).
+# Same fingerprint productionized at K-1673 P28 (N=128), K-1810 P32 (N=160),
+# K-1775 P31 (N=256), and K-1817 P33 (N=224) — now applied to N=96 (the
+# wave-misaligned rung BELOW the N=128 cliff).
+_P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 96, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_p34_skinny_n96_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants.

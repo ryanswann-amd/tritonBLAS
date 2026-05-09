@@ -1184,3 +1184,53 @@ def test_k1216_e1_dispatch_stacked_after_p8_no_double_route():
         # E1 may or may not fire depending on whether cell is inside E1
         # envelope; verdict is True iff either fires (dispatch is OR).
         assert (p8_says or e1_says) is True
+# ---------------------------------------------------------------------------
+# K-1229 cross-arch admit pin tests
+#
+# These are no-leak admit witnesses (analogous to K-1175's reject pin tests
+# for K-1161 NEGATIVE_AXIS_PIVOT). They pin two representative K-1216
+# stacked-predicate admit cells to "MUST route-OUT" so any future contributor
+# attempting to add a gfx942-only or gfx950-only carve-out to the K-1216
+# stacked deploy will trip the test and be forced to re-validate the gate
+# against the K-1229 cross-arch evidence (28/28 MI325X + 16/16 MI355X
+# measured admit cells route-OUT-safe with monotonically widening geomeans).
+# ---------------------------------------------------------------------------
+
+def test_k1229_p8_anchor_S18_admits_cross_arch():
+    """K-1229: pin S18 (5972x1792x768 bf16) as a route-OUT admit cell.
+
+    Measured speedups (paired n=30 HIP-graph, B=10000 bootstrap CI95,
+    speedup = tb_us / hbl_us):
+      MI300X (K-1216 reference): admit (route-OUT-safe)
+      MI325X (K-1229 fresh):     1.620x [1.6086, 1.6328] route-OUT-safe
+      MI355X (K-1176 historical): 1.462x [1.4600, 1.4640] route-OUT-safe
+    """
+    from tritonblas._route_predicate import _P8_MFMA_ISSUE_STALL_ROUTEOUT
+    assert (5972, 1792, 768, "torch.bfloat16") in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+        "K-1229: S18 (5972x1792x768 bf16) must be in the P8 strict-equality "
+        "envelope so the stacked predicate routes it OUT on every supported "
+        "arch (gfx942, gfx950). Cross-arch evidence (K-1229 MI325X + K-1176 "
+        "MI355X) shows tb/hbl >= 1.46x on every measured arch."
+    )
+
+
+def test_k1229_p8_axis_ext_E2_M1_admits_cross_arch():
+    """K-1229: pin E2_M1 (10112x2048x1024 bf16) as a route-OUT admit cell.
+
+    Measured speedups (paired n=30, B=10000 bootstrap CI95):
+      MI300X (K-1209 baseline):   1.759x route-OUT-safe
+      MI325X (K-1229 fresh):      route-OUT-safe (>= 1.05x with CI95-lo > 1.00)
+      MI355X (K-1176 historical): 1.868x [1.8600, 1.8752] route-OUT-safe
+                                  -- LARGEST measured cross-arch geomean,
+                                  confirming the K-1175 axis extension (3-cell
+                                  P8 25 -> 28 productionisation) is the
+                                  highest-value arch-agnostic addition.
+    """
+    from tritonblas._route_predicate import _P8_MFMA_ISSUE_STALL_ROUTEOUT
+    assert (10112, 2048, 1024, "torch.bfloat16") in _P8_MFMA_ISSUE_STALL_ROUTEOUT, (
+        "K-1229: E2_M1 (10112x2048x1024 bf16) must be in the P8 envelope "
+        "(added via _K1161_P8_AXIS_EXT_3 sub-frozenset in K-1175) so the "
+        "stacked predicate routes it OUT on every supported arch. Cross-arch "
+        "evidence shows MI355X geomean 1.87x -- the K-1175 axis extension "
+        "is the highest-yield arch-agnostic addition to the P8 envelope."
+    )

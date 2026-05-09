@@ -494,6 +494,29 @@ assert _K1131_P8_NEIGHBORS_12.isdisjoint(_K1161_E2_ADMITS_3), (
 # E2 K-floor=128 is EXCLUDED per K-1176 cross-arch failure (0/8 cells on
 # MI325X/MI355X) — no K-axis relaxation past K=256.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# K-1229 (S-002): cross-arch port of the K-1216 stacked deploy to MI325X
+# (gfx942) and MI355X (gfx950). Paired n=30 HIP-graph hot-cache + B=10000
+# bootstrap CI95 on the union of cells covered by all three predicates
+# (28 P8 admit cells + 2 K-1142 carve-out controls = 30 cell-runs per arch).
+#   MI325X (rad-mi325x-1): 28/28 admit cells route-OUT-safe, 0 FN
+#                          regression, geomean tb/hbl 1.42x (+9.5pp vs MI300X
+#                          K-1216 cohort baseline). FP2 (2048x1792x256)
+#                          becomes route-OUT-safe (1.066x) -- K-1142 carve-out
+#                          is over-conservative on gfx942, NOT a leak.
+#   MI355X (mi355x-thor-1, K-1176 historical, 18/30 cells covered):
+#                          16/16 admit cells route-OUT-safe, 0 FN regression,
+#                          geomean tb/hbl 1.39x (+6.9pp vs MI300X). FP2
+#                          becomes route-OUT-safe (1.064x) -- same over-
+#                          conservative carve-out pattern as MI325X.
+# Decision: PRESERVE-NO-ARCH-GATE on both arches. K-1216 stacked deploy
+# ships universally without gfx942/gfx950 carve-outs. Codifies
+# R-1229.STACKED-PREDICATE-PORTS-CLEANLY-TO-GFX942-AND-GFX950-WITH-WIDENING
+# -GEOMEANS -- the third cross-arch confirmation of K-1162 R-1162 pattern
+# (predicates trained on MI300X under-fit on every non-MI300X SKU).
+# ---------------------------------------------------------------------------
+
 K1142_E1_NS = frozenset({1792, 2048, 3072})
 K1142_E1_KS = frozenset({256, 768, 1024})
 K1142_E1_M_FLOOR = 4480  # K-1121 anchor S24's M (margin 0; excludes FP1=256x2048x256)

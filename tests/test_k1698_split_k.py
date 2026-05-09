@@ -34,7 +34,13 @@ import pytest
 _RUNNER = textwrap.dedent("""
     import os, sys, torch
     import tritonblas
-    from tritonblas import matmul as _mm
+    # NB: `tritonblas/__init__.py` does `from .matmul import matmul`,
+    # which overwrites the `tritonblas.matmul` *submodule* attribute
+    # with the matmul *function*.  To reach the env-gated predicate
+    # symbols (_k1698_eligible, _K1698_SPLIT_K, ...) we must fetch the
+    # actual module object out of sys.modules.
+    import tritonblas.matmul  # ensures sys.modules entry exists
+    _mm = sys.modules['tritonblas.matmul']
 
     def _run(M, N, K, dtype, expect_split_k_eligible, label):
         torch.manual_seed(0)

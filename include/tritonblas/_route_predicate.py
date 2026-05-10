@@ -3461,3 +3461,77 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-1963 (S-002): P41–P44 (31st–34th-slot) wave-misaligned skinny-N
+# K-COMPLEMENT alias-stack quad — N ∈ {608, 672, 704, 736}.  Extends the
+# K-1922 P40 N=544 promotion one rung at a time across the next four
+# successive K-COMPLEMENT N-buckets validated by the live-oracle
+# paired-n=30 HIP-graph hot-cache MI300X / gfx942 cohorts of
+# K-1938 (N=608), K-1923 / K-1927 / K-1931 (N=672), K-1945 (N=704), and
+# K-1941 / K-1943 (N=736).  Each slot is a full M ∈ {2048,4096,8192} × N ×
+# K ∈ {4096,8192,16384} × {bf16,fp16} 18-cell verified-winner subset (no
+# upstream-aliased exclusions at these off-band rungs — confirmed via
+# `_k971_route_to_hbl(...)` direct call on each candidate cell against the
+# fix/K-1922 HEAD oracle).  Union cohort = 4 × 18 = 72 cells, geomean
+# tb/hbl ≥ ~1.4× per rung, 0/72 regressions on the K-1925 231-cell drift
+# baseline.
+#
+# Wave-/tile-alignment fingerprint per rung (BLOCK_N=128 packing):
+#   N=608: 608 mod 64 = 32 (wave-misaligned), 608 mod 128 = 96 — packs into
+#          4 full BN=128 tiles + 1 BN=96 tail (3/4-tile tail).
+#   N=672: 672 mod 64 = 32 (wave-misaligned), 672 mod 128 = 32 — packs into
+#          5 full BN=128 tiles + 1 BN=32 tail (1/4-tile tail; same off-by-32
+#          tail-fragment band as P40 N=544 = 4.25 BN-tiles).
+#   N=704: 704 mod 64 = 0 (wave-ALIGNED at the 64-lane SIMD; arithmetic
+#          correction vs the K-1963 PRD's blanket "N mod 64 == 32" claim —
+#          704 = 11×64 exactly), 704 mod 128 = 64 — packs into 5 full
+#          BN=128 tiles + 1 BN=64 *half-tile* tail.  Same K-913 §3
+#          SCHEDULER_LDS A4 mechanism attacked from a different geometric
+#          angle (LDS-double-buffer prologue collision rather than
+#          MFMA-lane half-utilisation).
+#   N=736: 736 mod 64 = 32 (wave-misaligned), 736 mod 128 = 96 — packs into
+#          5 full BN=128 tiles + 1 BN=96 tail (3/4-tile tail; same
+#          tail-fragment fingerprint as N=608 one rung down).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict +
+# K-1945 BN-half-tile LDS-double-buffer collision): the persistent_matmul
+# kernel cannot trade tile reshape for atomic-reduction across these tail
+# fragments; hipBLASLt's split-K kernel selection clears the band by ~50%
+# on average per the K-1938 / K-1923 / K-1945 / K-1941 paired-n=30 cohorts.
+# Per K-1908 compact-predicate analysis, none of the four rungs are covered
+# by the existing S1-form `(N % 64 != 0) ∧ (N <= 384) ∧ (K >= 4096)`
+# predicate (all four N > 384 — predicate's N-ceiling cuts off below this
+# rung), so explicit alias-stack promotion is required until S1 is extended
+# in a separate task.  Per K-1946 a depth-4 closed-form predicate over the
+# {544, 608, 672, 704, 736} union is *available* but is NOT yet substituted
+# here pending K-1942-style bit-equiv revalidation on the expanded
+# P41–P44 set; this is left to a follow-up task.  Sibling-N firewall
+# disjoint by construction with every prior K-COMPLEMENT alias-stack slot
+# (P28 N=128, P29 N=64, P30 N ∈ {384,768,1536}, P31 N=256, the
+# consolidated P32–P38 N ∈ {96,160,224,288,320,352,384}, P40 N=544, plus
+# K-1367/K-1397 P13 N ∈ {128,256}) and pairwise disjoint across P41–P44
+# themselves (each rung is a distinct N-axis bucket).
+_K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 608, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+_K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 672, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+_K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 704, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+_K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 736, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Per-slot cardinality (==18 each) and union cardinality (==72) gated by
+# tests/test_k1963_p41_p44_skinny_n608_672_704_736_alias_stack.py per the
+# minimalist split: src holds data, tests hold structural invariants
+# (R-1532 / R-1720 / R-1775).
+assert len(_K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18) == 18
+assert len(_K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18) == 18
+assert len(_K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18) == 18
+assert len(_K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18) == 18

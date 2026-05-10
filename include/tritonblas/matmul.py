@@ -132,6 +132,20 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-1963 (S-002): P41–P44 (31st–34th-slot) wave-/tile-misaligned
+    # skinny-N K-COMPLEMENT alias-stack quad — N ∈ {608, 672, 704, 736},
+    # 4 × 18 = 72 cells total.  Extends the K-1922 P40 N=544 promotion one
+    # rung at a time across the next four K-COMPLEMENT N-buckets validated
+    # by K-1938 (N=608), K-1923/K-1927/K-1931 (N=672), K-1945 (N=704), and
+    # K-1941/K-1943 (N=736) paired-n=30 HIP-graph hot-cache cohorts; cohort
+    # geomean tb/hbl ≥ ~1.4× per rung, 0/72 regressions on the K-1925
+    # 231-cell drift baseline.  K-1946 depth-4 closed-form predicate
+    # substitution is held back pending K-1942-style bit-equiv revalidation
+    # on the expanded P41–P44 set (separate task).
+    _K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18,
+    _K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18,
+    _K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18,
+    _K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +421,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-1963 (S-002): P41–P44 (31st–34th-slot) wave-/tile-misaligned
+    # skinny-N K-COMPLEMENT alias-stack quad — N ∈ {608, 672, 704, 736},
+    # 4 × 18 = 72 cells total.  Each rung is a full M ∈ {2048,4096,8192} ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16} verified-winner subset against
+    # the live oracle at fix/K-1922 HEAD (no upstream-aliased exclusions
+    # at these off-band rungs).  Off-band fingerprint per rung: N=608
+    # mod 64=32 / mod 128=96, N=672 mod 64=32 / mod 128=32, N=704
+    # mod 64=0 / mod 128=64 (BN-half-tile tail), N=736 mod 64=32 /
+    # mod 128=96.  Per-rung cohort geomean tb/hbl ≥ ~1.4×; sibling-N
+    # firewall disjoint with every prior K-COMPLEMENT alias-stack slot
+    # AND pairwise disjoint across P41–P44 (each is a distinct N-bucket).
+    # K-1946 depth-4 closed-form substitution is held pending K-1942-style
+    # bit-equiv revalidation on the expanded P41–P44 set.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18: return True
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18: return True
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18: return True
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

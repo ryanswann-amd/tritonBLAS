@@ -3566,3 +3566,47 @@ _K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2152_p56_n1584_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# ---------------------------------------------------------------------------
+# K-1908 (S-002): closed-form predicate for the off-by-48 (`N % 64 == 48`)
+# K-COMPLEMENT alias-stack family.  Replaces the per-rung frozenset
+# membership-chain (currently K-2136 P55 N=1520 + K-2152 P56 N=1584) with a
+# single closed-form check, addressing the K-2152-PR Performance-Hawk
+# feedback on the cold-path linear scan of independent hash lookups.
+#
+# Net dispatcher impact: 2 frozenset membership-checks (~30 ns each) collapse
+# into 1 closed-form check (1 modulo + 2 set lookups, < 50 ns total).  The
+# two `_K2136_*` and `_K2152_*` data frozensets remain in this module as
+# the canonical data + cardinality oracle for tests; they are no longer
+# imported by `matmul.py` — only the closed-form predicate is.
+#
+# Currently admits N ∈ {1520, 1584} sharing the envelope:
+#   M ∈ {2048, 4096, 8192} × K ∈ {4096, 8192, 16384} × {bf16, fp16}.
+# Future off-by-48 admits at the same envelope are added by extending
+# `_K1908_OFFBY48_ADMIT_N` (1 LOC).  Future admits at a different envelope
+# require either a parallel predicate or envelope-set unioning.
+#
+# Functional equivalence (admit-set identity) pinned by:
+#   tests/test_k1908_offby48_closed_form_equivalence.py
+# i.e. for all (M, N, K, dt) in the 4D oracle product, the closed-form
+# returns True iff (M, N, K, dt) ∈ _K2136_…_18 ∪ _K2152_…_18.
+_K1908_OFFBY48_ADMIT_N = frozenset({1520, 1584})
+_K1908_OFFBY48_ENVELOPE_MK_DT = frozenset(
+    (M, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+
+
+def _is_k1908_offby48_kcompl_admit(M, N, K, a_dtype) -> bool:
+    """Closed-form K-1908 predicate replacing the K-2136 + K-2152 single-N
+    off-by-48 frozenset membership chain.  Single closed-form check
+    (1 modulo + 2 set lookups) instead of an O(rungs) chain of
+    independent hash-lookups.  Functionally equivalent (admit-set
+    identity) to the union of `_K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18`
+    and `_K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18` — pinned by
+    tests/test_k1908_offby48_closed_form_equivalence.py."""
+    return (
+        (int(N) % 64 == 48)
+        and (int(N) in _K1908_OFFBY48_ADMIT_N)
+        and ((int(M), int(K), str(a_dtype)) in _K1908_OFFBY48_ENVELOPE_MK_DT)
+    )

@@ -132,17 +132,16 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
-    # K-2136 (S-002): P55 skinny_N1520 K-COMPLEMENT alias-stack — 18-cell
-    # 11th-rung extension of the off-by-48 wave-misaligned ladder
-    # (mod-64=48, mod-128=112).  Disjoint with every prior slot (no shared N).
-    _K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18,
-    # K-2152 (S-002): P56 skinny_N1584 K-COMPLEMENT alias-stack — 18-cell
-    # 12th-rung extension of the off-by-48 wave-misaligned ladder
-    # (mod-64=48, mod-128=48; 24.75 fractional waves; 0.375 fractional
-    # BLOCK_N=128 tile sub-class shared with N=1456 / N=1328 / N=1200).
-    # Disjoint with every prior slot (no shared N).  Crosses the K-1908
-    # ≥12-rung closed-form refactor actionability threshold.
-    _K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18,
+    # K-1908 (S-002) closed-form refactor: collapses the K-2136 P55 N=1520 +
+    # K-2152 P56 N=1584 off-by-48 (`N % 64 == 48`) single-N frozenset
+    # membership-chain into one closed-form predicate (1 modulo + 2 set
+    # lookups) — addresses the K-2152-PR Performance-Hawk feedback on the
+    # cold-path linear scan of independent hash lookups.  Future off-by-48
+    # admits at the same envelope add 1 LOC to `_K1908_OFFBY48_ADMIT_N`
+    # rather than chaining a new frozenset.  Functional equivalence
+    # (admit-set identity) pinned by
+    # tests/test_k1908_offby48_closed_form_equivalence.py.
+    _is_k1908_offby48_kcompl_admit,
 )
 
 
@@ -418,20 +417,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
-    # K-2136 (S-002): P55 skinny_N1520 K-COMPLEMENT alias-stack — 11th rung
-    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
-    # 1264/1328/1392/1456 → 1520).  18 cells (M ∈ {2048,4096,8192} × N=1520
-    # × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-misalignment
-    # mechanism as every prior rung (BLOCK_N=128 → 11.875 fractional tiles).
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18: return True
-    # K-2152 (S-002): P56 skinny_N1584 K-COMPLEMENT alias-stack — 12th rung
-    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
-    # 1264/1328/1392/1456/1520 → 1584).  18 cells (M ∈ {2048,4096,8192} ×
-    # N=1584 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-
-    # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.375
-    # fractional tiles, 24.75 fractional waves; mod-128=48 sibling to N=1456).
-    # Crosses K-1908 ≥12-rung closed-form refactor actionability threshold.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18: return True
+    # K-1908 (S-002) closed-form refactor: replaces the prior K-2136 P55
+    # N=1520 + K-2152 P56 N=1584 chained frozenset membership-checks with
+    # one closed-form admit predicate over the off-by-48 (`N % 64 == 48`)
+    # K-COMPLEMENT alias-stack family.  Addresses the K-2152-PR
+    # Performance-Hawk feedback: replaces O(rungs) of independent hash
+    # lookups with a single closed-form check (1 modulo + 2 set lookups)
+    # while preserving exact admit-set identity (pinned by
+    # tests/test_k1908_offby48_closed_form_equivalence.py).
+    if _is_k1908_offby48_kcompl_admit(M, N, K, a_dtype): return True
     return False
 
 

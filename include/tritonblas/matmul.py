@@ -175,14 +175,21 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # than per-shape entries; strict-equality table retained for K-905/K-971
     # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
-    # K-2175-perfhawk-followup: cache (M_i, N_i, K_i, dt_s) ONCE per call.
-    # Prior dispatcher rebuilt the (int(M), int(N), int(K), str(a_dtype))
-    # tuple on every chained membership check (~7 sites in the alias-stack
-    # chain alone), each rebuild costing ~150 ns on Zen3.  Caching cuts
-    # this to a single rebuild and exposes the cached `_dt_s` to the
-    # short-circuit dtype-mismatch check below for free.
+    # K-2175-perfhawk-followup-v2 (Rev 4): hoist BOTH the dtype-string and
+    # the (int(M), int(N), int(K), _dt_s) lookup tuple ONCE per call.
+    # The Rev 2 followup cached only `_dt_s` and left the
+    # `(int(M), int(N), int(K), _dt_s)` tuple to be rebuilt at each
+    # frozenset membership-check site (two such sites: `_K971_ROUTE_TABLE`
+    # and the consolidated `_KCOMPL_ALIASSTACK_UNION`).  Per the K-2175-PR
+    # Performance-Hawk follow-up: those two int-coercions + tuple-allocation
+    # sites are pure dispatcher tax at thousands of GEMMs/training-step.
+    # Hoist the int coercions into a single `_key` tuple at the top of the
+    # function and reuse `_key` for both membership checks below — that is
+    # the actual O(1) consolidation the prior review asked for (the Rev 2
+    # work cached only the str, not the ints/tuple).
     _dt_s = str(a_dtype)
     if enable_streamk or work_stealing or _dt_s != str(b_dtype): return False
+    _key = (int(M), int(N), int(K), _dt_s)
     # K-1144 (S-002): P8 MFMA-issue-stall direct hipBLASLt route-OUT for
     # the triply-validated 25-cell envelope (13 K-1121 anchors + 12 K-1131
     # neighbors).  Consulted BEFORE the K-1089 P6 admit so K-1121's paired
@@ -211,7 +218,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-905/K-971 strict-equality table) is short-circuited for the cell.
     if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype): return False
     if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
-    if (int(M), int(N), int(K), _dt_s) in _K971_ROUTE_TABLE: return True
+    if _key in _K971_ROUTE_TABLE: return True
     # K-1361 (S-002): P12 square_mid PMC-driven 4-cell route-OUT (6th-position
     # envelope). Stacks AFTER the K971 LDS-BC table per K-1175 stacked-predicate
     # convention; productionises K-1345's Predicate-Q (square_mid 2048³) and
@@ -442,7 +449,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # in `_route_predicate.py` as data oracles + audit handles so any
     # future rung admit (K-2175-followup, etc.) just adds a `|` term to
     # the union without touching the dispatcher.  Cardinality 247 cells.
-    if (int(M), int(N), int(K), _dt_s) in _KCOMPL_ALIASSTACK_UNION: return True
+    if _key in _KCOMPL_ALIASSTACK_UNION: return True
     return False
 
 

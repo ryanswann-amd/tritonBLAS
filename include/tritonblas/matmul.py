@@ -142,6 +142,20 @@ from ._route_predicate import (
     # K-1994 P45 N=880 / K-2010 P46 N=944 off-by-48 ladder rungs.  Naturally
     # disjoint with every prior slot (no shared N).
     _K2031_P47_SKINNY_N1008_KCOMPL_ALIASSTACK_18,
+    # K-2052 (S-002): P48 (38th-slot) skinny_N1072 K-COMPLEMENT alias-stack —
+    # 18-cell envelope (M ∈ {2048,4096,8192} × N=1072 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned
+    # 5th rung (1072 mod 64 = 48; 1072 mod 128 = 48 — back to the same
+    # mod-128 class as P45 N=816 / P46 N=944, complementing K-2031 P47
+    # N=1008 mod 128 = 112 which separated wave-lane mismatch from the
+    # BLOCK_N=128 packing tail mechanism).  K-2052 paired n=30 HIP-graph
+    # hot-cache MI300X / gfx942 vs live post-K-2031 oracle (fix/K-2031
+    # HEAD 2a8c0e0): BEFORE cohort geomean tb/hbl ≈ 1.31× (curve-fit
+    # `1 + 335/N` plateau predicts 1.313× at N=1072).  Mirrors the K-1978
+    # P45 N=816 / K-1994 P45 N=880 / K-2010 P46 N=944 / K-2031 P47 N=1008
+    # off-by-48 ladder rungs.  Naturally disjoint with every prior slot
+    # (no shared N).
+    _K2052_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -422,6 +436,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # 16/18 admit at ≥1.10× and ≥1.05×; mirrors K-1978/K-1994/K-2010 off-by-48
     # ladder).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2031_P47_SKINNY_N1008_KCOMPL_ALIASSTACK_18: return True
+    # K-2052 (S-002): P48 (38th-slot) skinny_N1072 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 5th-rung; 1072 mod 64 = 48, mod 128 = 48; BEFORE
+    # cohort geomean tb/hbl ≈ 1.31× per the K-2031 curve-fit `1+335/N` plateau;
+    # mirrors K-1978/K-1994/K-2010/K-2031 off-by-48 ladder).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2052_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

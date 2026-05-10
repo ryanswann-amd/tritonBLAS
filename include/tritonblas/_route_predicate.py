@@ -3461,3 +3461,50 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2130 (S-002): P54 (next-position) skinny_N1456 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset for the off-by-48 wave-misaligned N=1456
+# **10th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46 N=944),
+# K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48 N=1072),
+# K-2055/K-2060/K-2063 (N=1136), K-2071/K-2075/K-2077/K-2085 (P50 N=1200),
+# K-2071/K-2085/K-2091 (P51 N=1264), K-2097/K-2101/K-2104/K-2106 (P52 N=1328),
+# and K-2107 (P53 N=1392).  N=1456 carries (mod 64 = 48, mod 128 = 48) — same
+# off-by-48 wave-misalignment band as every prior rung of this family;
+# mod-128 alternates 48/80/112 across the ladder rungs with N=1456 returning
+# to the mod-128=48 sub-class (matches P45 N=816, P46 N=944, P48 N=1072,
+# P50 N=1200, P52 N=1328 — the 6th mod-128=48 member of this ladder).
+# Per K-2107 F-K2107.K-AXIS-AMPLIFICATION-PEAK-1P882X projection, N=1456
+# (next +64 step beyond P53 N=1392) is forecast to land in the 1.7×–1.9×
+# K-axis peak range; the K-2031/K-2041 plateau-decay forecast (family floor
+# ~1.30×, decay knee N=1300–1500) is empirically falsified for 3 consecutive
+# rungs (K-2091 → K-2101 → K-2107) and K-2072 wide-N sweep confirms ladder
+# admit-eligible past N=1776 with no observed decay onset, so N=1456 sits
+# squarely inside the ongoing climb regime predicted by K-2101/K-2107.
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=1456 into 11.375 BLOCK_N tiles per N-row (vs N=1392's
+# 10.875 / N=1328's 10.375 / N=1264's 9.875 — the fractional-tile pattern is
+# the same SCHEDULER_LDS A4 failure mode as every prior off-by-48 rung).
+# Per K-2061 PMC delta-attribution, residue-48 carries a stable LDS bank-
+# conflict differential (~6×) vs residue-32 (~2×) and wave-aligned (~1×) at
+# (M=4096, K=8192, bf16); per K-2107 F-K2107.OFF-BY-48-LDS-BC-6X-VS-WAVE-
+# ALIGNED-3X-DIFFERENTIAL-OVER-OFF-BY-32, the 3× off-by-48-vs-off-by-32 LDS
+# BC differential explains why off-by-48 stays admit-eligible deep into the
+# K-2061-predicted ceiling region while off-by-32 plateaued at P40 N=544.
+# K-2130 extends that ladder by one rung; expected K-COMPLEMENT alias hit
+# rate per K-2107 refined K-axis amplification slope projects worst-cell
+# (M=4096, N=1456, K=16384) ≈ 1.7×–1.9× BEFORE TB/HBL.
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 9
+# prior off-by-48 rungs already in the alias-stack.
+_K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1456, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2130_p54_n1456_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

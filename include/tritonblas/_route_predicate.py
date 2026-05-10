@@ -3592,3 +3592,50 @@ _K2169_P56_SKINNY_N1648_KCOMPL_ALIASSTACK_8 = frozenset(
 # Cardinality (==8) gated by tests/test_k2169_p56_n1648_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2183 (S-002): P57 (next-position) skinny_N1712 K-COMPLEMENT alias-stack —
+# 8-cell verified-winner subset for the off-by-48 wave-misaligned N=1712
+# **14th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46
+# N=944), K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48
+# N=1072), K-2055/K-2060/K-2063/K-2066 (P49 N=1136), K-2071/K-2075/K-2077/
+# K-2085 (P50 N=1200), K-2071/K-2085/K-2091 (P51 N=1264), K-2092/K-2101/
+# K-2106 (P52 N=1328), K-2107 (P53 N=1392), K-2127 (P54 N=1456),
+# K-2158 (P55 N=1584) and K-2169 (P56 N=1648).
+# N=1712 carries (mod 64 = 48, mod 128 = 48) — same off-by-48 wave-
+# misalignment band as every prior rung of this family.  The K-COMPLEMENT
+# swap recovers wave-tile coverage at residue-48 by reorienting the inner-K
+# reduction so the per-tile schedule no longer strands a 48-element wave-
+# misaligned N-fragment per BLOCK_N=128 tile (N=1712 = 13.375 fractional
+# tiles per N-row, vs N=1648's 12.875 / N=1584's 12.375 / N=1456's
+# 11.375).  Per K-2150 R-K2150.MOD-64-IS-BINDING-MOD-128-IS-NOT-FOR-
+# RESIDUE-48-FAMILY only `mod 64 == 48` binds — the `mod 128 == 48`
+# subclass at N=1712 admits identically (validated upstream at K-1978
+# N=816 / K-2010-2024 N=944 / K-2043-2052 N=1072 / K-2092-2106 N=1328 /
+# K-2158 N=1584 — all `mod 128 == 48`).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict): same
+# SCHEDULER_LDS A4 failure mode as every prior off-by-48 rung; per K-2061
+# PMC delta-attribution residue-48 carries a stable LDS bank-conflict
+# differential (~6×) vs residue-32 (~2×) and wave-aligned (~1×) at
+# (M=4096, K=8192, bf16).  K-2183 paired n=30 HIP-graph hot-cache 3-engine
+# bench (tb / hbl / rocblas) on the task-specified 8-cell verification
+# cohort (M ∈ {4096,8192} × N=1712 × K ∈ {8192,16384} × {bf16,fp16})
+# extends the K-2169 13-rung wall-clock chain by one residue-48 step
+# (+64 from N=1648 on the same residue-48 lattice).  The frozenset literal
+# cardinality (==8) matches the measured verification cohort, not the
+# canonical 18-cell envelope — extension to the full grid is deferred to
+# a follow-up rung-stitch task.
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 13
+# prior off-by-48 rungs already in the alias-stack.
+_K2183_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8 = frozenset(
+    (M, 1712, K, dt) for M in (4096, 8192)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==8) gated by tests/test_k2183_p57_n1712_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

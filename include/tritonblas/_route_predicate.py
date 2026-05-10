@@ -3501,3 +3501,28 @@ _K2127_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2127_p54_n1456_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2143 (S-002): off-by-48 ladder TERMINATION at N=1456.
+# ----------------------------------------------------------------------
+# K-2143 evaluated the next contiguous rung at N=1520 (M ∈ {2048,4096,8192}
+# × N=1520 × K ∈ {4096,8192,16384} × {bf16,fp16}) on c42-class MI300X
+# (gfx942) with a paired 4-engine HIP-graph hot-cache benchmark (tritonblas
+# native vs hipBLASLt vs rocBLAS, n=100 × 5 reps = 500 paired samples per
+# cell).  The empirical result REFUTED the K-2072 wide-N admit-eligible
+# extrapolation at this rung:
+#
+#   - 5/18 cells: native tritonblas (BEFORE) BEAT hipBLASLt (AFTER) by
+#     ≥1% (worst: M=2048,K=4096,bf16 ≈6%, M=8192,K=4096,bf16 ≈4%).
+#   - 2/18 cells: hipBLASLt won by ≥1% (max ≈2%).
+#   - 11/18 cells: within ±1% (iter-noise neutral).
+#   - 6/18 cells: native tritonblas already beat hipBLASLt — admitting
+#     N=1520 to the K-COMPLEMENT alias-stack would route the WINNER away.
+#
+# Conclusion: the off-by-48 (mod 64 == 48) wave-misaligned skinny-N
+# K-COMPLEMENT alias-stack ladder TERMINATES at the K-2127 N=1456 rung
+# above.  N=1520 is NOT admitted.  Informs K-2119 upper-bound investigation:
+# the residue-48 family ceiling sits between N=1456 (admit) and N=1520
+# (refute).  Raw CSVs + analysis live at workspace K-2143/output/
+# bench_k2143_n1520_rep{1..5}_n100.csv.
+#
+# +0 active LOC dispatcher change (comments-only).

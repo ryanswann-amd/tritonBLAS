@@ -152,6 +152,15 @@ from ._route_predicate import (
     # p=0.167, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
     # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.481×.
     _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17,
+    # P38 (29th-slot): N=416 K-COMPLEMENT verified-winner subset — 17 cells
+    # (M ∈ {2048,4096,8192} × N=416 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
+    # cells, MINUS (2048,416,4096,bf16) which is already routed by upstream
+    # K-1003 R-K979 P5 Clause-1 mid-rect non-square per K-1873 paired-n30
+    # measurement; ratio_TB/HBL=1.002, p=0.394, R-K1825.CHECK-ALIAS-STACK-
+    # COVERAGE-MAP-FIRST exclusion).  17/17 admit cells gate-pass at the
+    # strict ≥1.10× ∧ p<0.01 K-1873 floor; admit-only geomean=1.429×;
+    # cohort geomean (full 18-cell)=1.401×.
+    _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17,
 )
 
 
@@ -496,6 +505,36 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (2048,352,16384,bf16) — the worst N=352 cell); same SCHEDULER_LDS A4
     # failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
     if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17: return True
+    # P38 (29th-slot): N=416 K-COMPLEMENT verified-winner subset — 17 cells from
+    # K-1873's N=416 sub-cohort (M ∈ {2048,4096,8192} × N=416 × K ∈ {4096,8192,
+    # 16384} × {bf16,fp16}) MINUS the single (2048,416,4096,bf16) cell already
+    # routed by K-1003 R-K979 P5 Clause-1 mid-rect non-square (minMN=416 ∈
+    # [256, 2304] ∧ maxMN=2048 ∈ [1792, 3072] ∧ K=4096 ∈ [1240, 8064] — all
+    # four bounds fire; ratio_TB/HBL=1.002, p=0.394 paired Student-t n=30 —
+    # parity, same hipBLASLt kernel) per the K-1873 paired-n30 measurement
+    # against the LIVE post-P37 oracle (fix/K-1866 HEAD = 45f46d8) +
+    # R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST prune.  K-1873 paired n=30
+    # HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep on MI300X / gfx942
+    # (OCI MI300X fallback per INFRA-0048 c42 SSH-refused —
+    # same fallback path as K-1843/K-1846/K-1857/K-1863): 18/18 cohort cells
+    # admitted at the strict ≥1.10× ∧ paired-t p<0.01 gate (K-1873 stricter
+    # floor than K-1843's 1.05/0.05); per-cell ratios on the 17 admit cells
+    # span 1.239×–1.714× (median ≈ 1.469×); cohort geomean TB/HBL = 1.401×
+    # over the full 18-cell envelope; admit-only geomean = 1.429× — closes
+    # the wave-misaligned N=416 K-COMPLEMENT band one rung above K-1748 P30
+    # (N=384 mid-K) / K-1866 P37 (N=352).  Mechanism (K-913 §3 LDS-bank-
+    # conflict + R-1811 wave-misalignment): N=416 mod 128 = 32 — narrow
+    # 32-column third tile mirroring the wave-misalignment pattern at N=288
+    # (mod 128 = 32, K-1832), N=320 (64, K-1846), N=352 (96, K-1843), and
+    # N=384 (cliff, K-1857).  K-1873 PMC bottleneck histogram: LDS_DOMINANT
+    # 18/18; SQ_LDS_BANK_CONFLICT TB/HBL median ratio 585× (range 126×–1170×,
+    # **monotonically deeper than K-1863 N=352's 440× and K-1857 N=384's
+    # ~150×**); SQ_WAIT_INST_LDS TB/HBL median ratio 13.2× (range 5.0×–49.7×);
+    # MFMA-busy fraction TB 9.4% vs HBL 18.3% — TB MFMA pipe starved despite
+    # SQ_INSTS_MFMA ratio 0.99×; same SCHEDULER_LDS A4 failure mode as
+    # K-1681/K-1710/K-1781/K-1812/K-1824/K-1832/K-1843/K-1846/K-1857/K-1863
+    # wave-misaligned skinny-N class.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17: return True
     return False
 
 

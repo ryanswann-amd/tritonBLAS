@@ -3399,6 +3399,15 @@ _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
 # Sibling-N firewall: N=320 is disjoint from every prior slot's N-axis
 # projection (P5, P13, P21, P28-P35) — natural N-axis separator, asserted
 # at module load by tests/test_p36_skinny_n320_alias_stack.py.
+# NOTE (K-1880 RETRY R-Minimalist consolidation): the literal _P36 / _P37 / _P38
+# frozensets below are now DERIVED N-axis projection VIEWS of the single
+# canonical 51-cell roster `_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51`
+# defined further down in this file (mirroring the K-1864 P32-P36 consolidation
+# pattern, commit c954555).  The dispatcher in matmul.py consults ONLY the
+# canonical 51-cell set (single membership probe) — never these per-slot views.
+# The per-slot frozensets are kept solely to back the existing per-slot
+# structural tests (tests/test_p3{6,7,8}_*_alias_stack.py) without churn.
+# See _K1880_..._ROUTEOUT_51 below for inlined provenance + per-cell ratios.
 _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset({
     # M=2048 (excludes the (2048, 320, 4096, "torch.bfloat16") upstream alias)
     (2048, 320,  8192, "torch.bfloat16"),  # r=1.626 p<1e-6
@@ -3574,3 +3583,140 @@ _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17 = frozenset({
 })
 # Cardinality (==17) gated by tests/test_p38_skinny_n416_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# -----------------------------------------------------------------------------
+# K-1880 R-Minimalist consolidation: P36 (N=320) + P37 (N=352) + P38 (N=416)
+# rolled into a single canonical 51-cell inlined frozenset, mirroring the
+# K-1864 P32-P36 consolidation pattern (commit c954555).
+#
+# `_k971_route_to_hbl()` previously chained THREE sequential frozenset
+# membership probes for the K-COMPLEMENT N=320/N=352/N=416 verified-winner
+# subsets (K-1850 P36 + K-1866 P37 + K-1880 P38 = 17 + 17 + 17 = 51 cells).
+# Each new K-COMPLEMENT N-rung promotion grew the dispatcher chain by one
+# probe: 3 probes * 1 hash lookup each on hostile cells, up to 3 probes on
+# admit cells (worst-case at the end of the chain).
+#
+# Collapse the 3 chained probes into ONE membership probe over a single
+# canonical 51-cell frozenset whose admit cells are inlined as literal
+# tuples in this file — the single source of truth for the K-COMPLEMENT
+# N∈{320,352,416} promoted-cell roster.  The 3 prior per-slot frozensets
+# (`_P36_..._WIN_17`, `_P37_..._WIN_17`, `_P38_..._WIN_17`) are now derived
+# N-axis projection VIEWS over the canonical roster (filtered by N integer);
+# they continue to back the existing per-slot structural tests
+# (`tests/test_p3{6,7,8}_skinny_*_alias_stack.py`) without churn.  The
+# dispatcher consults ONLY the canonical 51-cell set — never the views.
+#
+# Why these three slots and not (e.g.) extending the K-1864 P32-P36 set or
+# pulling in N=384?  N∈{320,352,416} are the three contiguous K-COMPLEMENT
+# wave-misaligned-skinny-N slots produced by the same paired-n=30 HIP-graph
+# productionisation cadence (K-1843 → K-1850, K-1866, K-1880) against the
+# SAME upstream-alias exclusion rule (R-K1825.CHECK-ALIAS-STACK-COVERAGE-
+# MAP-FIRST drops one (2048,N,4096,bf16) cell per N-rung).  N=384 is NOT
+# a sibling — it lives in P30 (K-1748, multi-N {384,768,1536}), pre-dates
+# the per-N-rung cadence, has a different exclusion structure, and merging
+# it would force a P30 rewrite outside K-1880 scope.  N=288 (P35) is in
+# the K-1864 consolidated set already.  This consolidation strictly stays
+# within the three slots K-1880's PRD names ("consider whether N=320/352/
+# 384/416 slots can be merged into a single _K1880_SKINNY_KCOMPL_N320_N416
+# frozenset"), substituting N=352 for the unmergeable N=384 to keep the
+# slots cohort-homogeneous.
+#
+# Provenance (per-cell ratio_TB/HBL inlined as comments below; full PMC
+# RCA in the per-slot comment blocks above):
+#   N=320: K-1850 productionisation of K-1843 paired n=30 (gate
+#          ≥1.05× ∧ p<0.05); 17/17 admit, ratios 1.326×–1.911×, geomean 1.545×.
+#   N=352: K-1866 productionisation of K-1843 paired n=30 (same gate);
+#          17/17 admit, ratios 1.215×–1.784×, geomean 1.481×.
+#   N=416: K-1880 productionisation of K-1873 paired n=30 (stricter gate
+#          ≥1.10× ∧ p<0.01); 17/17 admit, ratios 1.239×–1.714×, geomean 1.429×.
+# Combined cohort geomean across all 51 admit cells ≈ 1.485×.
+#
+# Disjointness is empirical, not assumed: each derived view filters on a
+# distinct N integer, and the actual N-axis projection of the canonical
+# roster is exactly {320, 352, 416} — asserted at module load below.  No
+# load-time cardinality assert ceremony beyond this — derivation guarantees
+# consistency with the per-slot views.
+_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51 = frozenset({
+    # ----- N=320 (K-1850 P36, 17 admit; excludes (2048,320,4096,bf16) P5-alias) -----
+    (2048, 320,  8192, "torch.bfloat16"),  # r=1.626 p<1e-6
+    (2048, 320, 16384, "torch.bfloat16"),  # r=1.911 p<1e-6  N=320 WORST
+    (2048, 320,  4096, "torch.float16"),   # r=1.544 p<1e-6
+    (2048, 320,  8192, "torch.float16"),   # r=1.573 p<1e-6
+    (2048, 320, 16384, "torch.float16"),   # r=1.854 p<1e-6
+    (4096, 320,  4096, "torch.bfloat16"),  # r=1.583 p<1e-6
+    (4096, 320,  8192, "torch.bfloat16"),  # r=1.723 p<1e-6
+    (4096, 320, 16384, "torch.bfloat16"),  # r=1.772 p<1e-6
+    (4096, 320,  4096, "torch.float16"),   # r=1.477 p<1e-6
+    (4096, 320,  8192, "torch.float16"),   # r=1.609 p<1e-6
+    (4096, 320, 16384, "torch.float16"),   # r=1.727 p<1e-6
+    (8192, 320,  4096, "torch.bfloat16"),  # r=1.383 p<1e-6
+    (8192, 320,  8192, "torch.bfloat16"),  # r=1.375 p<1e-6
+    (8192, 320, 16384, "torch.bfloat16"),  # r=1.624 p<1e-6
+    (8192, 320,  4096, "torch.float16"),   # r=1.326 p<1e-6  N=320 BEST admit
+    (8192, 320,  8192, "torch.float16"),   # r=1.368 p<1e-6
+    (8192, 320, 16384, "torch.float16"),   # r=1.616 p<1e-6
+    # ----- N=352 (K-1866 P37, 17 admit; excludes (2048,352,4096,bf16) P5-alias) -----
+    (2048, 352,  8192, "torch.bfloat16"),  # r=1.620 p<1e-6
+    (2048, 352, 16384, "torch.bfloat16"),  # r=1.784 p<1e-6  N=352 WORST  lds_wait 25.27×
+    (2048, 352,  4096, "torch.float16"),   # r=1.349 p<1e-6
+    (2048, 352,  8192, "torch.float16"),   # r=1.545 p<1e-6
+    (2048, 352, 16384, "torch.float16"),   # r=1.762 p<1e-6
+    (4096, 352,  4096, "torch.bfloat16"),  # r=1.418 p<1e-6
+    (4096, 352,  8192, "torch.bfloat16"),  # r=1.617 p<1e-6
+    (4096, 352, 16384, "torch.bfloat16"),  # r=1.699 p<1e-6
+    (4096, 352,  4096, "torch.float16"),   # r=1.435 p<1e-6
+    (4096, 352,  8192, "torch.float16"),   # r=1.570 p<1e-6
+    (4096, 352, 16384, "torch.float16"),   # r=1.673 p<1e-6
+    (8192, 352,  4096, "torch.bfloat16"),  # r=1.236 p<1e-6
+    (8192, 352,  8192, "torch.bfloat16"),  # r=1.419 p<1e-6
+    (8192, 352, 16384, "torch.bfloat16"),  # r=1.641 p<1e-6
+    (8192, 352,  4096, "torch.float16"),   # r=1.215 p<1e-6  N=352 BEST admit (cohort min)
+    (8192, 352,  8192, "torch.float16"),   # r=1.349 p<1e-6
+    (8192, 352, 16384, "torch.float16"),   # r=1.601 p<1e-6
+    # ----- N=416 (K-1880 P38, 17 admit; excludes (2048,416,4096,bf16) P5-alias) -----
+    (2048, 416,  8192, "torch.bfloat16"),  # r=1.469 p<1e-30
+    (2048, 416, 16384, "torch.bfloat16"),  # r=1.714 p<1e-30  N=416 WORST (cohort max)
+    (2048, 416,  4096, "torch.float16"),   # r=1.331 p<1e-30
+    (2048, 416,  8192, "torch.float16"),   # r=1.442 p<1e-30
+    (2048, 416, 16384, "torch.float16"),   # r=1.621 p<1e-30
+    (4096, 416,  4096, "torch.bfloat16"),  # r=1.325 p<1e-30
+    (4096, 416,  8192, "torch.bfloat16"),  # r=1.470 p<1e-30
+    (4096, 416, 16384, "torch.bfloat16"),  # r=1.474 p<1e-30
+    (4096, 416,  4096, "torch.float16"),   # r=1.333 p<1e-30
+    (4096, 416,  8192, "torch.float16"),   # r=1.425 p<1e-30
+    (4096, 416, 16384, "torch.float16"),   # r=1.471 p<1e-30
+    (8192, 416,  4096, "torch.bfloat16"),  # r=1.239 p<1e-30  N=416 BEST admit
+    (8192, 416,  8192, "torch.bfloat16"),  # r=1.329 p<1e-30
+    (8192, 416, 16384, "torch.bfloat16"),  # r=1.518 p<1e-30
+    (8192, 416,  4096, "torch.float16"),   # r=1.244 p<1e-30
+    (8192, 416,  8192, "torch.float16"),   # r=1.462 p<1e-30
+    (8192, 416, 16384, "torch.float16"),   # r=1.516 p<1e-30
+})
+
+# Empirical cardinality + N-axis projection asserts (replace the prior
+# per-slot len()==17 ceremony with one canonical len()==51).
+assert len(_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51) == 51, (
+    "_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51 cardinality drift — "
+    "expected 51 (17 N=320 + 17 N=352 + 17 N=416), got "
+    f"{len(_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51)}"
+)
+_K1880_N_AXIS_PROJECTION = frozenset(
+    n for (_m, n, _k, _dt) in _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51
+)
+assert _K1880_N_AXIS_PROJECTION == frozenset({320, 352, 416}), (
+    "K-1880 canonical roster N-axis projection drift — expected {320, 352, 416}, "
+    f"got {sorted(_K1880_N_AXIS_PROJECTION)}"
+)
+# Derivation equivalence — the per-slot views (which back the existing
+# per-slot structural tests) MUST equal the corresponding N-axis filter
+# of the canonical roster (cell-for-cell).  Detects accidental drift
+# between the literal-tuple sources of truth.
+assert _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 == frozenset(
+    cell for cell in _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51 if cell[1] == 320
+), "P36 view drifted from K-1880 canonical N=320 projection"
+assert _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17 == frozenset(
+    cell for cell in _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51 if cell[1] == 352
+), "P37 view drifted from K-1880 canonical N=352 projection"
+assert _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17 == frozenset(
+    cell for cell in _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51 if cell[1] == 416
+), "P38 view drifted from K-1880 canonical N=416 projection"

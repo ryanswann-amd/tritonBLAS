@@ -61,10 +61,31 @@ def test_p5_alias_excluded():
 
 def test_dispatcher_admits_all_p38_cells():
     """Smoke check: every cell in P38 must admit via the live
-    `_k971_route_to_hbl` dispatcher — confirms the 29th dispatch line was
-    correctly wired and exercises the actual production code path."""
+    `_k971_route_to_hbl` dispatcher — confirms the K-1880 consolidated
+    canonical-set probe routes the N=416 admit cells.  Per R-Testing-Zealot
+    (K-1880 RETRY) this is also asserted parametrised cell-by-cell over the
+    full 51-cell K-1880 canonical roster in
+    `test_k1880_p36_p38_consolidation.py::test_canonical_cell_routes_through_k971_dispatcher`,
+    so a future drop of any single P38 cell from the route surfaces as a
+    named pytest failure (not just a smoke failure here)."""
     from tritonblas.matmul import _k971_route_to_hbl
     for (M, N, K, dt) in FZ:
         assert _k971_route_to_hbl(M, N, K, dt, dt, False, False), (
             f"P38 cell ({M}, {N}, {K}, {dt}) failed to admit via _k971_route_to_hbl"
         )
+
+
+def test_p5_aliased_cell_still_routes_via_upstream_path():
+    """Per R-Testing-Zealot (K-1880 RETRY): the (2048,416,4096,bf16) cell
+    is excluded from P38 per R-K1825 because P5 Clause-1 already routes it
+    upstream.  Pin that the exclusion did NOT drop dispatch coverage —
+    the cell still routes True via `_k971_route_to_hbl` via the P5 path.
+    If a future P5 change loses this cell, it would silently fall back to
+    TB-native (regression); this test surfaces that as a named failure."""
+    from tritonblas.matmul import _k971_route_to_hbl
+    M, N, K, dt = 2048, 416, 4096, "torch.bfloat16"
+    assert _k971_route_to_hbl(M, N, K, dt, dt, False, False), (
+        f"P5-aliased cell ({M},{N},{K},{dt}) lost upstream coverage — "
+        f"P38 excluded it expecting P5 Clause-1 to route it, but "
+        f"_k971_route_to_hbl returns False"
+    )

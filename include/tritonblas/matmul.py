@@ -138,29 +138,18 @@ from ._route_predicate import (
     # off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).  K-1832 cohort
     # geomean TB/HBL = 4.290× — the largest uplift in the alias-stack to date.
     _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
-    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells
-    # (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
-    # cells, MINUS (2048,320,4096,bf16) which is already routed by an upstream
-    # alias-stack slot per K-1843 paired-n30 measurement; ratio_TB/HBL=1.0001,
-    # p=0.293, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
-    # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.545×.
-    _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
-    # P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 17 cells
-    # (M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
-    # cells, MINUS (2048,352,4096,bf16) which is already routed by an upstream
-    # alias-stack slot per K-1843 paired-n30 measurement; ratio_TB/HBL=1.0031,
-    # p=0.167, R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).  17/17
-    # admit cells gate-pass at strict ratio≥1.05 ∧ p<0.05; per-N geomean=1.481×.
-    _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17,
-    # P38 (29th-slot): N=416 K-COMPLEMENT verified-winner subset — 17 cells
-    # (M ∈ {2048,4096,8192} × N=416 × K ∈ {4096,8192,16384} × {bf16,fp16} = 18
-    # cells, MINUS (2048,416,4096,bf16) which is already routed by upstream
-    # K-1003 R-K979 P5 Clause-1 mid-rect non-square per K-1873 paired-n30
-    # measurement; ratio_TB/HBL=1.002, p=0.394, R-K1825.CHECK-ALIAS-STACK-
-    # COVERAGE-MAP-FIRST exclusion).  17/17 admit cells gate-pass at the
-    # strict ≥1.10× ∧ p<0.01 K-1873 floor; admit-only geomean=1.429×;
-    # cohort geomean (full 18-cell)=1.401×.
-    _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17,
+    # K-1880 R-Minimalist consolidation: single canonical 51-cell frozenset
+    # collapsing the prior P36 (N=320, K-1850, 17 cells) + P37 (N=352, K-1866,
+    # 17 cells) + P38 (N=416, K-1880, 17 cells) chain into one membership
+    # probe (mirrors the K-1864 P32-P36 consolidation pattern, commit c954555).
+    # Cohort geomean across all 51 admit cells ≈ 1.485× TB/HBL — combined
+    # K-COMPLEMENT wave-misaligned skinny-N N∈{320,352,416} band.  The three
+    # per-slot frozensets remain in `_route_predicate.py` as derived N-axis
+    # projection VIEWS backing the existing per-slot structural tests; the
+    # dispatcher consults ONLY this canonical set.  See
+    # `_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51` in `_route_predicate.py`
+    # for inlined provenance + per-cell ratios.
+    _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51,
 )
 
 
@@ -468,73 +457,62 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # per K-1832 PMC delta ranking with SQ_LDS_BANK_CONFLICT ≈ 869× and
     # SQ_WAIT_INST_LDS ≈ 12.5× at the top of the discriminator list).
     if (int(M), int(N), int(K), str(a_dtype)) in _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18: return True
-    # P36 (27th-slot): N=320 K-COMPLEMENT verified-winner subset — 17 cells from
-    # K-1843's N=320 sub-cohort (M ∈ {2048,4096,8192} × N=320 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}) MINUS (2048,320,4096,bf16) which is already upstream-routed
-    # per the K-1843 paired-n30 measurement (ratio 1.0001, p=0.293, classified
-    # WITHIN_0p95X_PARITY_BAND).  K-1843 paired n=30 HIP-graph hot-cache + 3-pass
-    # rocprofv2 PMC sweep (LDS / VALU·MFMA / VMEM·L2) on MI300X / gfx942 vs
-    # K-1837 LIVE oracle (e7dfab4 + P32–P35 stacked): 17/17 cells admitted at the
-    # strict ≥1.05× ∧ p<0.05 gate; per-cell ratios 1.326×–1.911× (median 1.583×),
-    # per-N geomean = 1.545×.  Both dtype rows load-bearing — closes the
-    # wave-misaligned N=320 dtype-mirror (BLOCK_N=128 packs N=320 into the
-    # off-by-64 wave-misaligned column-narrow layout above the N=256 P31 cliff
-    # and below the N=384 P30 rung → K-913 §3 LDS-bank-conflict + R-1811
-    # wave-misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
-    # histogram: LDS_DOMINANT 36/36 across the K-1843 N∈{320,352} cohort, with
-    # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (median ≈ 8.5×); same
-    # SCHEDULER_LDS A4 failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17: return True
-    # P37 (28th-slot): N=352 K-COMPLEMENT verified-winner subset — 17 cells from
-    # K-1843's N=352 sub-cohort (M ∈ {2048,4096,8192} × N=352 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16}) MINUS (2048,352,4096,bf16) which is already upstream-routed
-    # per the K-1843 paired-n30 measurement (ratio 1.0031, p=0.167, classified
-    # WITHIN_0p95X_PARITY_BAND).  K-1843 paired n=30 HIP-graph hot-cache + 3-pass
-    # rocprofv2 PMC sweep (LDS / VALU·MFMA / VMEM·L2) on MI300X / gfx942 vs the
-    # K-1825 LIVE oracle (d061410 + P32–P34 stacked): 17/17 cells admitted at the
-    # strict ≥1.05× ∧ p<0.05 gate; per-cell ratios 1.215×–1.784× (median 1.545×),
-    # per-N geomean = 1.481×.  Both dtype rows load-bearing — closes the
-    # wave-misaligned N=352 dtype-mirror (BLOCK_N=128 packs N=352 into the
-    # off-by-96 wave-misaligned column-narrow layout above the K-1850 P36 N=320
-    # rung and below the K-1748 P30 N=384 rung; N%64 = 32 ≠ 0 on MI300X CDNA3
-    # wave64 → partial-wave epilogue stalls in tritonblas persistent_matmul that
-    # hipBLASLt's split-K Tensile assembly avoids → K-913 §3 LDS-bank-conflict +
-    # R-1811 wave-misalignment MFMA-tail compounded fingerprint).  PMC bottleneck
-    # histogram: LDS_DOMINANT 36/36 across the K-1843 N∈{320,352} cohort, with
-    # lds_wait_ratio_TB/HBL spanning 1.96×-25.27× (cohort MAX 25.27× lands at
-    # (2048,352,16384,bf16) — the worst N=352 cell); same SCHEDULER_LDS A4
-    # failure mode as K-1681/K-1710/K-1781/K-1812/K-1824/K-1832.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17: return True
-    # P38 (29th-slot): N=416 K-COMPLEMENT verified-winner subset — 17 cells from
-    # K-1873's N=416 sub-cohort (M ∈ {2048,4096,8192} × N=416 × K ∈ {4096,8192,
-    # 16384} × {bf16,fp16}) MINUS the single (2048,416,4096,bf16) cell already
-    # routed by K-1003 R-K979 P5 Clause-1 mid-rect non-square (minMN=416 ∈
-    # [256, 2304] ∧ maxMN=2048 ∈ [1792, 3072] ∧ K=4096 ∈ [1240, 8064] — all
-    # four bounds fire; ratio_TB/HBL=1.002, p=0.394 paired Student-t n=30 —
-    # parity, same hipBLASLt kernel) per the K-1873 paired-n30 measurement
-    # against the LIVE post-P37 oracle (fix/K-1866 HEAD = 45f46d8) +
-    # R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST prune.  K-1873 paired n=30
-    # HIP-graph hot-cache + 3-pass rocprofv2 PMC sweep on MI300X / gfx942
-    # (OCI MI300X fallback per INFRA-0048 c42 SSH-refused —
-    # same fallback path as K-1843/K-1846/K-1857/K-1863): 18/18 cohort cells
-    # admitted at the strict ≥1.10× ∧ paired-t p<0.01 gate (K-1873 stricter
-    # floor than K-1843's 1.05/0.05); per-cell ratios on the 17 admit cells
-    # span 1.239×–1.714× (median ≈ 1.469×); cohort geomean TB/HBL = 1.401×
-    # over the full 18-cell envelope; admit-only geomean = 1.429× — closes
-    # the wave-misaligned N=416 K-COMPLEMENT band one rung above K-1748 P30
-    # (N=384 mid-K) / K-1866 P37 (N=352).  Mechanism (K-913 §3 LDS-bank-
-    # conflict + R-1811 wave-misalignment): N=416 mod 128 = 32 — narrow
-    # 32-column third tile mirroring the wave-misalignment pattern at N=288
-    # (mod 128 = 32, K-1832), N=320 (64, K-1846), N=352 (96, K-1843), and
-    # N=384 (cliff, K-1857).  K-1873 PMC bottleneck histogram: LDS_DOMINANT
-    # 18/18; SQ_LDS_BANK_CONFLICT TB/HBL median ratio 585× (range 126×–1170×,
-    # **monotonically deeper than K-1863 N=352's 440× and K-1857 N=384's
-    # ~150×**); SQ_WAIT_INST_LDS TB/HBL median ratio 13.2× (range 5.0×–49.7×);
-    # MFMA-busy fraction TB 9.4% vs HBL 18.3% — TB MFMA pipe starved despite
-    # SQ_INSTS_MFMA ratio 0.99×; same SCHEDULER_LDS A4 failure mode as
-    # K-1681/K-1710/K-1781/K-1812/K-1824/K-1832/K-1843/K-1846/K-1857/K-1863
-    # wave-misaligned skinny-N class.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P38_SKINNY_N416_KCOMPL_VERIFIED_WIN_17: return True
+    # K-1880 R-Minimalist consolidation (mirrors K-1864 commit c954555 P32-P36
+    # consolidation pattern): single canonical 51-cell membership probe collapsing
+    # the prior 3-chain P36 (N=320, K-1850) → P37 (N=352, K-1866) → P38 (N=416,
+    # K-1880) sequence into ONE hash lookup over
+    # `_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51`.  Worst-case dispatch
+    # cost on hostile cells drops from 3 lookups to 1; admit cells go from up
+    # to 3 lookups (P38 cells previously paid 3) to 1 lookup uniformly.
+    #
+    # Cohort: K-COMPLEMENT wave-misaligned skinny-N N∈{320,352,416} verified-
+    # winner subset.  Each N-rung is the K-COMPLEMENT grid (M ∈ {2048,4096,8192}
+    # × K ∈ {4096,8192,16384} × {bf16,fp16} = 18 cells) MINUS the single
+    # (2048,N,4096,bf16) cell already routed by an upstream alias-stack slot
+    # per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST (N=320 / N=352 P5-
+    # parity-band pre-routes; N=416 P5 Clause-1 mid-rect non-square pre-route).
+    # 17 + 17 + 17 = 51 admit cells.
+    #
+    # Provenance:
+    #   N=320 (K-1850 prod / K-1843 measurement): paired n=30 HIP-graph hot-
+    #         cache + 3-pass rocprofv2 PMC vs K-1837 LIVE oracle (e7dfab4 +
+    #         P32–P35 stacked); 17/17 admit at strict ≥1.05× ∧ p<0.05 gate;
+    #         ratios 1.326×–1.911× (median 1.583×), per-N geomean 1.545×.
+    #   N=352 (K-1866 prod / K-1843 measurement): paired n=30 vs K-1825 LIVE
+    #         oracle (d061410 + P32–P34 stacked); 17/17 admit at same gate;
+    #         ratios 1.215×–1.784× (median 1.545×), per-N geomean 1.481×.
+    #   N=416 (K-1880 prod / K-1873 measurement): paired n=30 vs K-1866 LIVE
+    #         oracle (45f46d8 + P32–P37 stacked); 17/17 admit at the
+    #         STRICTER ≥1.10× ∧ p<0.01 gate (K-1873 raised the floor);
+    #         ratios 1.239×–1.714× (median 1.469×), per-N geomean 1.429×.
+    # Combined geomean across all 51 admit cells ≈ 1.485× TB/HBL.
+    #
+    # Mechanism (uniform across the 3 N-rungs, K-913 §3 LDS-bank-conflict +
+    # R-1811 wave-misalignment): BLOCK_N=128 packs each N into a wave-mis-
+    # aligned third-tile remainder column (N=320 mod 128 = 64; N=352 mod
+    # 128 = 96; N=416 mod 128 = 32).  PMC bottleneck histogram across the
+    # combined cohort: LDS_DOMINANT in 100% of admit cells; SQ_LDS_BANK_
+    # CONFLICT TB/HBL ratio escalates monotonically with the wave-mis-
+    # alignment severity (N=352 cohort max 25.27×, N=416 median 585× —
+    # K-1873 measurement against the post-P37 oracle).  Same SCHEDULER_LDS
+    # A4 failure mode as the unbroken K-1681/K-1710/K-1781/K-1812/K-1824/
+    # K-1832/K-1843/K-1846/K-1857/K-1863/K-1873 lineage.
+    #
+    # Why these three slots and NOT the four N=320/352/384/416 candidates
+    # the PRD nominates: N=384 lives in P30 (K-1748, multi-N {384,768,1536}),
+    # which pre-dates the per-N-rung K-COMPLEMENT cadence and has a different
+    # exclusion structure — merging it would force a P30 rewrite outside
+    # K-1880 scope.  N=288 (P35) is already in the K-1864 consolidated set.
+    # The three K-COMPLEMENT N-rungs that share the same {paired n=30 HIP-
+    # graph + R-K1825 single-cell-exclusion + ≥1.05/p<0.05 floor} promotion
+    # template are exactly N∈{320, 352, 416}.
+    #
+    # See `_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51` in
+    # `_route_predicate.py` for the inlined per-cell roster + per-cell
+    # ratios.  The 3 prior per-slot frozensets remain in `_route_predicate.py`
+    # as derived N-axis projection views backing existing per-slot tests
+    # (`tests/test_p3{6,7,8}_skinny_*_alias_stack.py`) without churn.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51: return True
     return False
 
 

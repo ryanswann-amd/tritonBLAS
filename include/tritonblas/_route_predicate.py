@@ -3259,61 +3259,88 @@ _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28 = frozenset(
 # minimalist split: src holds data, tests hold invariants.
 
 # ============================================================================
-# K-1864 (S-002): Consolidated P32–P36 K-COMPLEMENT verified-winner alias-stack
+# K-1881 (S-002): Consolidated P32–P38 K-COMPLEMENT verified-winner alias-stack
 # ============================================================================
-# Audit (K-1864): 5 consecutive K-COMPLEMENT route-out promotions (P32 N=160,
-# P33 N=224, P34 N=96, P35 N=288, P36 N=320) had each landed as its own
-# `_P32..._WIN_18` … `_P36..._WIN_17` named frozenset and chained as 5
-# back-to-back `frozenset` membership probes inside `_k971_route_to_hbl()`.
-# Worst-case dispatch overhead grew O(slot-position): one tuple build + 5
-# hash lookups per call.  Pattern is unsustainable as future PMC promotions
-# land at this position.
+# Audit (K-1881, extends K-1864): the consolidation block established at
+# K-1864 (originally P32–P36, 89 cells over N ∈ {96,160,224,288,320}) is
+# extended in-place to absorb the two newer K-COMPLEMENT slots that landed
+# since:
+#   * P37 (N=352, K-1868 / 17 cells) — was about to chain a 6th frozenset
+#     probe behind the K-1864 canonical lookup.
+#   * P38 (N=384, K-1880 / 14 cells) — was about to chain a 7th frozenset
+#     probe behind P37.
+# Without this consolidation the dispatcher would walk the K-1864 canonical
+# set + 2 newly-chained slot frozensets — a 3-probe chain that would grow
+# back to 7+ with every future N-rung extension (N=448, N=480, …).  All
+# seven slots share the same wave-misalignment / K-913 §3 LDS-bank-conflict
+# root cause (R-1811) and the same hipBLASLt routing target, so collapsing
+# them into ONE canonical frozenset (`_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT
+# _120`) recovers the K-1864 dispatcher savings (1 hash lookup + 1 tuple
+# build, vs the 7-probe alternative) and re-exposes the underlying
+# predicate as a single literal roster.
 #
-# This block consolidates the 5 chains into ONE canonical 89-cell frozenset
-# (`_K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89`) with all admit cells INLINED
-# as literal tuples — the single source of truth.  The 5 per-slot named
-# views (`_P32_..._18`, `_P33_..._18`, `_P34_..._18`, `_P35_..._18`,
-# `_P36_..._17`) are computed at module-load as N-axis projections of the
-# canonical set; they exist solely so the existing per-slot test files
-# (`tests/test_p3{2..6}_*_alias_stack.py`) continue to pin per-N structural
-# invariants without coupling the dispatcher to the 5-set chain.
+# All admit cells are INLINED as literal tuples — the single source of
+# truth.  The 7 per-slot named views (`_P32_..._18`, …, `_P38_..._14`)
+# are computed at module-load as N-axis projections of the canonical set;
+# they exist solely so the existing per-slot test files continue to pin
+# per-N structural invariants without coupling the dispatcher to a
+# 7-set chain.
 #
-# Disjointness is BY CONSTRUCTION: each per-slot view is a `frozenset(c for c
-# in canonical if c[1] == <N>)` projection on a distinct N rung
-# (N ∈ {96, 160, 224, 288, 320} are pairwise distinct integers), so
-# `view_i ∩ view_j == ∅` for i ≠ j is a Python identity that needs no
-# load-time assert.  The dispatcher consults the canonical set directly,
-# never the per-slot views — there is exactly ONE membership probe per
-# call covering all 89 cells.
+# Disjointness is BY CONSTRUCTION: each per-slot view is a
+# `frozenset(c for c in canonical if c[1] == <N>)` projection on a
+# distinct N rung (N ∈ {96, 160, 224, 288, 320, 352, 384} are pairwise
+# distinct integers), so `view_i ∩ view_j == ∅` for i ≠ j is a Python
+# identity that needs no load-time assert.  The dispatcher consults the
+# canonical set directly, never the per-slot views — there is exactly
+# ONE membership probe per call covering all 120 cells.
 #
-# Cell-count provenance (replicates the K-1794 / K-1818 / K-1832 / K-1843
-# 18/18/18/18/17 sub-cohort decompositions; full per-slot mechanism + PMC
-# RCA + alias-overlap discipline lives next to each per-slot view below):
-#   * P32 (23rd-slot, N=160 / K-1794): 18 cells
-#       full M ∈ {2048,4096,8192} × N=160 × K ∈ {4096,8192,16384}
-#       × dtype ∈ {bf16, fp16} grid; 9 bf16 cells overlap with the upstream
-#       R-K979 P5 alias (alias-overlap-by-design — fires upstream).
-#   * P33 (24th-slot, N=224 / K-1794): 18 cells
-#       full grid; both dtype rows load-bearing (no upstream alias overlap;
-#       N=224 is the first N-axis cliff above N=128).
-#   * P34 (25th-slot, N=96 / K-1818): 18 cells
-#       full grid; both dtype rows load-bearing (no upstream alias overlap;
-#       first wave-misaligned rung BELOW the N=128 cliff).
-#   * P35 (26th-slot, N=288 / K-1832): 18 cells
-#       full grid; both dtype rows load-bearing (no upstream alias overlap;
-#       off-by-32 wave-misaligned rung ABOVE the N=256 P31 cliff).
-#       K-1832 cohort geomean TB/HBL = 4.290× — largest stack uplift to date.
-#   * P36 (27th-slot, N=320 / K-1843): 17 cells
-#       full grid MINUS (2048, 320, 4096, bf16) which is already routed
-#       upstream (R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion;
-#       paired-n30 ratio_TB/HBL=1.0001, p=0.293 — within parity band).
+# Compact-predicate audit (per K-1858 RCA learning re: prefer predicate
+# when it covers the same set without enumeration): the spec-suggested
+# compact form `N % 64 != 0 and N <= 384 and K >= 4096` does NOT cover
+# this roster — N=320 (320 % 64 == 0) and N=384 (384 % 64 == 0) are
+# wave-aligned in the % 64 sense yet still appear in the admit set
+# because the BLOCK_N=128 wave-MISalignment fires at the BN-tile
+# boundary (N % 128 != 0), not at the % 64 boundary.  An attempted
+# `N % 128 != 0 and N <= 384 and K >= 4096` predicate over-includes
+# N ∈ {32, 64, 192, 352} cells that are NOT in the productionised set
+# (P30 covers some, P31 covers N=256, and there is no N=32 / N=64 /
+# N=192 admit roster).  The 4 explicit cell-level exclusions
+# ((2048,320,4096,bf16), (2048,352,4096,bf16), (2048,384,8192,*),
+# (4096,384,8192,*)) further preclude any clean structural predicate.
+# Conclusion: the literal frozenset is the minimum-information
+# representation; no predicate substitution.  This audit is recorded
+# inline so future agents do not re-litigate.
 #
-# Total = 18 + 18 + 18 + 18 + 17 = 89 cells.  Each tuple is
+# Cell-count provenance (replicates the K-1794 / K-1818 / K-1832 /
+# K-1843 / K-1857 sub-cohort decompositions; full per-slot mechanism +
+# PMC RCA + alias-overlap discipline lives next to each per-slot view
+# below):
+#   * P32 (23rd-slot, N=160 / K-1794): 18 cells  — full grid; 9 bf16
+#       cells overlap with the upstream R-K979 P5 alias (by design).
+#   * P33 (24th-slot, N=224 / K-1794): 18 cells  — full grid; both
+#       dtype rows load-bearing (first N-axis cliff above N=128).
+#   * P34 (25th-slot, N=96 / K-1818): 18 cells   — full grid; first
+#       wave-misaligned rung BELOW the N=128 cliff.
+#   * P35 (26th-slot, N=288 / K-1832): 18 cells  — full grid; off-by-32
+#       wave-misaligned rung ABOVE the N=256 P31 cliff.  K-1832 cohort
+#       geomean TB/HBL = 4.290× — largest stack uplift to date.
+#   * P36 (27th-slot, N=320 / K-1843): 17 cells  — full grid MINUS
+#       (2048,320,4096,bf16) upstream-aliased (R-K1825 exclusion).
+#   * P37 (28th-slot, N=352 / K-1868 ex K-1843): 17 cells — full grid
+#       MINUS (2048,352,4096,bf16) upstream-aliased (R-K1825 exclusion;
+#       paired-n30 ratio_TB/HBL=1.0031, p=0.167 — parity band).
+#   * P38 (29th-slot, N=384 / K-1880 ex K-1857): 14 cells — full grid
+#       MINUS the 4 (M∈{2048,4096})×N=384×K=8192×{bf16,fp16} cells that
+#       are already routed by the upstream P30
+#       _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 slot
+#       (R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST exclusion).
+#
+# Total = 18 + 18 + 18 + 18 + 17 + 17 + 14 = 120 cells.  Each tuple is
 # (M, N, K, str(a_dtype)).  Sorted by (N, M, K, dtype) for diff-ability;
 # any silent expansion or contraction shows up as an explicit line-level
-# diff and is gated by `tests/test_k1864_p32_p36_consolidation.py` which
+# diff and is gated by `tests/test_k1881_p32_p38_consolidation.py` which
 # enumerates the full literal roster and asserts equality.
-_K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 = frozenset({
+_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 = frozenset({
     # ---- P34 (N=96) — 18 cells (K-1818 sub-cohort, full grid) ----
     (2048,  96,  4096, "torch.bfloat16"),
     (2048,  96,  4096, "torch.float16"),
@@ -3410,11 +3437,49 @@ _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 = frozenset({
     (8192, 320,  8192, "torch.float16"),
     (8192, 320, 16384, "torch.bfloat16"),
     (8192, 320, 16384, "torch.float16"),
+    # ---- P37 (N=352) — 17 cells (K-1843 N=352 sub-cohort, full grid
+    #      MINUS (2048, 352, 4096, bf16) upstream-aliased exclusion;
+    #      paired-n30 ratio_TB/HBL=1.0031, p=0.167 — parity band) ----
+    (2048, 352,  4096, "torch.float16"),
+    (2048, 352,  8192, "torch.bfloat16"),
+    (2048, 352,  8192, "torch.float16"),
+    (2048, 352, 16384, "torch.bfloat16"),
+    (2048, 352, 16384, "torch.float16"),
+    (4096, 352,  4096, "torch.bfloat16"),
+    (4096, 352,  4096, "torch.float16"),
+    (4096, 352,  8192, "torch.bfloat16"),
+    (4096, 352,  8192, "torch.float16"),
+    (4096, 352, 16384, "torch.bfloat16"),
+    (4096, 352, 16384, "torch.float16"),
+    (8192, 352,  4096, "torch.bfloat16"),
+    (8192, 352,  4096, "torch.float16"),
+    (8192, 352,  8192, "torch.bfloat16"),
+    (8192, 352,  8192, "torch.float16"),
+    (8192, 352, 16384, "torch.bfloat16"),
+    (8192, 352, 16384, "torch.float16"),
+    # ---- P38 (N=384) — 14 cells (K-1857 N=384 sub-cohort, full grid
+    #      MINUS the 4 (M∈{2048,4096})×K=8192×{bf16,fp16} cells already
+    #      routed by upstream P30 _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK
+    #      _34 — R-K1825 alias-coverage-map exclusion) ----
+    (2048, 384,  4096, "torch.bfloat16"),
+    (2048, 384,  4096, "torch.float16"),
+    (2048, 384, 16384, "torch.bfloat16"),
+    (2048, 384, 16384, "torch.float16"),
+    (4096, 384,  4096, "torch.bfloat16"),
+    (4096, 384,  4096, "torch.float16"),
+    (4096, 384, 16384, "torch.bfloat16"),
+    (4096, 384, 16384, "torch.float16"),
+    (8192, 384,  4096, "torch.bfloat16"),
+    (8192, 384,  4096, "torch.float16"),
+    (8192, 384,  8192, "torch.bfloat16"),
+    (8192, 384,  8192, "torch.float16"),
+    (8192, 384, 16384, "torch.bfloat16"),
+    (8192, 384, 16384, "torch.float16"),
 })
 
-# Per-slot derived views — N-axis projections of the canonical 89-cell set.
-# These exist ONLY so the existing P32–P36 per-slot test files
-# (tests/test_p3{2..6}_*_alias_stack.py) continue to pin per-N structural
+# Per-slot derived views — N-axis projections of the canonical 120-cell set.
+# These exist ONLY so the existing P32–P38 per-slot test files
+# (tests/test_p3{2..8}_*_alias_stack.py) continue to pin per-N structural
 # invariants (cardinality, dtype-mirror, sibling-N firewalls vs P28/P29/
 # P30/P31).  The dispatcher (`matmul._k971_route_to_hbl`) probes only the
 # canonical set above — it never references these views.
@@ -3424,21 +3489,27 @@ _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 = frozenset({
 # i ≠ j with N_i ≠ N_j, `{c for c in S if c[1]==N_i}` and
 # `{c for c in S if c[1]==N_j}` cannot share a tuple.  The disjointness
 # is empirical — `sorted({c[1] for c in canonical}) == [96, 160, 224, 288,
-# 320]` is asserted in tests/test_k1864_p32_p36_consolidation.py against
-# the actual literal roster (NOT against a relabeled set), guarding
+# 320, 352, 384]` is asserted in tests/test_k1881_p32_p38_consolidation.py
+# against the actual literal roster (NOT against a relabeled set), guarding
 # against silent N-axis additions in future P-slot promotions.
 _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18 = frozenset(
-    c for c in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 if c[1] == 160
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 160
 )
 _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18 = frozenset(
-    c for c in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 if c[1] == 224
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 224
 )
 _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18 = frozenset(
-    c for c in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 if c[1] == 96
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 96
 )
 _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18 = frozenset(
-    c for c in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 if c[1] == 288
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 288
 )
 _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = frozenset(
-    c for c in _K1864_P32_P36_SKINNY_KCOMPL_ROUTEOUT_89 if c[1] == 320
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 320
+)
+_P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17 = frozenset(
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 352
+)
+_P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset(
+    c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 384
 )

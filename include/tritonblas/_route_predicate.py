@@ -3506,3 +3506,34 @@ _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset(
     (4096, 384, 8192, "torch.bfloat16"), (4096, 384, 8192, "torch.float16"),
 })
 # Cardinality (==14) gated by tests/test_p38_skinny_n384_alias_stack.py.
+
+# K-1881 (S-002): canonical wave-misaligned skinny-N K-COMPLEMENT route-OUT —
+# offline-join of P32–P38 (7 frozensets, 121 unique cells) into one dispatch-
+# table entry for the wave-misaligned skinny-N N-ladder N ∈ {96, 160, 224,
+# 288, 320, 352, 384}.  All 7 source slots share the same K-913 §3 LDS-bank-
+# conflict + R-1811 wave-misalignment MFMA-tail fingerprint (SCHEDULER_LDS A4
+# failure mode per K-1681/K-1710/K-1781/K-1812/K-1824/K-1832/K-1843/K-1853/
+# K-1857) and the same routing target (hipBLASLt's split-K kernel selection).
+# Per-N geomeans TB/HBL: N=96 K-1818 1.16×; N=160 K-1794 1.05×; N=224 K-1794
+# 1.28×; N=288 K-1832 4.29×; N=320 K-1843 1.55×; N=352 K-1853 1.24×; N=384
+# K-1857 1.28×.  K-1881 paired n=30 HIP-graph drift-detection benchmark
+# (offline-join, no measurement): zero behaviour change vs the 7-slot stack
+# (set-equivalence is structural — see tests/test_k1881_p32_p38_canonical.py).
+# Dispatch-latency saving: 7 frozenset lookups (~7 × ~80 ns ≈ 560 ns / call)
+# collapse to 1 (~80 ns / call) on the K-COMPLEMENT skinny-N hot path.
+# Per K-1858 RCA learning, a compact predicate (N % 64 != 0 ∧ N ≤ 384 ∧
+# K ≥ 4096) was audited but does NOT cover the union: it false-NEGATIVES
+# N ∈ {320, 384} (both divisible by 64), so the enumerated frozenset is
+# retained as the canonical truth-source.
+_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT = frozenset().union(
+    _P32_SKINNY_N160_KCOMPL_VERIFIED_WIN_18,
+    _P33_SKINNY_N224_KCOMPL_VERIFIED_WIN_18,
+    _P34_SKINNY_N96_KCOMPL_VERIFIED_WIN_18,
+    _P35_SKINNY_N288_KCOMPL_VERIFIED_WIN_18,
+    _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17,
+    _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18,
+    _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14,
+)
+# Cardinality (==121) and set-equivalence vs union of 7 source frozensets
+# gated by tests/test_k1881_p32_p38_canonical.py per the minimalist split:
+# src holds data, tests hold invariants.

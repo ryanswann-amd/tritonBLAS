@@ -1,17 +1,19 @@
-"""K-1963 P41–P44 (S-002) — 31st–34th-slot N=608/672/704/736 K-COMPLEMENT
-verified-winner alias-stack tests.
+"""K-1963 P41–P44 (S-002) — consolidated 31st–34th-slot N=608/672/704/736
+K-COMPLEMENT verified-winner alias-stack tests.
 
 Source measurements: paired n=30 HIP-graph hot-cache MI300X / gfx942 vs the
 live post-K-1922 oracle:
-  P41 N=608 — K-1938 cohort
-  P42 N=672 — K-1923 / K-1927 / K-1931 cohort
-  P43 N=704 — K-1945 cohort
-  P44 N=736 — K-1941 / K-1943 cohort
+  N=608 — K-1938 cohort
+  N=672 — K-1923 / K-1927 / K-1931 cohort
+  N=704 — K-1945 cohort
+  N=736 — K-1941 / K-1943 cohort
 
-Each rung is the full 18-cell sub-cohort
-M ∈ {2048, 4096, 8192} × N × K ∈ {4096, 8192, 16384} × {bf16, fp16}; union
-72-cell cohort across the four rungs.  Per-rung cohort geomean tb/hbl
-≥ ~1.4×; 0/72 regressions on the K-1925 231-cell drift baseline.
+The four rungs are encoded as ONE 72-cell frozenset
+`_K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72` built by a single
+Cartesian-product comprehension over N ∈ {608, 672, 704, 736} ×
+M ∈ {2048, 4096, 8192} × K ∈ {4096, 8192, 16384} × {bf16, fp16}.  Per-rung
+cohort geomean tb/hbl ≥ ~1.4×; 0/72 regressions on the K-1925 231-cell
+drift baseline.
 
 Wave-/tile-alignment fingerprint per rung (BLOCK_N=128 packing):
   N=608: 608 mod 64 = 32 (wave-misaligned), 608 mod 128 = 96 — 4 BN=128
@@ -35,29 +37,36 @@ revalidation on the expanded P41–P44 set.
 
 Invariants pinned in this file (cardinality lives here per the minimalist
 split: source holds data, tests hold structural invariants — R-1532 /
-R-1720 / R-1775):
+R-1720 / R-1775; consolidation pattern matches K-1881 P32–P38):
 
-  1. Per-rung cardinality is exactly 18 (full grid; no upstream-aliased
-     exclusions at these off-band rungs).
-  2. Per-rung N axis is exactly the singleton {608} / {672} / {704} /
-     {736}.
-  3. M ∈ {2048, 4096, 8192}; K ∈ {4096, 8192, 16384};
-     dtype ∈ {torch.bfloat16, torch.float16}.
-  4. Both dtype rows are complete 9/9 (off-band rungs have no R-K979 P5
-     Clause-3 bf16 alias — strictly load-bearing on both rows).
+  1. Total cardinality is exactly 72 (= 4 × 18; full grid; no upstream-
+     aliased exclusions at these off-band rungs).
+  2. N axis is exactly the quad {608, 672, 704, 736}.
+  3. Per-rung sub-cardinality is exactly 18.
+  4. Per-rung M ∈ {2048, 4096, 8192}; K ∈ {4096, 8192, 16384};
+     dtype ∈ {torch.bfloat16, torch.float16}; both dtype rows complete
+     9/9.
   5. Sibling-N firewall vs every prior K-COMPLEMENT alias-stack at a
-     different N (P28 N=128, P29 N=64, P30 N ∈ {384, 768, 1536}, P31
-     N=256, the consolidated P32–P38 N ∈ {96, 160, 224, 288, 320, 352,
-     384}, P40 N=544, plus K-1367/K-1397 P13 N ∈ {128, 256}).
-  6. Pairwise disjoint across P41–P44 themselves (each is a distinct
-     N-axis bucket).
-  7. Wave-/tile-misalignment band membership matches the per-rung
-     fingerprint above.
-  8. Union cardinality across P41–P44 is exactly 72 (= 4 × 18).
+     different N.
+  6. Per-rung wave-/tile-misalignment fingerprint matches the actual
+     arithmetic above (guards against the PRD's blanket "N mod 64 == 32"
+     claim being silently re-asserted for N=704).
+  7. Bit-equivalence: every cell in the 72-cell union is admitted by the
+     LIVE `_k971_route_to_hbl(...)` dispatcher at HEAD (this test is the
+     reviewer-required oracle bit-equiv check, not just `len(...) == 18`).
+  8. False-POSITIVE firewall (structural, on the K-1963 frozenset itself):
+     the four "neighbour" N-buckets immediately adjacent on the strided
+     BLOCK_N=128 lattice ({576, 640, 768, 800}) are NOT members of the
+     K-1963 quad.  Note: a dispatcher-level neighbour-N firewall is NOT
+     possible here because upstream K-COMPLEMENT slots (P30 N=768) and
+     compact-predicate forms already admit several skinny-N neighbours
+     via different code paths — that scope belongs to those slots' own
+     tests, not K-1963's.
 """
 from __future__ import annotations
 
 import pytest
+import torch
 
 from tritonblas._route_predicate import (
     _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18,
@@ -67,26 +76,19 @@ from tritonblas._route_predicate import (
     _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
-    _K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18,
-    _K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18,
-    _K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18,
-    _K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18,
+    _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72,
     _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28,
 )
+from tritonblas.matmul import _k971_route_to_hbl
 
 
-# Rungs in the order P41, P42, P43, P44.
-_RUNGS = (
-    ("P41", 608, _K1963_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18),
-    ("P42", 672, _K1963_P42_SKINNY_N672_KCOMPL_ALIASSTACK_18),
-    ("P43", 704, _K1963_P43_SKINNY_N704_KCOMPL_ALIASSTACK_18),
-    ("P44", 736, _K1963_P44_SKINNY_N736_KCOMPL_ALIASSTACK_18),
-)
+# Quad rung definitions (R-1881 minimalism — one tuple, not four).
+_QUAD_NS = (608, 672, 704, 736)
 
 # Wave-/tile-alignment fingerprint per rung (mod_64, mod_128).  N=704 is
-# wave-ALIGNED (mod_64=0) — the PRD's blanket "N mod 64 == 32" claim is
-# arithmetically wrong for that one rung; we pin the actual values here so
-# the invariant test catches any silent drift back to the bogus claim.
+# wave-ALIGNED (mod_64 = 0) — the PRD's blanket "N mod 64 == 32" claim is
+# arithmetically wrong for that one rung; this map pins the actual values
+# so the invariant test catches any silent drift back to the bogus claim.
 _FINGERPRINTS = {
     608: (32, 96),
     672: (32, 32),
@@ -95,140 +97,160 @@ _FINGERPRINTS = {
 }
 
 
-# ---- per-rung structural invariants ---------------------------------------
+# ---- consolidated cardinality / axis-shape invariants ---------------------
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_cardinality_is_18(name, N, fz):
-    assert len(fz) == 18, f"{name} N={N}: expected 18 cells, got {len(fz)}"
-
-
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_n_axis_is_singleton(name, N, fz):
-    assert {nn for (_, nn, _, _) in fz} == {N}
+def test_total_cardinality_is_72():
+    """4 × 18 = 72-cell union cohort (the K-1963 PRD's "union 72-cell
+    cohort" claim).  This is the consolidated single-frozenset cardinality
+    that replaces the prior P41/P42/P43/P44 four-frozenset chain."""
+    assert len(_K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72) == 72
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_m_k_dtype_axes_are_minimal(name, N, fz):
+def test_n_axis_is_exactly_the_quad():
+    n_axis = {N for (_, N, _, _) in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72}
+    assert n_axis == set(_QUAD_NS)
+
+
+def test_m_k_dtype_axes_are_minimal():
+    fz = _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72
     assert {M for (M, _, _, _) in fz} == {2048, 4096, 8192}
     assert {K for (_, _, K, _) in fz} == {4096, 8192, 16384}
     assert {dt for (_, _, _, dt) in fz} == {"torch.bfloat16", "torch.float16"}
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_dtype_row_balance(name, N, fz):
-    """Both dtype rows complete 9/9.  Off-band rungs have no R-K979 P5
-    Clause-3 bf16 alias coverage; both rows are strictly load-bearing.
-    K-913 §3 LDS-bank-conflict is dtype-invariant on the column-narrow
-    tile (R-K1673 dtype-invariance)."""
-    bf = {(M, nn, K) for (M, nn, K, dt) in fz if dt == "torch.bfloat16"}
-    fp = {(M, nn, K) for (M, nn, K, dt) in fz if dt == "torch.float16"}
-    assert len(bf) == 9
-    assert len(fp) == 9
-    assert bf == fp
+@pytest.mark.parametrize("N", _QUAD_NS)
+def test_per_rung_sub_cardinality_is_18(N):
+    sub = {cell for cell in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72
+           if cell[1] == N}
+    assert len(sub) == 18, f"N={N}: expected 18 cells, got {len(sub)}"
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_envelope_equals_full_grid(name, N, fz):
+@pytest.mark.parametrize("N", _QUAD_NS)
+def test_per_rung_envelope_equals_full_grid(N):
     """Each rung's verified-winner envelope is exactly the 18-cell M ∈
     {2048, 4096, 8192} × N × K ∈ {4096, 8192, 16384} × {bf16, fp16} grid
     (no upstream-aliased exclusions at these off-band rungs) — pinned to
-    detect any silent contraction (false-NEGATIVE leaking winner cells
-    back to TB) or expansion (false-POSITIVE leaking non-winner cells out
-    to HBL)."""
+    detect silent contraction (false-NEGATIVE leaking winner cells back
+    to TB) or expansion (false-POSITIVE leaking non-winner cells to HBL)."""
+    sub = frozenset(cell for cell in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72
+                    if cell[1] == N)
     full = frozenset(
         (M, N, K, dt) for M in (2048, 4096, 8192)
         for K in (4096, 8192, 16384)
         for dt in ("torch.bfloat16", "torch.float16")
     )
-    assert fz == full
-    assert len(full) == 18
+    assert sub == full
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_per_rung_wave_or_tile_misalignment_fingerprint(name, N, fz):
+@pytest.mark.parametrize("N", _QUAD_NS)
+def test_per_rung_dtype_row_balance(N):
+    """Both dtype rows complete 9/9.  Off-band rungs have no R-K979 P5
+    Clause-3 bf16 alias coverage; both rows are strictly load-bearing.
+    K-913 §3 LDS-bank-conflict is dtype-invariant on the column-narrow
+    tile (R-K1673 dtype-invariance)."""
+    sub = [cell for cell in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72
+           if cell[1] == N]
+    bf = {(M, n, K) for (M, n, K, dt) in sub if dt == "torch.bfloat16"}
+    fp = {(M, n, K) for (M, n, K, dt) in sub if dt == "torch.float16"}
+    assert len(bf) == 9
+    assert len(fp) == 9
+    assert bf == fp
+
+
+@pytest.mark.parametrize("N", _QUAD_NS)
+def test_per_rung_wave_or_tile_misalignment_fingerprint(N):
     """Pin the per-rung (N mod 64, N mod 128) fingerprint to the actual
     arithmetic.  N=608/672/736 are wave-misaligned (mod 64 == 32); N=704
     is wave-ALIGNED (mod 64 == 0) but BN-half-tile-misaligned (mod 128 ==
-    64).  This invariant guards both against a silent N-axis typo (e.g.
-    640, 736→738) AND against the K-1963 PRD's blanket "N mod 64 == 32"
+    64).  This invariant guards against (a) a silent N-axis typo (e.g.
+    640, 736→738) AND (b) the K-1963 PRD's blanket "N mod 64 == 32"
     claim being silently re-asserted for N=704."""
-    (only_n,) = {nn for (_, nn, _, _) in fz}
-    assert only_n == N
     expected = _FINGERPRINTS[N]
-    assert (only_n % 64, only_n % 128) == expected, (
-        f"{name} N={N}: expected (mod64, mod128) = {expected}, "
-        f"got {(only_n % 64, only_n % 128)}"
+    assert (N % 64, N % 128) == expected, (
+        f"N={N}: expected (mod64, mod128) = {expected}, "
+        f"got {(N % 64, N % 128)}"
     )
 
 
 # ---- sibling-N firewall vs prior K-COMPLEMENT alias-stack slots -----------
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_p28_n128(name, N, fz):
-    assert fz & _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30 == set()
-    assert fz & _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18 == set()
+@pytest.mark.parametrize("name,prior", [
+    ("P28_N128", _K1673_P28_SKINNY_N128_KCOMPL_ALIASSTACK_30),
+    ("P13_N128_routeout", _K1367_P13_SKINNY_N128_KCOMPL_ROUTEOUT_18),
+    ("P29_N64", _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29),
+    ("P30_NMID", _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34),
+    ("P31_N256", _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28),
+    ("P13_N256_routeout", _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12),
+    ("P32_P38_consolidated", _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120),
+    ("P40_N544", _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18),
+])
+def test_sibling_n_firewall_vs_prior_kcompl_slots(name, prior):
+    """The consolidated 72-cell quad must be disjoint from every prior
+    K-COMPLEMENT alias-stack slot — the four quad N-buckets {608, 672,
+    704, 736} sit between the P30 N=384 / P40 N=544 lower cluster and
+    the P30 N=768 upper rung; no prior slot covers any of them."""
+    assert _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72 & prior == set(), (
+        f"K-1963 quad overlaps with {name}"
+    )
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_p29_n64(name, N, fz):
-    assert fz & _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29 == set()
+# ---- bit-equivalent oracle validation against LIVE _k971_route_to_hbl -----
+
+# Maps the python-string dtype tag we store in the frozenset to the actual
+# torch.dtype that the live `_k971_route_to_hbl(...)` predicate stringifies
+# back via `str(a_dtype)`.  Centralised here so the bit-equiv test stays in
+# lockstep with the encoding used in `_route_predicate.py`.
+_DTYPE_DECODE = {
+    "torch.bfloat16": torch.bfloat16,
+    "torch.float16":  torch.float16,
+}
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_p30_nmid(name, N, fz):
-    """P30 covers N ∈ {384, 768, 1536}; P41–P44 cover N ∈ {608, 672, 704,
-    736} which sits strictly between the P30 N=384 and N=768 rungs."""
-    assert fz & _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34 == set()
+@pytest.mark.parametrize("cell",
+                         sorted(_K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72))
+def test_oracle_bit_equivalence_admit_72(cell):
+    """Reviewer-required (Testing Zealot / Skeptic) BIT-EQUIVALENCE check
+    against the LIVE `_k971_route_to_hbl(...)` dispatcher: every cell in
+    the 72-cell union must be admitted (route to hipBLASLt) by the live
+    predicate at HEAD.  This is the union-cohort membership equality the
+    feedback called for, not just `len(...) == 18`.  Calls the actual
+    `_k971_route_to_hbl(...)` so a regression in the dispatcher chain is
+    caught here, not silently inside a structural-only frozenset assert.
+
+    The (enable_streamk, work_stealing) tuple is set to (False, False) —
+    the `(int(M), int(N), int(K), str(a_dtype))` membership predicate
+    that gates this rung is independent of those two upstream toggles
+    (verified by direct inspection of the K-1963 dispatcher block in
+    `matmul.py::_k971_route_to_hbl`)."""
+    M, N, K, dt_str = cell
+    a_dtype = _DTYPE_DECODE[dt_str]
+    admitted = _k971_route_to_hbl(M, N, K, a_dtype, a_dtype,
+                                  enable_streamk=False, work_stealing=False)
+    assert admitted is True, (
+        f"oracle bit-equiv FAIL: cell {cell} not admitted by live "
+        f"_k971_route_to_hbl(...) — alias-stack slot regressed"
+    )
 
 
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_p31_n256(name, N, fz):
-    assert fz & _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28 == set()
-    assert fz & _K1397_P13_SKINNY_N256_KCOMPL_ROUTEOUT_12 == set()
+# ---- structural false-POSITIVE firewall on the K-1963 frozenset -----------
 
-
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_consolidated_p32_p38(name, N, fz):
-    """K-1881 consolidated P32–P38 covers N ∈ {96, 160, 224, 288, 320,
-    352, 384}; K-1963 P41–P44 cover N ∈ {608, 672, 704, 736} — disjoint
-    by natural N-axis separation."""
-    assert fz & _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 == set()
-
-
-@pytest.mark.parametrize("name,N,fz", _RUNGS)
-def test_sibling_n_firewall_vs_p40_n544(name, N, fz):
-    """K-1922 P40 covers N=544; K-1963 P41–P44 cover the next four
-    K-COMPLEMENT N-buckets above 544 (608, 672, 704, 736).  Disjoint by
-    natural N-axis separation."""
-    assert fz & _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 == set()
-
-
-# ---- pairwise disjointness across P41-P44 ---------------------------------
-
-def test_p41_p44_pairwise_disjoint():
-    """Each of P41–P44 covers a distinct N-axis bucket; the four
-    frozensets must be pairwise disjoint."""
-    fzs = [fz for (_n, _N, fz) in _RUNGS]
-    for i in range(len(fzs)):
-        for j in range(i + 1, len(fzs)):
-            assert fzs[i] & fzs[j] == set(), (
-                f"{_RUNGS[i][0]} (N={_RUNGS[i][1]}) and "
-                f"{_RUNGS[j][0]} (N={_RUNGS[j][1]}) overlap"
-            )
-
-
-def test_union_cardinality_is_72():
-    """4 × 18 = 72-cell union cohort (the K-1963 PRD's "union 72-cell
-    cohort" claim).  Equivalent to pairwise disjointness combined with
-    per-rung cardinality 18."""
-    union = frozenset()
-    for (_n, _N, fz) in _RUNGS:
-        union = union | fz
-    assert len(union) == 72
-
-
-def test_union_n_axis_is_exactly_the_quad():
-    union = frozenset()
-    for (_n, _N, fz) in _RUNGS:
-        union = union | fz
-    assert {N for (_, N, _, _) in union} == {608, 672, 704, 736}
+# Neighbour-N values immediately adjacent to the K-1963 quad on the strided
+# BLOCK_N=128 lattice.  We only check membership in the K-1963 frozenset
+# itself — a dispatcher-level neighbour-N test is NOT meaningful here
+# because upstream K-COMPLEMENT slots (P30 N=768) and compact-predicate
+# forms already admit several skinny-N neighbours via different code paths.
+# Scope of those admissions belongs to those slots' own tests; K-1963's
+# job is to ensure the consolidated frozenset construction did NOT
+# accidentally widen the N-axis beyond the named quad.
+@pytest.mark.parametrize("N_neighbour", [544, 576, 640, 768, 800])
+@pytest.mark.parametrize("M", [2048, 4096, 8192])
+@pytest.mark.parametrize("K", [4096, 8192, 16384])
+@pytest.mark.parametrize("dt", ["torch.bfloat16", "torch.float16"])
+def test_structural_n_axis_firewall_neighbours_not_in_quad(N_neighbour, M, K, dt):
+    """The K-1963 frozenset must NOT contain any neighbour-N cell.  Pins
+    that the consolidated comprehension (over N ∈ {608,672,704,736})
+    didn't silently widen the N-axis to e.g. multiples-of-32-only or
+    `range(544, 768, 32)` — both of which would dim the slot's
+    surface-area while still passing the cardinality check."""
+    assert (M, N_neighbour, K, dt) \
+        not in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72

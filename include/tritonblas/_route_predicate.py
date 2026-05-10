@@ -3461,3 +3461,37 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2085 (S-002): P50 + P51 (the 7th and 8th rungs of the off-by-48
+# wave-misaligned skinny-N K-COMPLEMENT residue family) skinny_N1200 +
+# skinny_N1264 alias-stack — 12-cell envelope each, 24 cells total
+# (M ∈ {2048, 4096, 8192} × N ∈ {1200, 1264} × K ∈ {8192, 16384} ×
+# dtype ∈ {bf16, fp16}).  Off-by-48 ladder above the prior 6 confirmed
+# rungs N ∈ {816, 880, 944, 1008, 1072, 1136} (K-1978 / K-1994 / K-2010 /
+# K-2031 / K-2047 / K-2055), all with (N mod 64) == 48.
+#
+# K-2071 confirmed both rungs via paired n=30 HIP-graph hot-cache 3-engine
+# bench on MI300X (gfx942, ROCm 7.2): TB-BEFORE / hipBLASLt geomean 1.7315×
+# (16/16 strict admit ≥ 1.10×; cohort uplift 1.6432× at N=1200, 1.8372× at
+# N=1264; rocBLAS / hipBLASLt parity 0.9970× rules out LT-confound).  K-2071
+# used the M ∈ {4096, 8192} subset (16 cells); K-2085 extends to the full
+# M ∈ {2048, 4096, 8192} grid (24 cells) consistent with prior off-by-48
+# rungs P47-P49 (which all use M ∈ {2048, 4096, 8192}).
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
+# slot (N ∉ any prior frozenset).  Naturally split into two single-N
+# frozensets (per-rung tracking; matches K-1978…K-2055 single-N convention)
+# rather than a single combined frozenset (K-2071 convention).
+_K2085_P50_SKINNY_N1200_KCOMPL_ALIASSTACK_12 = frozenset(
+    (M, 1200, K, dt) for M in (2048, 4096, 8192)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+_K2085_P51_SKINNY_N1264_KCOMPL_ALIASSTACK_12 = frozenset(
+    (M, 1264, K, dt) for M in (2048, 4096, 8192)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinalities (==12 each, ==24 union) gated by
+# tests/test_k2085_p50_p51_skinny_n1200_n1264_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

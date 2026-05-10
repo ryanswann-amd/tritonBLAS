@@ -132,6 +132,14 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2085 (S-002): P50 + P51 skinny_N1200 + skinny_N1264 K-COMPLEMENT
+    # alias-stack — 12 cells each (M ∈ {2048, 4096, 8192} × N ∈ {1200, 1264}
+    # × K ∈ {8192, 16384} × {bf16, fp16}).  7th and 8th contiguous rungs of
+    # the off-by-48 wave-misaligned residue family above N ∈ {816, 880,
+    # 944, 1008, 1072, 1136}; both confirmed by K-2071 paired n=30 HIP-graph
+    # bench (cohort geomean 1.7315× over hipBLASLt, 16/16 strict admit).
+    _K2085_P50_SKINNY_N1200_KCOMPL_ALIASSTACK_12,
+    _K2085_P51_SKINNY_N1264_KCOMPL_ALIASSTACK_12,
 )
 
 
@@ -407,6 +415,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2085 (S-002): P50 skinny_N1200 K-COMPLEMENT alias-stack — 12 cells
+    # (off-by-48 wave-misaligned 7th rung above K-2055 P48 N=1136; K-2071
+    # paired n=30 HIP-graph bench cohort uplift 1.6432× at N=1200).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2085_P50_SKINNY_N1200_KCOMPL_ALIASSTACK_12: return True
+    # K-2085 (S-002): P51 skinny_N1264 K-COMPLEMENT alias-stack — 12 cells
+    # (off-by-48 wave-misaligned 8th rung; K-2071 paired n=30 cohort uplift
+    # 1.8372× at N=1264 — strongest admit signal in the residue-48 ladder).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2085_P51_SKINNY_N1264_KCOMPL_ALIASSTACK_12: return True
     return False
 
 

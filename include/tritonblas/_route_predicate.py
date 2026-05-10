@@ -3430,3 +3430,34 @@ _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 = _k1881_proj(320)
 _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17 = _k1881_proj(352)
 _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = _k1881_proj(384)
 del _k1881_proj
+
+# K-1922 (S-002): P40 (30th-slot) skinny_N544 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset for the off-by-32 wave-misaligned N=544 rung
+# (544 mod 128 = 32 — same off-by-32 band as P32 N=160, P35 N=288, P37 N=352).
+# K-1912 paired n=30 HIP-graph hot-cache MI300X / gfx942 measurement vs the
+# live post-K-1881 oracle confirmed 18/18 admit at the strict ≥1.05 ∧ p<0.05
+# gate over the M ∈ {2048,4096,8192} × N=544 × K ∈ {4096,8192,16384} ×
+# {bf16,fp16} grid; cohort geomean tb/hbl ≈ 1.51× (range ≈ 1.18×–2.05×, no
+# upstream alias overlap at this off-band rung).  Sibling-N firewall disjoint
+# by construction with every prior K-COMPLEMENT alias-stack slot (P28 N=128,
+# P29 N=64, P30 N ∈ {384, 768, 1536}, P31 N=256, consolidated P32–P38
+# N ∈ {96,160,224,288,320,352,384}, plus K-1367/K-1397 P13 N ∈ {128, 256}).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=544 into 4.25 BLOCK_N tiles per N-row — same SCHEDULER_
+# LDS A4 failure mode as the K-1681 / K-1710 / K-1781 / K-1812 / K-1824 /
+# K-1832 / K-1843 wave-misaligned skinny-N class.  hipBLASLt's split-K kernel
+# selection clears the band by ~50% on average.  Per K-1908 compact-predicate
+# analysis, N=544 is NOT covered by the existing S1-form
+# `(N % 64 != 0) ∧ (N <= 384) ∧ (K >= 4096)` predicate (N=544 > 384 and N % 64
+# == 32 — the predicate's N-ceiling cuts off below this rung), so explicit
+# alias-stack promotion is required until S1 is extended in a separate task.
+# K-1900's compact-predicate replacement angle failed at depth-2 closure and
+# is NOT retried here.
+_K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 544, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

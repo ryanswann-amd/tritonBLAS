@@ -121,6 +121,17 @@ from ._route_predicate import (
     # absorb P37 (N=352, K-1868) + P38 (N=384, K-1880); see audit and
     # per-slot provenance inline in `_route_predicate.py`.
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
+    # K-1922 (S-002): P40 (30th-slot) skinny_N544 K-COMPLEMENT alias-stack —
+    # 18-cell verified-winner subset (M ∈ {2048,4096,8192} × N=544 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-32 wave-misaligned rung
+    # (544 mod 128 = 32); K-1912 paired n=30 HIP-graph hot-cache MI300X /
+    # gfx942 vs live post-K-1881 oracle: 18/18 admit at strict ≥1.05 ∧ p<0.05
+    # gate, cohort geomean tb/hbl ≈ 1.51×.  Naturally disjoint with every
+    # prior slot (no shared N).  Promoted as explicit alias-stack until the
+    # K-1908 S1-form compact predicate is extended to N>384 in a separate
+    # task; K-1900 compact-predicate substitution failed at depth-2 closure
+    # and is NOT retried here.
+    _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -389,6 +400,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # 7-probe chain (N ∈ {96,160,224,288,320,352,384}).  O(1) hash lookup
     # vs O(7); equivalence pinned by tests/test_k1881_p32_p38_consolidation.py.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
+    # K-1922 (S-002): P40 (30th-slot) skinny_N544 K-COMPLEMENT alias-stack
+    # — 18 cells (full M ∈ {2048,4096,8192} × N=544 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16} grid; no upstream-aliased exclusions at this off-by-32
+    # wave-misaligned rung).  K-1912 paired n=30 verification: cohort
+    # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
+    # construction with every prior K-COMPLEMENT alias-stack slot.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

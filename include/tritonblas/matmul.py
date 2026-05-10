@@ -146,6 +146,15 @@ from ._route_predicate import (
     # expanded P41–P44 set (separate task) — once it lands this whole
     # frozenset collapses to a 4-line predicate.
     _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72,
+    # K-2004 (S-002): P45 (35th-slot) wave-misaligned skinny-N K-COMPLEMENT
+    # alias-stack — N=992, 18-cell verified-winner subset.  Off-by-32 /
+    # off-by-96-on-128 modular family (992 mod 64 = 32, mod 128 = 96 — same
+    # tail-fragment fingerprint as P41 N=608 and P44 N=736); third rung in
+    # the off-by-32 family above K-1967 N=864 P42 measurement.  K-1968
+    # disjointness-shortcut admissible: N-bucket {992} ∩ baseline P32–P44
+    # N-buckets = ∅, additive Cartesian-product diff cannot causally
+    # affect any prior P-rung routing path.
+    _K2004_P45_SKINNY_N992_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -437,6 +446,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # bit-equiv revalidation on the expanded P41–P44 set; once it lands
     # this entire 72-cell frozenset collapses to a 4-line predicate.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72: return True
+    # K-2004 (S-002): P45 (35th-slot) skinny_N992 K-COMPLEMENT alias-stack —
+    # 18 cells (M ∈ {2048,4096,8192} × N=992 × K ∈ {4096,8192,16384} ×
+    # {bf16,fp16}). Off-by-32 / off-by-96-on-128 modular family rung above
+    # K-1967 N=864.  K-1968 disjointness shortcut: N-bucket {992} ∩
+    # baseline P32–P44 N-buckets = ∅; additive Cartesian-product diff
+    # cannot causally affect any prior P-rung routing path (R-K1968).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2004_P45_SKINNY_N992_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

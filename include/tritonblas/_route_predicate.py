@@ -3526,3 +3526,35 @@ _K1963_P41_P44_SKINNY_N_QUAD_KCOMPL_ALIASSTACK_72 = frozenset(
 # tests/test_k1963_p41_p44_skinny_n608_672_704_736_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2004 (S-002): P45 (35th-slot) wave-misaligned skinny-N K-COMPLEMENT
+# alias-stack — N=992, 18-cell verified-winner subset (M ∈ {2048,4096,8192}
+# × N=992 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Wave-/tile-alignment
+# fingerprint: 992 mod 64 = 32 (wave-misaligned, off-by-32 on the 64-lane
+# SIMD), 992 mod 128 = 96 — packs into 7 full BLOCK_N=128 tiles + 1 BN=96
+# tail (3/4-tile tail; same off-band fingerprint as P41 N=608 and P44
+# N=736 — third rung in the off-by-32 / off-by-96-on-128 modular family
+# above K-1967 N=864 P42 measurement).  Mechanism (R-1811 wave-misalignment
+# + K-913 §3 LDS-bank-conflict): the persistent_matmul kernel cannot trade
+# tile reshape for atomic-reduction across the BN=96 tail fragment;
+# hipBLASLt's split-K kernel selection clears the band on the K-2004
+# paired-n=30 HIP-graph hot-cache MI300X / gfx942 cohort vs the live
+# post-K-1963 oracle.  Per K-1908 compact-predicate analysis, N=992 is
+# NOT covered by the existing S1-form `(N % 64 != 0) ∧ (N <= 384) ∧
+# (K >= 4096)` predicate (N=992 > 384 — predicate's N-ceiling cuts off
+# below this rung), so explicit alias-stack promotion is required until
+# S1 is extended in a separate task.  Sibling-N firewall disjoint with
+# every prior K-COMPLEMENT alias-stack slot (P28 N=128, P29 N=64, P30 N
+# ∈ {384,768,1536}, P31 N=256, the consolidated P32–P38 N ∈ {96,160,
+# 224,288,320,352,384}, P40 N=544, P41–P44 N ∈ {608,672,704,736}, plus
+# K-1367/K-1397 P13 N ∈ {128,256}); K-1968 disjointness shortcut
+# (additive Cartesian-product with N-bucket {992} ∩ baseline P32–P44
+# N-buckets = ∅) admits the K-1968 R-CAUSAL-DRIFT-PROOF for the drift
+# gate per F-K1975.K1968-DRIFT-SHORTCUT-CANONICAL.
+_K2004_P45_SKINNY_N992_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 992, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2004_p45_skinny_n992_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

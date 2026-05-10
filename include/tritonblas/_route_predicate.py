@@ -3517,3 +3517,32 @@ _K2060_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2060_p49_skinny_n1136_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2075 (S-002): P50 (40th-slot) skinny_N1200 K-COMPLEMENT alias-stack —
+# 18-cell envelope (M ∈ {2048, 4096, 8192} × N=1200 × K ∈ {4096, 8192, 16384}
+# × {bf16, fp16}).  Wave-misaligned off-by-48 (mod 64 = 48) modular class
+# (1200 mod 64 = 48; 1200 mod 128 = 48 ⇒ packs into 9 full BLOCK_N=128 tiles
+# + 1 BN=48 tail = 9.375-tile envelope).  7th candidate rung in the
+# (mod 64 = 48) residue family above K-1978 P45 N=816, K-1990/K-1994 N=880,
+# K-2014/2020/2024 P46 N=944, K-2031 P47 N=1008, K-2047 P48 N=1072, and
+# K-2060 P49 N=1136 (1200 = 1136 + 64 — next 64-stride rung in the off-by-48
+# class).  N=1200 shares the (mod 128 = 48) BLOCK_N tail with the canonical
+# K-1978/K-1994/K-2014/K-2047 sub-family (rejoins canonical tail after the
+# K-2031/K-2060 mod-128 = 112 alternate-tail intermezzo at N=1008/1136).
+# K-2075 paired n=30 HIP-graph hot-cache MI300X gfx942 ROCm 7.2 / PyTorch
+# 2.10.0+rocm7.2.0 vs LIVE post-K-2060 oracle (HEAD 80f3629).  K-2061 PMC
+# delta-attribution forecasted N=1200 as the residue-48 family ceiling
+# (autotuner tile-key transition VGPR=76 → VGPR=128 at N=1200) — this task
+# converts that prospective prediction into a live admit/reject decision.
+# Sibling-N firewall disjoint by construction with every prior K-COMPLEMENT
+# alias-stack slot.  Promoted as explicit alias-stack literal until the
+# K-1908 S1-form compact predicate is extended above N=384 in a separate
+# task.
+_K2075_P50_SKINNY_N1200_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1200, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2075_p50_skinny_n1200_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

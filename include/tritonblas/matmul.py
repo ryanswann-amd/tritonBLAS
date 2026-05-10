@@ -152,6 +152,9 @@ from ._route_predicate import (
     # gate-pass at strict ratio_TB/HBL≥1.05 ∧ p<0.05; per-N geomean=1.243×
     # (range 1.066×–1.481×, paired-CI lo strictly > 1.05 in all 18 cells).
     _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18,
+    # K-1857 / K-1880 (S-002): P38 N=384 K-COMPLEMENT — 14 cells (18-cohort
+    # minus 4 K-1748 P30 overlap cells); per-N geomean=1.283× (K-1857).
+    _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14,
 )
 
 
@@ -498,6 +501,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # pathologically worse than N=320 (SQ_LDS_BANK_CONFLICT TB/HBL ratio
     # in 18/18 N=352 cells vs only 6/18 for the K-1846 N=320 column).
     if (int(M), int(N), int(K), str(a_dtype)) in _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18: return True
+    # K-1857 / K-1880 (S-002): P38 (29th-slot) N=384 K-COMPLEMENT verified-winner
+    # alias-stack — 14 cells (18-cohort minus 4 K-1748 P30 N-mid overlap cells).
+    # K-1857 paired n=30 HIP-graph + PMC: per-N geomean=1.283×; N=384 = 1.5 × BN=256
+    # → 50% MFMA lanes idle on tail half-wave; SCHEDULER_LDS A4 fingerprint.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14: return True
     return False
 
 

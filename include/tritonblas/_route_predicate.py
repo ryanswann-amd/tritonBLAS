@@ -3490,3 +3490,19 @@ _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_18 = frozenset({
 })
 # Cardinality (==18) gated by tests/test_p37_skinny_n352_alias_stack.py per the
 # minimalist split: src holds data, tests hold invariants.
+
+# P38 (29th-slot): K-1857 N=384 K-COMPLEMENT verified-winner subset — 14 cells
+# (18-cell M×K cohort minus 4 K-1748 P30 N-mid overlap cells at K=8192,
+# M ∈ {2048,4096}).  K-1857 paired n=30 HIP-graph + 3-pass rocprofv2 PMC on
+# MI300X / gfx942: 18/18 measured cells admit at strict ratio≥1.05 ∧ p<0.05;
+# per-N geomean=1.283× (range 1.135×–1.555×).  N=384 = 1.5 × BN=256 → tail
+# half-wave leaves 50% MFMA lanes idle; SQ_LDS_BANK_CONFLICT TB nonzero in
+# all 18 / HBL ZERO in all 18; SCHEDULER_LDS A4 fingerprint per K-1843/K-1853.
+_P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset(
+    (M, 384, K, dt) for M in (2048, 4096, 8192) for K in (4096, 8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16")
+) - frozenset({
+    (2048, 384, 8192, "torch.bfloat16"), (2048, 384, 8192, "torch.float16"),
+    (4096, 384, 8192, "torch.bfloat16"), (4096, 384, 8192, "torch.float16"),
+})
+# Cardinality (==14) gated by tests/test_p38_skinny_n384_alias_stack.py.

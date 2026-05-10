@@ -141,6 +141,15 @@ from ._route_predicate import (
     # n=30 HIP-graph hot-cache MI300X / gfx942 vs live post-K-1922 oracle
     # (HEAD 0024a71); probes residue-48 family saturation point.
     _K2047_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18,
+    # K-2060 (S-002): P49 (39th-slot) skinny_N1136 K-COMPLEMENT alias-stack —
+    # 18-cell envelope (M ∈ {2048,4096,8192} × N=1136 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned
+    # 6th rung (1136 mod 64 = 48); shares mod-128 = 112 tail with K-2031
+    # P47 N=1008 (alternate tail topology in the off-by-48 family).
+    # K-2060 paired n=30 HIP-graph hot-cache MI300X / gfx942 vs live
+    # post-K-2047 oracle (HEAD 1d0b74c); probes residue-48 family
+    # toward K-2031-projected N≈2000 saturation.
+    _K2060_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -421,6 +430,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # mirrors K-1978/K-1994/K-2014-2020-2024/K-2031 off-by-48 ladder).  Probes
     # whether the residue-48 family continues monotonically or saturates at N=1072.
     if (int(M), int(N), int(K), str(a_dtype)) in _K2047_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18: return True
+    # K-2060 (S-002): P49 (39th-slot) skinny_N1136 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 6th-rung; shares mod-128 = 112 tail with K-2031 P47
+    # N=1008 — alternate tail topology in off-by-48 family; mirrors
+    # K-1978/K-1994/K-2014-2020-2024/K-2031/K-2047 off-by-48 ladder).  Probes whether
+    # the residue-48 family continues monotonically or saturates at N=1136.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2060_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

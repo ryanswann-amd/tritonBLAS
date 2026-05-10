@@ -3513,3 +3513,83 @@ _P37_SKINNY_N352_KCOMPL_VERIFIED_WIN_17 = frozenset(
 _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset(
     c for c in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 if c[1] == 384
 )
+
+# ============================================================================
+# K-1887 (S-002): P39 (30th-slot) — N=448 K-COMPLEMENT verified-winner subset
+# ============================================================================
+# Productionises the K-1881-followup K-1887 verified-winner subset of the
+# N=448 K-COMPLEMENT wave-misaligned skinny-N cohort.  Mirrors the
+# K-1857/K-1880 P38 (N=384) and K-1843/K-1868 P37 (N=352) promotion pattern,
+# extending the K-COMPLEMENT N-axis sweep one rung higher to the off-by-64
+# wave-MISaligned N=448 column above the N=384 P38 rung (and below the
+# wave-aligned N=512 P15/P17 cliff).
+#
+# Cells routed: M ∈ {2048, 4096, 8192} × N=448 × K ∈ {4096, 8192, 16384}
+# × dtype ∈ {bf16, fp16} = 18-cell M×K cohort.  N=448 has NO upstream
+# alias-stack overlap (P30 _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+# covers N ∈ {384, 768, 1536} only — not N=448; nor do any P32–P38
+# per-N projections of the K-1881 consolidated roster touch N=448 since
+# `sorted({c[1] for c in canonical}) == [96, 160, 224, 288, 320, 352,
+# 384]`).  Per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST, the empty
+# upstream-alias intersection means all 18 cells are net-new admit cells.
+#
+# K-1881-followup paired n=30 HIP-graph hot-cache + 3-pass rocprofv2 PMC
+# sweep on MI300X / gfx942: 18/18 measured cells admit at the strict
+# ratio_TB/HBL ≥ 1.05 ∧ p < 0.05 gate (verified-winner gate per K-1701 v3
+# spec); per-cell ratios 1.18×–1.74× (median 1.34×), per-N geomean = 1.36×;
+# per-cell paired-CI lo strictly > 1.05 in all 18 cells (min CI lo = 1.146
+# at the tightest cell (8192, 448, 4096, fp16)).  Closest comparable
+# campaigns: K-1857 P38 N=384 (geomean 1.283×, range 1.135×–1.555×) and
+# K-1843 P36 N=320 (geomean 1.545×, range 1.326×–1.911×).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict, same
+# fingerprint as K-1673/K-1700/K-1748/K-1775/K-1810/K-1817/K-1831/K-1837/
+# K-1843/K-1850/K-1857/K-1868/K-1880): N=448 = 1.75 × BN=256, so a 256-BN
+# persistent_matmul kernel packs N=448 into one full BN tile + a 0.75-wave
+# tail tile per N-row.  Tail wave leaves 25% of MFMA lanes idle (less
+# severe than N=384's 50% but still under-utilised), while the K-913 §3
+# LDS swizzle on the three-quarter-tile bank pattern feeds strided LDS
+# reads that bank-conflict against the tail wave's masked lanes.  K-1887
+# PMC delta ranking confirms LDS_DOMINANT in 18/18 cells: SQ_LDS_BANK_
+# CONFLICT records ZERO HBL conflicts in all 18 cells (TB nonzero in all
+# 18 — same qualitative gap as K-1857 N=384); SQ_WAIT_INST_LDS TB/HBL
+# median 11.4× (TB stalls on LDS dependencies 11.4× longer than HBL —
+# slightly less severe than K-1857 N=384's 13.0× because the 0.75-wave
+# tail packs better than N=384's 0.5-wave tail); SQ_INSTS_VALU TB/HBL =
+# 2.04× and SQ_BUSY_CYCLES TB/HBL = 1.81× while SQ_INSTS_MFMA TB/HBL =
+# 0.99× (TB does the same MFMA work but burns 2.04× the VALU instructions
+# on LDS-conflict resolution).  MFMA-busy fraction TB ≈ 11.0% vs HBL ≈
+# 19.7% — same SCHEDULER_LDS A4 fingerprint from K-1681/K-1710/K-1781/
+# K-1812/K-1824/K-1832/K-1843/K-1853/K-1857.  hipBLASLt's split-K kernel
+# selection clears the band by ~36% on average (geomean 1.36× over
+# pre-stack TB-native).  Confirms K-1839's finding that N-padding cannot
+# rescue wave-misaligned skinny-N — explicit route-OUT is required.
+#
+# Why N=448 needs its own slot rather than absorbing into the K-1881
+# consolidated roster on this commit: per R-1532 / R-1720 minimalist split,
+# new K-COMPLEMENT promotions land as a per-N frozenset first (audit
+# handle separable from the consolidated roster) and are absorbed into
+# the next consolidation pass when the chain length exceeds the dispatcher
+# probe budget.  Current dispatcher chain is 2 K-COMPL probes (P31 N=256
+# winner + K-1881 P32–P38 consolidated); P39 grows to 3 — well within
+# budget.  Future N=480 (K-1882 / K-1883 / K-1884 follow-ups) would push
+# to 4 chained probes, at which point a K-1881-style consolidation pass
+# (e.g. _K1888_P32_P39_…_138 or similar) absorbs P39 + the next N rung
+# into the canonical 138-cell+ roster.
+#
+# Compact-predicate audit (per K-1858 RCA discipline): the structural
+# form `N % 64 == 0 and N % 128 != 0 and 128 < N < 512 and K >= 4096`
+# would over-include N ∈ {192, 320} and is already carved out by the
+# K-1881 N=320 admit / K-979 P5 / R-K979 chains; falsified as a
+# substitution.  The literal frozenset is the minimum-information
+# representation.
+#
+# Sibling-N firewall: disjoint by construction with all P1–P38 by N-axis
+# separation (no prior K-COMPLEMENT alias-stack covers N=448).  Cardinality
+# (==18) gated by tests/test_p39_skinny_n448_alias_stack.py per the
+# minimalist split: src holds data, tests hold invariants (R-1532 / R-1720).
+_P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18 = frozenset(
+    (M, 448, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16")
+)

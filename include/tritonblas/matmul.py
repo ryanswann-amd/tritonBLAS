@@ -131,6 +131,16 @@ from ._route_predicate import (
     # K-1794, P34 N=96 K-1818, P35 N=288 K-1832, P36 N=320 K-1843, P37
     # N=352 K-1843, P38 N=384 K-1857).
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
+    # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner subset
+    # — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈ {4096,8192,16384} ×
+    # {bf16,fp16} grid; NO upstream alias overlap — N=448 is disjoint from
+    # P30's N ∈ {384,768,1536} and from K-1881's N ∈ {96,160,224,288,320,
+    # 352,384}).  K-1881-followup paired n=30 HIP-graph hot-cache + 3-pass
+    # rocprofv2 PMC: 18/18 admit at strict ratio_TB/HBL ≥ 1.05 ∧ p<0.05 gate;
+    # per-N geomean = 1.36×; same SCHEDULER_LDS A4 fingerprint as K-1857
+    # P38 N=384 / K-1843 P36 N=320 (LDS_DOMINANT in 18/18, HBL SQ_LDS_BANK_
+    # CONFLICT == 0 in all 18; N=448 = 1.75 × BN=256 → 0.75-wave tail tile).
+    _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18,
 )
 
 
@@ -415,6 +425,16 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # legacy 7-chain reference oracle in
     # `tests/test_k1881_p32_p38_consolidation.py`.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
+    # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner
+    # alias-stack — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈
+    # {4096,8192,16384} × {bf16,fp16}; no upstream alias overlap).  K-1881-
+    # followup paired n=30 HIP-graph + PMC: per-N geomean = 1.36× (range
+    # 1.18×–1.74×, min CI95-lo = 1.146); N=448 = 1.75 × BN=256 → 0.75-wave
+    # tail leaves 25% MFMA lanes idle; SCHEDULER_LDS A4 fingerprint
+    # (HBL SQ_LDS_BANK_CONFLICT == 0 in 18/18; TB nonzero in 18/18).
+    # Disjoint from P30 N ∈ {384,768,1536} and from K-1881 P32–P38
+    # N ∈ {96,160,224,288,320,352,384} by sibling-N firewall.
+    if (int(M), int(N), int(K), str(a_dtype)) in _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18: return True
     return False
 
 

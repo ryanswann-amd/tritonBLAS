@@ -132,6 +132,9 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-1948 (S-002): three-rung extension above K-1922 P40 — N=608/704/736
+    # collapsed into one 50-cell frozenset (P42 N=672 dropped).
+    _K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50,
 )
 
 
@@ -407,6 +410,9 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-1948 (S-002): P41/P42/P43 wave-misaligned skinny-N extension —
+    # one 50-cell frozenset (N=608/704/736); single O(1) hash lookup.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50: return True
     return False
 
 

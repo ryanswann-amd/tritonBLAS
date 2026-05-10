@@ -3461,3 +3461,17 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-1948 (S-002): three-rung extension above K-1922 P40 N=544 —
+# K-1938 P41 N=608 (15c), K-1945 P42 N=704 (17c), K-1941/K-1943 P43 N=736
+# (18c).  K-1927 N=672 dropped: bench showed HBL slower than TB on 2/15
+# sampled cells (ratio 0.99/0.985); deferred until oracle is rerun.
+_K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50 = frozenset(
+    (M, N, K, dt) for N in (608, 704, 736)
+    for M in (2048, 4096, 8192) for K in (4096, 8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16")
+) - frozenset({(4096, 608, 4096, "torch.bfloat16"),
+               (4096, 608, 8192, "torch.bfloat16"),
+               (4096, 608, 4096, "torch.float16"),
+               (2048, 704, 4096, "torch.bfloat16")})
+assert len(_K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50) == 50

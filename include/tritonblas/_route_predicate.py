@@ -3610,3 +3610,64 @@ def _is_k1908_offby48_kcompl_admit(M, N, K, a_dtype) -> bool:
         and (int(N) in _K1908_OFFBY48_ADMIT_N)
         and ((int(M), int(K), str(a_dtype)) in _K1908_OFFBY48_ENVELOPE_MK_DT)
     )
+
+# K-2175 (S-002): P57 (next-position) skinny_N1648 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset for the off-by-48 wave-misaligned N=1648
+# **13th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46 N=944),
+# K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48 N=1072),
+# K-2055/K-2060/K-2063 (N=1136), K-2071..K-2085 (P50 N=1200), K-2071/K-2085/
+# K-2091 (P51 N=1264), K-2097/K-2101/K-2106 (P52 N=1328), K-2107 (P53 N=1392),
+# K-2118/K-2124/K-2130 (P54 N=1456), K-2136 (P55 N=1520), and K-2152
+# (P56 N=1584) — the direct +64 step beyond the K-2152 baseline that landed
+# the K-1908 closed-form refactor.
+#
+# N=1648 satisfies (N % 64 == 48) AND (N % 128 == 112) — the mod-128=112
+# sub-class shared with N=1520 / N=1392 / N=1264 (vs the mod-128=48 sub-class
+# containing N=1584 / N=1456 / N=1328 / N=1200).  BLOCK_N=128 packs N=1648
+# into 12.875 fractional tiles per N-row (vs N=1584's 12.375 / N=1520's
+# 11.875 — alternating 0.375/0.875 fractional-tile pattern continues, with
+# N=1648 returning to the 0.875 sub-class shared with N=1520 / N=1392 /
+# N=1264).  Fractional waves: 1648/64 = 25.75 — same 0.75 wave-misalignment
+# class as every prior off-by-48 rung.
+#
+# Per K-2152 F-LADDER-UPPER-BOUND-NOT-REACHED + K-2072 wide-N admit-
+# eligible-past-N=1776 sweep, N=1648 (next contiguous +64 step beyond P56
+# N=1584) sits squarely inside the climbing/plateau regime; expected
+# cohort BEFORE TB/HBL projects in 1.4×–1.6× range with intact rocBLAS
+# parity.  K-2175 admission would be the 9th independent wall-clock
+# refutation of the K-2061 PMC-derived family ceiling.
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# Per K-2061 PMC delta-attribution, residue-48 carries a stable LDS bank-
+# conflict differential (~6×) vs residue-32 (~2×) and wave-aligned (~1×)
+# at (M=4096, K=8192, bf16); K-2091/K-2107/K-2124/K-2136/K-2152 independent
+# confirmations at N=1264/1392/1456/1520/1584 wall-clock refuted the K-2061
+# PMC-derived family ceiling for the 8th consecutive task-line; K-2175
+# admission would be the 9th.  Wave occupancy delta: BLOCK_N=128 over
+# N=1648 leaves a 1296/1648 = 78.6% of the trailing wavefront idle
+# (vs 100% on the wave-aligned residue-0 sibling), the same off-by-48
+# wavefront-tail signature observed across every prior rung.
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) — equivalent to the 12 prior off-by-48
+# rungs already in the alias-stack.
+#
+# Note on K-1908 closed-form refactor coexistence: the K-2152 PR landed the
+# K-1908 closed-form predicate (`_is_k1908_offby48_kcompl_admit`) collapsing
+# N ∈ {1520, 1584} into one membership-check.  K-2175 follows the
+# minimal-additive-diff convention preferred for first-rung admit signals
+# (per orchestrator R-K2175 spec): adds a single-N alias-stack frozenset
+# + one chained dispatcher entry, keeping the K-1908 closed-form untouched.
+# A follow-up consolidation PR (K-2175-followup) may extend
+# `_K1908_OFFBY48_ADMIT_N` to include 1648 once the rung is independently
+# verified, collapsing the +2-LOC chained check back into the closed-form.
+_K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1648, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2175_p57_n1648_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

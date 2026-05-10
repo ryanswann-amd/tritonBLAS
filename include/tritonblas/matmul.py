@@ -142,6 +142,14 @@ from ._route_predicate import (
     # (admit-set identity) pinned by
     # tests/test_k1908_offby48_closed_form_equivalence.py.
     _is_k1908_offby48_kcompl_admit,
+    # K-2175 (S-002): P57 skinny_N1648 K-COMPLEMENT alias-stack — 18-cell
+    # 13th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=112; 25.75 fractional waves; 0.875 fractional
+    # BLOCK_N=128 tile sub-class shared with N=1520 / N=1392 / N=1264).
+    # Disjoint with every prior slot (no shared N).  Single-N alias-stack
+    # entry per orchestrator R-K2175 minimal-additive-diff spec; a
+    # follow-up PR may collapse 1648 into _K1908_OFFBY48_ADMIT_N.
+    _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -426,6 +434,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # while preserving exact admit-set identity (pinned by
     # tests/test_k1908_offby48_closed_form_equivalence.py).
     if _is_k1908_offby48_kcompl_admit(M, N, K, a_dtype): return True
+    # K-2175 (S-002): P57 skinny_N1648 K-COMPLEMENT alias-stack — 13th rung
+    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
+    # 1264/1328/1392/1456/1520/1584 → 1648).  18 cells (M ∈ {2048,4096,8192}
+    # × N=1648 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-
+    # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.875
+    # fractional tiles, 25.75 fractional waves; mod-128=112 sibling to
+    # N=1520 / N=1392 / N=1264).  Disjoint with K-1908 closed-form admit
+    # set ({1520, 1584}) — no double-route.  +2 active LOC additive in
+    # dispatcher (this membership-check + matching import).  Follow-up
+    # PR may consolidate 1648 into `_K1908_OFFBY48_ADMIT_N`.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

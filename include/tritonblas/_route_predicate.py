@@ -3518,3 +3518,109 @@ _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17 = frozenset({
 assert len(_K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17) == 17
 assert all(N == 704 for (_M, N, _K, _D) in _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17)
 assert 704 % 128 == 64  # BN-half-tile-misalignment invariant
+
+
+# =============================================================================
+# K-1966 (S-002): depth-4 CLOSED-FORM replacement of the
+# K-1881 P32-P38 ∪ K-1922 P40 ∪ K-1945 P41 SKINNY-N K-COMPLEMENT alias-stack
+# inside `_k971_route_to_hbl()`.
+#
+# Per K-1946 iter-3 §F22 the deployed form is "Option A" (per-axis sets +
+# materialised single-frozenset union) — single hash probe at dispatch,
+# back-compatible with the existing (M,N,K,dtype)-tuple contract.
+#
+# Bit-equivalence (asserted at module import below over the natural BC rect):
+#   _k1966_skinny_kcompl_routeout(M, N, K, d) ≡
+#       (M, N, K, d) ∈ _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120
+#                   ∪ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18
+#                   ∪ _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17
+#
+# Provenance:
+#   • Closed form derived in K-1937 iter-1 §F5 (S1' literal-set form)
+#   • Empirical validation: K-1937 iter-2 §F9-F11 (172 candidates × 156-cell
+#     oracle, 1 pass); K-1946 iter-2 §F11/F17 (cumulative ~191k-candidate
+#     exhaustion → only literal-set + explicit-carve form is bit-equivalent)
+#   • Carve-out structural justification: K-1937 iter-2 §F12, K-1946 iter-2
+#     §F16 — every carve-out is axis-coupled (shares M,K,dtype with positive
+#     cells), so no axis-disjunctive predicate can exclude them.
+#   • K-1966 live-MI300X paired n=30 HIP-graph A/B: see output/kernel_paired.csv
+#
+# Maintainability lever (the actual deliverable per K-1946 iter-2 §F23):
+#   • LOC: 245-line literal cascade (K1881_120: 138 lines + K1922_18: 22 lines
+#     + K1945_17: 22 lines + 3 dispatch lines + per-slot views/comments) →
+#     12-LOC closed form.
+#   • Adding a new N-rung in the future is now ONE-line: append to NSET_LIVE_9.
+#   • Adding a new carve-out is ONE-line: append to CARVE6.
+# =============================================================================
+
+# 9 BLOCK_N=128 wave-misaligned skinny-N rungs sharing R-1811/K-913 §3
+# LDS-bank-conflict root cause and the same hipBLASLt routing target.
+# Per-rung verification: 96 K-1818 | 160 K-1794 | 224 K-1794 | 288 K-1832 |
+# 320 K-1843 | 352 K-1843 | 384 K-1857 | 544 K-1912 (P40) | 704 K-1939 (P41).
+_K1966_NSET_LIVE_9 = frozenset({96, 160, 224, 288, 320, 352, 384, 544, 704})
+
+# M-axis: 3 rungs verified across every slot.
+_K1966_MSET_3 = frozenset({2048, 4096, 8192})
+
+# K-axis: K_NARROW = K-COMPLEMENT cohort = 3 rungs.
+_K1966_KSET_3 = frozenset({4096, 8192, 16384})
+
+# dtype-axis: 2 verified dtypes (bf16, fp16).
+_K1966_DTYPE_2 = frozenset({"torch.bfloat16", "torch.float16"})
+
+# Carve-outs (6 cells, axis-coupled exclusions):
+#   • 4 cells from K-1881 P36/P37/P38 parity-band losers + P30 _K1711 alias
+#   • 1 cell from K-1945 P41 R-K979 P5 upstream alias
+# Each carve shares M,K,dtype with at least one positive cell, so no
+# axis-disjunctive predicate can exclude it without losing positives
+# (proof: K-1946 iter-2 §F16 per-cell enumeration).
+_K1966_CARVE6 = frozenset({
+    (2048, 320,  4096, "torch.bfloat16"),  # K-1881 P36 parity-band loser
+    (2048, 352,  4096, "torch.bfloat16"),  # K-1881 P37 parity-band loser
+    (2048, 384,  8192, "torch.bfloat16"),  # K-1881 P38 _K1711 alias
+    (2048, 384,  8192, "torch.float16"),   # K-1881 P38 _K1711 alias
+    (4096, 384,  8192, "torch.bfloat16"),  # K-1881 P38 _K1711 alias
+    (4096, 384,  8192, "torch.float16"),   # K-1881 P38 _K1711 alias
+    (2048, 704,  4096, "torch.bfloat16"),  # K-1945 P41 R-K979 P5 alias
+})
+
+# Materialised single-frozenset union (Option A from K-1946 iter-3) — gives
+# constant-time hash-probe lookup, eliminating the 3-set chained-`in` dispatch.
+_K1966_SKINNY_KCOMPL_UNION = frozenset(
+    (m, n, k, d)
+    for m in _K1966_MSET_3 for n in _K1966_NSET_LIVE_9
+    for k in _K1966_KSET_3 for d in _K1966_DTYPE_2
+    if (m, n, k, d) not in _K1966_CARVE6
+)
+
+
+def _k1966_skinny_kcompl_routeout(M, N, K, a_dtype):
+    """Depth-4 closed-form K-COMPLEMENT skinny-N alias-stack predicate.
+
+    Returns True iff (M, N, K, a_dtype) is one of the verified-winner cells
+    in the live K-1881 ∪ K-1922 ∪ K-1945 cascade.
+
+    Bit-identical to the 3-line literal-cascade probe at the call site of
+    `_k971_route_to_hbl`; constant-time single-frozenset lookup.
+    """
+    return (int(M), int(N), int(K), str(a_dtype)) in _K1966_SKINNY_KCOMPL_UNION
+
+
+# Bit-equivalence assertion at module import — fails loudly if anyone changes
+# the literal cascade without re-deriving the closed form.
+_K1966_LIVE_UNION_REF = (
+    _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120
+    | _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18
+    | _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17
+)
+assert _K1966_SKINNY_KCOMPL_UNION == _K1966_LIVE_UNION_REF, (
+    "K-1966 closed form drifted from literal cascade — re-derive carve-set. "
+    f"closed_form={len(_K1966_SKINNY_KCOMPL_UNION)} cells, "
+    f"literal_union={len(_K1966_LIVE_UNION_REF)} cells, "
+    f"closed_minus_literal={_K1966_SKINNY_KCOMPL_UNION - _K1966_LIVE_UNION_REF}, "
+    f"literal_minus_closed={_K1966_LIVE_UNION_REF - _K1966_SKINNY_KCOMPL_UNION}"
+)
+assert len(_K1966_SKINNY_KCOMPL_UNION) == 155, (
+    f"expected 155 cells (120+18+17), got {len(_K1966_SKINNY_KCOMPL_UNION)}"
+)
+del _K1966_LIVE_UNION_REF  # only needed at import time

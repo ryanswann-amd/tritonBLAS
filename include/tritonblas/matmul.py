@@ -140,6 +140,12 @@ from ._route_predicate import (
     # = 1.48×; rocprof PMC confirms K-913 LDS-stall signature (4/4 winner
     # cells, TB ALU_STALL_BY_LDS = 2.91×–6.22× HBL).
     _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17,
+    # K-1966 (S-002): depth-4 closed-form replacement for the
+    # K-1881 ∪ K-1922 ∪ K-1945 SKINNY-N K-COMPLEMENT alias-stack — bit-equal
+    # by construction (asserted at module import in `_route_predicate.py`).
+    # Gated via `TRITONBLAS_K1966_CLOSED_FORM=1` for the K-1966 paired n=30
+    # HIP-graph A/B validation; default OFF (literal-cascade branch).
+    _k1966_skinny_kcompl_routeout,
 )
 
 
@@ -403,6 +409,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean HBL/TB = 1.392×, range 1.07×–2.12×, 28/28 cells pass the strict
     # ≥1.05 ∧ p<0.05 gate; the 2 (M=2048, K=2048) LOSER cells are excluded).
     if (int(M), int(N), int(K), str(a_dtype)) in _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28: return True
+    # K-1966 (S-002): A/B-gated single-frozenset closed-form replacement
+    # for the K-1881 ∪ K-1922 ∪ K-1945 cascade.  When env gate is set,
+    # collapses 3 chained `in`-probes into ONE constant-time hash lookup
+    # against the materialised 155-cell union; bit-equal by construction
+    # (asserted at module import in `_route_predicate.py`).  Default path
+    # (env unset / != "1") preserves the literal cascade for the A branch.
+    if os.environ.get("TRITONBLAS_K1966_CLOSED_FORM") == "1":
+        return _k1966_skinny_kcompl_routeout(M, N, K, a_dtype)
     # K-1881 (S-002): consolidated P32–P38 K-COMPLEMENT verified-winner
     # alias-stack — ONE 120-cell frozenset replacing what would be a
     # 7-probe chain (N ∈ {96,160,224,288,320,352,384}).  O(1) hash lookup

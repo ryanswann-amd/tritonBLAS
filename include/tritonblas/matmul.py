@@ -132,6 +132,14 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-1945 (S-002): P41 (31st-slot) N=704 BN-half-tile-misaligned
+    # K-COMPLEMENT alias-stack — 17-cell verified-winner subset; the
+    # (2048,704,4096,bf16) cell is already routed via upstream P5 R-K979
+    # (excluded per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST).  K-1945
+    # paired n=30 + Wilcoxon+Holm p_holm = 3.35e-08, cohort geomean tb/hbl
+    # = 1.48×; rocprof PMC confirms K-913 LDS-stall signature (4/4 winner
+    # cells, TB ALU_STALL_BY_LDS = 2.91×–6.22× HBL).
+    _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17,
 )
 
 
@@ -407,6 +415,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-1945 (S-002): P41 (31st-slot) N=704 BN-half-tile-misaligned skinny-N
+    # K-COMPLEMENT alias-stack — 17 cells (one less than the 18-cell grid
+    # because (2048,704,4096,bf16) is already routed via upstream P5 R-K979).
+    # Cohort geomean tb/hbl = 1.48× (Wilcoxon p_holm = 3.35e-08 on 17/17
+    # admit cells); rocprof PMC confirms K-913 LDS-stall signature on the
+    # 4-cell winner subset.  Sibling-N firewall disjoint with every prior
+    # K-COMPLEMENT alias-stack slot (no shared N).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17: return True
     return False
 
 

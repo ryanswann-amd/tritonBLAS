@@ -3461,3 +3461,60 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-1945 (S-002): P41 (31st-slot) skinny_N704 K-COMPLEMENT alias-stack —
+# 17-cell verified-winner subset for the BN-tile half-tile-misaligned N=704
+# rung.  Arithmetic correction vs PRD: 704 = 11×64 exactly so 704 mod 64 = 0
+# (wave-ALIGNED at the 64-lane SIMD); however 704 mod 128 = 64, which packs
+# into 5 full BN=128 tiles + 1 BN=64 *half-tile tail* per N-row.  The tail
+# tile occupies a full 64-lane wave (no MFMA-lane half-utilisation as in the
+# 32-mod-64 N ∈ {544, 672} cases), but the persistent kernel still emits a
+# distinct tail dispatch whose LDS-double-buffered prologue collides with the
+# main-body LDS-write traffic from the in-flight neighbour tiles — the same
+# K-913 §3 SCHEDULER_LDS A4 fingerprint, attacked from a different geometric
+# angle.  K-1945 paired n=30 HIP-graph hot-cache MI300X / gfx942 measurement
+# vs the live oracle at fork/fix/K-1922 HEAD 0024a71 confirms 17/18 admit at
+# Wilcoxon signed-rank p_holm = 3.353e-08 ∧ ratio_median(hbl/tb) < 0.95
+# (cohort geomean tb/hbl = 1.4812×, range 1.30×–1.72×).  The 18th cell
+# (M=2048, N=704, K=4096, bf16) is *already* routed to hipBLASLt upstream by
+# the P5 R-K979 mid-rect predicate (verified by direct
+# `_k971_route_to_hbl(...)` call), so it is excluded from the new admit set
+# per R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST.
+#
+# 3-pass rocprof PMC sweep on the (M, N=704, K) ∈ {(2048,8192,bf16),
+# (4096,8192,fp16), (8192,8192,bf16), (8192,16384,bf16)} winner-subset
+# (output/pmc_summary.csv) confirms 4/4 cells exhibit the K-913 LDS-stall
+# signature: TB persistent_matmul.kd has SQ_WAIT_INST_LDS / GRBM_GUI_ACTIVE
+# = 2.67×–8.47× higher than HBL Tensile Cijk_*MT192x128x64_*, and
+# ALU_STALL_BY_LDS%(TB) / ALU_STALL_BY_LDS%(HBL) ranges 2.91×–6.22× — TB
+# spends an order of magnitude more cycles waiting on LDS despite issuing
+# *fewer* LDS instructions, the canonical signature of LDS-bank scheduling
+# pathology that hipBLASLt's Tensile heuristics avoid.
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack slot
+# (N ∈ {64, 96, 128, 160, 224, 256, 288, 320, 352, 384, 448, 544, 672, 768,
+# 1536}).  Per K-1918 depth-3 closed-form search (0/5,175 candidate
+# predicates passed precision ≥0.95 ∧ recall ≥0.90 vs the literal frozenset
+# cascade), the wave-misaligned skinny-N admit set is structurally not
+# collapsible — per-N strict-equality frozensets are the only valid
+# representation.  P41 as a literal 17-cell frozenset is the correct minimal
+# addition; an extension of the K-1908 S1-form compact predicate to cover
+# the BN-half-tile-misalignment band (N mod 128 = 64) is left to a separate
+# task.
+_K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17 = frozenset({
+    # M=2048   (K=4096,bf16 excluded — upstream P5 R-K979 alias)
+    (2048, 704,  4096, "torch.float16"),
+    (2048, 704,  8192, "torch.bfloat16"), (2048, 704,  8192, "torch.float16"),
+    (2048, 704, 16384, "torch.bfloat16"), (2048, 704, 16384, "torch.float16"),
+    # M=4096
+    (4096, 704,  4096, "torch.bfloat16"), (4096, 704,  4096, "torch.float16"),
+    (4096, 704,  8192, "torch.bfloat16"), (4096, 704,  8192, "torch.float16"),
+    (4096, 704, 16384, "torch.bfloat16"), (4096, 704, 16384, "torch.float16"),
+    # M=8192
+    (8192, 704,  4096, "torch.bfloat16"), (8192, 704,  4096, "torch.float16"),
+    (8192, 704,  8192, "torch.bfloat16"), (8192, 704,  8192, "torch.float16"),
+    (8192, 704, 16384, "torch.bfloat16"), (8192, 704, 16384, "torch.float16"),
+})
+assert len(_K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17) == 17
+assert all(N == 704 for (_M, N, _K, _D) in _K1945_P41_SKINNY_N704_KCOMPL_ALIASSTACK_17)
+assert 704 % 128 == 64  # BN-half-tile-misalignment invariant

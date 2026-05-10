@@ -147,5 +147,139 @@ def test_adjacency_firewalls_n1776_neighbors():
         )
 
 
+# ---------------------------------------------------------------------------
+# Behavioral routing tests — exercise the dispatcher contract
+# ---------------------------------------------------------------------------
+#
+# Per K-2214 retry feedback (Testing Zealot REVISE): the structural-only
+# tests above lock down the *data* (frozenset literal cardinality / residue
+# / disjointness) but do not exercise `_k971_route_to_hbl(...)` itself —
+# the actual function consumed by `tritonblas.matmul`.  The tests below
+# commit the routing contract: N=1776 cohort cells return True, the
+# immediately-prior K-2183 N=1712 admit still returns True (no
+# regression on prior rungs), and the residue-48 adjacency firewall
+# (N=1840 next un-audited rung above; N=1712 ± 64 boundaries; the
+# wave-aligned N=1792 alias) returns False.  These convert the previous
+# attempt's ad-hoc smoke check into committed regression-protected
+# assertions.
+
+# Importing matmul triggers a torch.cuda call at import time; tests that
+# only need the data layer skip the import to stay CPU-portable.  The
+# routing tests gate on torch+matmul availability so they no-op cleanly
+# on a CPU-only invariant runner.
+try:
+    import torch  # noqa: F401
+    from tritonblas.matmul import _k971_route_to_hbl
+    _ROUTING_AVAILABLE = True
+    _IMPORT_ERR: Exception | None = None
+except Exception as _e:  # pragma: no cover — environment-conditional
+    _ROUTING_AVAILABLE = False
+    _IMPORT_ERR = _e
+
+
+pytestmark_routing = pytest.mark.skipif(
+    not _ROUTING_AVAILABLE,
+    reason=f"torch/tritonblas.matmul not importable: {_IMPORT_ERR!r}",
+)
+
+
+@pytestmark_routing
+def test_routing_n1776_cohort_cells_route_to_hbl():
+    """K-2214 P58 admit: every cell of the 10-cell cohort must route True."""
+    import torch
+    bf16 = torch.bfloat16
+    fp16 = torch.float16
+    cohort = [
+        # 9 bf16 cells
+        (2048, 1776, 4096,  bf16),
+        (2048, 1776, 8192,  bf16),
+        (2048, 1776, 16384, bf16),
+        (4096, 1776, 4096,  bf16),
+        (4096, 1776, 8192,  bf16),
+        (4096, 1776, 16384, bf16),
+        (8192, 1776, 4096,  bf16),
+        (8192, 1776, 8192,  bf16),
+        (8192, 1776, 16384, bf16),
+        # 1 fp16 spot
+        (4096, 1776, 8192,  fp16),
+    ]
+    for (M, N, K, dt) in cohort:
+        assert _k971_route_to_hbl(M, N, K, dt, dt, False, False), (
+            f"K-2214 cohort cell (M={M}, N={N}, K={K}, dt={dt}) "
+            "MUST route to hipBLASLt"
+        )
+
+
+@pytestmark_routing
+def test_routing_n1712_prior_rung_still_routed():
+    """K-2183 P57 admit (N=1712) must still route True post-K-2214 patch.
+
+    Guards against accidentally clobbering the prior rung when extending
+    the alias-stack by one slot.  Anchors at the K-2169 peak-amplification
+    cell (M=4096, K=16384, fp16) plus a bf16 sample.
+    """
+    import torch
+    assert _k971_route_to_hbl(
+        4096, 1712, 16384, torch.float16, torch.float16, False, False
+    ), "K-2183 P57 N=1712 fp16 anchor MUST remain routed (no prior-rung regression)"
+    assert _k971_route_to_hbl(
+        4096, 1712, 8192, torch.bfloat16, torch.bfloat16, False, False
+    ), "K-2183 P57 N=1712 bf16 anchor MUST remain routed (no prior-rung regression)"
+
+
+@pytestmark_routing
+def test_routing_adjacency_firewall_n1840_not_routed():
+    """N=1840 = next un-audited residue-48 rung above N=1776 — MUST NOT route.
+
+    The K-2214 PR explicitly defers any rung above N=1776; a False here is
+    the firewall protecting future rungs from being silently absorbed.
+    """
+    import torch
+    assert not _k971_route_to_hbl(
+        4096, 1840, 8192, torch.bfloat16, torch.bfloat16, False, False
+    ), "N=1840 (next residue-48 rung) MUST remain un-routed — out of K-2214 scope"
+
+
+@pytestmark_routing
+def test_routing_off_residue_n1792_not_routed():
+    """N=1792 is wave-aligned (mod 64 == 0), NOT residue-48 — MUST NOT route.
+
+    Prevents a regression where a sloppy refactor (e.g. dropping the
+    explicit-membership check for a coarse residue gate) would over-admit
+    wave-aligned N values that already perform at HBL parity natively.
+    """
+    import torch
+    assert not _k971_route_to_hbl(
+        4096, 1792, 8192, torch.bfloat16, torch.bfloat16, False, False
+    ), "N=1792 (wave-aligned, off-residue) MUST remain un-routed"
+
+
+@pytestmark_routing
+def test_routing_off_cohort_n1776_fp16_cells_not_routed():
+    """Only the (M=4096, K=8192, fp16) fp16 spot is admitted at N=1776.
+
+    Other fp16 (M, K) combinations at N=1776 must remain un-routed —
+    enforces the task-specified 10-cell cohort boundary at the dispatcher
+    level (not just the data-literal level).
+    """
+    import torch
+    fp16 = torch.float16
+    off_cohort_fp16 = [
+        (2048, 1776, 4096,  fp16),
+        (2048, 1776, 8192,  fp16),
+        (2048, 1776, 16384, fp16),
+        (4096, 1776, 4096,  fp16),
+        (4096, 1776, 16384, fp16),
+        (8192, 1776, 4096,  fp16),
+        (8192, 1776, 8192,  fp16),
+        (8192, 1776, 16384, fp16),
+    ]
+    for (M, N, K, dt) in off_cohort_fp16:
+        assert not _k971_route_to_hbl(M, N, K, dt, dt, False, False), (
+            f"Off-cohort fp16 cell (M={M}, N={N}, K={K}) at N=1776 MUST NOT route "
+            "— K-2214 fp16 admit is single-spot at (M=4096, K=8192) only"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -3461,3 +3461,48 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+
+# K-2104 (S-002): P52 (42nd-slot) skinny_N1328 K-COMPLEMENT alias-stack --
+# 18-cell envelope (M in {2048,4096,8192} x N=1328 x K in {4096,8192,16384}
+# x {bf16,fp16}).  Wave-misaligned off-by-48 (mod 64 = 48) modular class
+# (1328 mod 64 = 48; 1328 mod 128 = 48 => packs into 10 full BLOCK_N=128
+# tiles + 1 BN=48 tail = 10/10.375-tile tail).  9th confirmed rung in the
+# (mod 64 = 48) residue family above K-1978 P45 N=816, K-1990/K-1994 N=880,
+# K-2014/2020/2024 P46 N=944, K-2031 P47 N=1008, K-2047 P48 N=1072,
+# K-2055/K-2063 P49 N=1136, K-2077 P50 N=1200, and K-2091 P51 N=1264 (1328
+# = 1264 + 64 -- next 64-stride rung in the off-by-48 class).  This rung
+# CONTINUES the mod-128 alternation pattern across the residue-48 ladder:
+#   N=816  -> mod 128 = 48
+#   N=880  -> mod 128 = 112
+#   N=944  -> mod 128 = 48
+#   N=1008 -> mod 128 = 112
+#   N=1072 -> mod 128 = 48
+#   N=1136 -> mod 128 = 112
+#   N=1200 -> mod 128 = 48
+#   N=1264 -> mod 128 = 112
+#   N=1328 -> mod 128 = 48   (this rung -- REJOIN to N=1200 mod-128 topology)
+# The strict 48/112/48/112/48/112/48/112/48 alternation is a direct mechanical
+# consequence of stride-64 sampling of a mod-128 axis (each +64 step toggles
+# the high bit of the residue-48 BLOCK_N tail), demonstrated empirically in
+# K-2031/K-2063/K-2077/K-2091 to be magnitude-orthogonal: the binding constraint
+# is the (mod 64 = 48) wave-lane mismatch, not the BLOCK_N=128 packing remainder.
+# K-2072 already collected BEFORE data confirming a +gain signal at N=1328
+# (K-2094 large-M N=1328 sweep further confirms TB/HBL > 1.16x even at M=32768),
+# making K-2104 the natural single-rung promotion to bring N=1328 into the
+# live dispatcher.  K-2104 paired n=30 HIP-graph hot-cache MI300X gfx942
+# ROCm 7.2 / PyTorch 2.10.0+rocm7.2.0 vs LIVE post-K-1922 oracle (HEAD
+# 0024a71).  Probes whether the residue-48 family continues at the 9th rung,
+# supporting the K-2044 narrow-family hypothesis ((N%64==48) AND
+# (816<=N<=N_max_admitted)) and extending the validated upper bound to N=1328.
+# Sibling-N firewall disjoint by construction with every prior K-COMPLEMENT
+# alias-stack slot.  Promoted as explicit alias-stack literal until the
+# K-1908 S1-form compact predicate is extended above N=384 in a separate task.
+_K2104_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1328, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2104_p52_skinny_n1328_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

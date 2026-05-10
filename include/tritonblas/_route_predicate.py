@@ -3461,3 +3461,27 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2031 (S-002): P47 (37th-slot) skinny_N1008 K-COMPLEMENT alias-stack —
+# 18-cell envelope (M ∈ {2048,4096,8192} × N=1008 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}).  Wave-misaligned off-by-48 (mod 64) modular class
+# (1008 mod 64 = 48; 1008 mod 128 = 112 ⇒ packs into 7 full BLOCK_N=128 tiles
+# + 1 BN=112 tail = 7/8-tile tail).  4th confirmed rung in the (mod 64 = 48)
+# residue family above K-1978 P45 N=816, K-1990/K-1994 N=880, and K-2010 P46
+# N=944 (1008 = 944 + 64 — next 64-stride rung in the off-by-48 class).
+# K-2031 paired n=30 HIP-graph hot-cache MI300X gfx942 ROCm 7.2 / PyTorch
+# 2.10.0+rocm7.2.0 vs LIVE post-K-1922 oracle (HEAD 0024a71): 18-cell
+# BEFORE cohort geomean TB/HBL = 1.326× (range 0.995×–1.631×, 16/18 admit
+# at ≥1.10×, 16/18 at ≥1.05×).  Mirrors the K-1978 / K-1994 / K-2010 ladder
+# pattern.  Sibling-N firewall disjoint by construction with every prior
+# K-COMPLEMENT alias-stack slot.  Promoted as explicit alias-stack literal
+# until the K-1908 S1-form compact predicate is extended above N=384 in a
+# separate task.
+_K2031_P47_SKINNY_N1008_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1008, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2031_p47_skinny_n1008_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

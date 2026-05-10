@@ -3485,3 +3485,21 @@ _K2055_P48_SKINNY_N1136_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2055_p48_skinny_n1136_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2071 (S-002): P49-P50 (39th-40th-slot) skinny_N1200_AND_N1264 K-COMPLEMENT
+# alias-stack — 16-cell envelope (M ∈ {4096,8192} × N ∈ {1200,1264} ×
+# K ∈ {8192,16384} × dtype ∈ {bf16,fp16}).  Off-by-48 wave-misaligned 7th and
+# 8th candidate rungs above K-2055 P48 N=1136 (1200=1136+64, 1264=1200+64;
+# both (N mod 64) == 48).  K-2061's 6-cell rocprofv2 PMC sweep predicts
+# REJECT for both rungs because the autotuner switches `persistent_matmul`
+# from VGPR=76 to VGPR=128 at N=1200 (LDS_BC/inst 0.8889→0.0000, LDS/wv +122%,
+# VMEM/wv +104%).  K-2071 is the empirical confirmation/refutation of that
+# tile-key gate prediction via paired n=30 HIP-graph hot-cache 3-engine bench.
+# Naturally disjoint with every prior alias-stack slot (no shared N).
+_K2071_P49_50_SKINNY_N1200_N1264_KCOMPL_ALIASSTACK_16 = frozenset(
+    (M, N, K, dt) for M in (4096, 8192) for N in (1200, 1264)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==16) gated by tests/test_k2071_p49_50_skinny_n1200_n1264_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants.

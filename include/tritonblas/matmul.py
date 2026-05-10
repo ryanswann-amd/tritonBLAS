@@ -141,6 +141,12 @@ from ._route_predicate import (
     # K-2031 P47 N=1008 off-by-48 ladder rungs.  Naturally disjoint with
     # every prior slot (no shared N).
     _K2055_P48_SKINNY_N1136_KCOMPL_ALIASSTACK_18,
+    # K-2071 (S-002): P49-P50 skinny_N1200_AND_N1264 K-COMPLEMENT alias-stack —
+    # 16-cell envelope (M ∈ {4096,8192} × N ∈ {1200,1264} × K ∈ {8192,16384}
+    # × {bf16,fp16}).  Off-by-48 wave-misaligned 7th-8th rungs above K-2055
+    # P48 N=1136.  K-2061 PMC predicts REJECT (autotuner VGPR=76→128 at N=1200);
+    # K-2071 is the empirical confirmation.
+    _K2071_P49_50_SKINNY_N1200_N1264_KCOMPL_ALIASSTACK_16,
 )
 
 
@@ -420,6 +426,10 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (off-by-48 wave-misaligned 6th-rung; mirrors K-1978/K-1994/K-2010/K-2031
     # off-by-48 ladder).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2055_P48_SKINNY_N1136_KCOMPL_ALIASSTACK_18: return True
+    # K-2071 (S-002): P49-P50 skinny_N1200_AND_N1264 K-COMPLEMENT alias-stack — 16 cells
+    # (off-by-48 wave-misaligned 7th-8th rungs; empirical confirmation of K-2061
+    # PMC ceiling prediction at N=1200 VGPR=76→128 autotuner transition).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2071_P49_50_SKINNY_N1200_N1264_KCOMPL_ALIASSTACK_16: return True
     return False
 
 

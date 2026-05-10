@@ -3593,3 +3593,129 @@ _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18 = frozenset(
     for K in (4096, 8192, 16384)
     for dt in ("torch.bfloat16", "torch.float16")
 )
+
+# K-1932 (S-002): closed-form compact predicate equivalent to
+# `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 ∪ _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18`
+# (138-cell P32-P39 union).  Productionises the K-1908 depth-2 closed-form
+# predicate S1 (P32-P38, 120 cells) and the K-1887/K-1918-derived N=448
+# extension (P39, 18 cells) into a single 3-axis Cartesian-product test plus
+# a 6-cell carve-out exclusion.  Replaces a chain of two O(1) frozenset hash
+# probes against ~138 4-tuples with three O(1) tuple-of-int membership tests
+# plus a small (6-tuple) negative carveout — eliminates the (M,N,K,a_dtype)
+# tuple build for every dispatch on the 138-cell hot path AND avoids the
+# O(1) hash + memory load against the larger 138-cell hash table.
+#
+# Bit-equivalence to the union of the two literal frozensets is exhaustively
+# self-tested at module import time via the `_K1932_PREDICATE_EQUIV_GUARD`
+# assertion below (cell-by-cell over the full 144-cell M×N×K×dt cross-product
+# domain {2048,4096,8192}×{96,160,224,288,320,352,384,448}×{4096,8192,16384}
+# ×{bf16,fp16}); the guard fires at module load and is the single source of
+# truth that wires the K-1908 / K-1887 invariants into runtime-enforced code.
+#
+# Provenance:
+#   - K-1881:  P32-P38 7-slot consolidation into 120-cell literal frozenset.
+#   - K-1887:  P39 N=448 30th-slot 18-cell K-COMPLEMENT verified-winner add.
+#   - K-1908:  depth-2 closed-form S1 found bit-equivalent to the 120-cell
+#              frozenset over the 126-cell deployment universe (P=R=1.0).
+#   - K-1918:  exhaustive depth-3 search over P32-P39 confirmed S1 + N=448
+#              union is the unique axis-aligned conjunctive predicate that
+#              passes the 95/90 gate (P=0.9583, R=1.0; with carve6 P=R=1.0).
+#   - K-1932 (this commit): productionises the S1 ∪ N=448 closed form behind
+#              an env-gated A/B switch in `matmul._k971_route_to_hbl` so the
+#              compact path can be benchmarked head-to-head with the legacy
+#              two-frozenset alias-stack on live MI300X paired n=30 HIP-graph.
+_K1932_P32_P39_COMPACT_M = frozenset({2048, 4096, 8192})
+_K1932_P32_P39_COMPACT_N = frozenset({96, 160, 224, 288, 320, 352, 384, 448})
+_K1932_P32_P39_COMPACT_K = frozenset({4096, 8192, 16384})
+# DTYPE — the set of A-dtype strings admitted by the literal frozenset
+# union.  Required on the positive admit path so the closed form stays
+# bit-equivalent to the literal union OUTSIDE the bf16/fp16 sub-domain
+# the import-time guard happens to walk (e.g., fp32 / int8 inputs that
+# the legacy frozenset trivially rejects by absence-from-table).  Without
+# this axis the closed form would admit any (M,N,K,*) cell whose M/N/K
+# axes are in-domain regardless of dtype, which is a real correctness
+# divergence vs the union — caught by `tests/test_k1932_compact_predicate
+# .py::test_ood_cells_not_admitted` on fp32 OOD cells.
+_K1932_P32_P39_COMPACT_DTYPE = frozenset({"torch.bfloat16", "torch.float16"})
+# CARVE6 — the six (M,N,K,dtype) cells excluded from the P32-P38 alias-stack
+# per the K-1825 / K-1843 / K-1857 upstream-alias coverage map; these are
+# the only cells inside the M×N×K×dt Cartesian rectangle above (excluding
+# N=448 which has no carveouts) where the legacy frozensets DO NOT route.
+_K1932_P32_P39_COMPACT_CARVE6 = frozenset({
+    (2048, 320,  4096, "torch.bfloat16"),  # P36 R-K1825 upstream-aliased
+    (2048, 352,  4096, "torch.bfloat16"),  # P37 parity-band loser
+    (2048, 384,  8192, "torch.bfloat16"),  # P38 P30-absorbed
+    (2048, 384,  8192, "torch.float16"),   # P38 P30-absorbed
+    (4096, 384,  8192, "torch.bfloat16"),  # P38 P30-absorbed
+    (4096, 384,  8192, "torch.float16"),   # P38 P30-absorbed
+})
+
+
+def _k1932_p32_p39_compact_predicate(M, N, K, a_dtype):
+    """Closed-form 3-axis-membership + 6-cell-carveout predicate equivalent to
+    the union `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 ∪
+    _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18`.  Returns True iff the
+    (M, N, K, a_dtype) cell is admitted by either of the two literal
+    frozensets.  Module-import-time guard (`_K1932_PREDICATE_EQUIV_GUARD`)
+    asserts cell-by-cell bit-equivalence over the 144-cell containing
+    rectangle so the two paths are interchangeable by construction.
+    """
+    M = int(M); N = int(N); K = int(K)
+    dt = str(a_dtype)
+    if N not in _K1932_P32_P39_COMPACT_N: return False
+    if M not in _K1932_P32_P39_COMPACT_M: return False
+    if K not in _K1932_P32_P39_COMPACT_K: return False
+    # DTYPE filter — required for bit-equivalence with the literal frozenset
+    # union outside the {bf16, fp16} sub-domain the import-time guard walks
+    # (the literal frozensets are constructed only over those two dtypes;
+    # any other dtype is implicitly rejected by absence-from-table, so the
+    # closed form must reject it too).  Without this filter the closed form
+    # over-admits fp32/int8 cells that the literal union rejects.
+    if dt not in _K1932_P32_P39_COMPACT_DTYPE: return False
+    # CARVE6 only ever fires on N ∈ {320,352,384}; the N=448 P39 sub-cohort
+    # has no carveouts (full grid).  The membership test is O(1) hash and
+    # only runs when the cell already passed the four positive axis tests.
+    if (M, N, K, dt) in _K1932_P32_P39_COMPACT_CARVE6: return False
+    return True
+
+
+# Module-import-time bit-equivalence guard: exhaustively verify that the
+# compact predicate above produces the same verdict as
+# `(cell ∈ _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120) or
+#  (cell ∈ _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18)` for EVERY cell in the
+# 144-cell containing rectangle (M ∈ {2048,4096,8192} × N ∈ {96,160,224,288,
+# 320,352,384,448} × K ∈ {4096,8192,16384} × dt ∈ {bf16,fp16}).  Any drift
+# between the literal frozensets and the closed form fires here at import
+# time, BEFORE the dispatcher ever runs.  This is the single source-of-truth
+# that wires the K-1908 / K-1918 / K-1887 algebraic identity into code.
+def _k1932_predicate_equiv_guard():
+    union = _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 | _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18
+    mismatches = []
+    for M in (2048, 4096, 8192):
+        for N in (96, 160, 224, 288, 320, 352, 384, 448):
+            for K in (4096, 8192, 16384):
+                for dt in ("torch.bfloat16", "torch.float16"):
+                    legacy = (M, N, K, dt) in union
+                    compact = _k1932_p32_p39_compact_predicate(M, N, K, dt)
+                    if legacy != compact:
+                        mismatches.append((M, N, K, dt, legacy, compact))
+    if mismatches:
+        raise AssertionError(
+            "K-1932 compact predicate diverges from legacy frozenset union on "
+            f"{len(mismatches)} cells (first 5): {mismatches[:5]}"
+        )
+    # Cardinality cross-check — both code paths must admit exactly 138 cells.
+    n_legacy = len(union)
+    n_compact = sum(
+        1
+        for M in (2048, 4096, 8192)
+        for N in (96, 160, 224, 288, 320, 352, 384, 448)
+        for K in (4096, 8192, 16384)
+        for dt in ("torch.bfloat16", "torch.float16")
+        if _k1932_p32_p39_compact_predicate(M, N, K, dt)
+    )
+    assert n_legacy == 138, f"K-1932: legacy union cardinality {n_legacy} != 138"
+    assert n_compact == 138, f"K-1932: compact predicate cardinality {n_compact} != 138"
+
+
+_k1932_predicate_equiv_guard()

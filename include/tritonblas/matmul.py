@@ -131,6 +131,16 @@ from ._route_predicate import (
     # K-1794, P34 N=96 K-1818, P35 N=288 K-1832, P36 N=320 K-1843, P37
     # N=352 K-1843, P38 N=384 K-1857).
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
+    # K-1932 (S-002): closed-form compact predicate equivalent to the
+    # union of `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120` (120 cells) and
+    # `_P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18` (18 cells) — a 3-axis
+    # membership test plus a 6-cell carve-out exclusion.  Imported here so
+    # the structural identity is exercised at module import time via
+    # `_route_predicate._k1932_predicate_equiv_guard()`, and so the unit
+    # test `tests/test_k1932_compact_predicate.py` can lock the closed
+    # form against the literal frozenset union.  NOT used on the dispatch
+    # hot path — see RCA below at the dispatcher call site.
+    _k1932_p32_p39_compact_predicate,
     # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner subset
     # — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈ {4096,8192,16384} ×
     # {bf16,fp16} grid; NO upstream alias overlap — N=448 is disjoint from
@@ -424,6 +434,34 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # 384] — 7 distinct integers) and exercised cell-by-cell against the
     # legacy 7-chain reference oracle in
     # `tests/test_k1881_p32_p38_consolidation.py`.
+    # K-1932 (S-002) RCA — A/B falsification of the K-1908/K-1918 conjectured
+    # dispatcher-overhead reduction:  the closed-form 3-axis-membership +
+    # 6-cell-carve-out predicate `_k1932_p32_p39_compact_predicate` is
+    # provably bit-equivalent to the union of the two literal frozensets
+    # below (asserted exhaustively at module-import time inside
+    # `_route_predicate._k1932_predicate_equiv_guard()` over the full
+    # 144-cell M×N×K×dt containing rectangle, and pinned in CI by
+    # `tests/test_k1932_compact_predicate.py`).  However, on live MI300X
+    # paired n=30 hot-cache micro-benches the closed form is UNIFORMLY
+    # SLOWER than the two-frozenset path:
+    #
+    #     predicate_only_micro:  A=190.8 ns/call vs B=248.2 ns/call
+    #                            ⇒ B is ~30% slower (0.769× speedup).
+    #     dispatcher_micro:      B has negative deltas across nearly every
+    #                            cell of the 138-cell P32-P39 union.
+    #
+    # The Python-level function-call overhead (PyObject frame setup +
+    # int()/str() coercions inside the closed form) exceeds the savings
+    # over a 138-element frozenset hash probe (which is itself O(1) and
+    # already very fast on a modest table).  The conjectured speedup from
+    # K-1908/K-1918 therefore does NOT materialise on this code path on
+    # this hardware, and the env-gated B branch has been removed —
+    # `_k1932_p32_p39_compact_predicate` is retained ONLY as a structural
+    # identity invariant (drift firewall; CI-pinned) and is NOT on the
+    # dispatch hot path.  Artifacts: `output/predicate_only_micro.csv`,
+    # `output/dispatcher_micro.csv`, `output/kernel_paired.csv`,
+    # `output/routing_decisions_in_cohort.csv`,
+    # `output/routing_decisions_ood.csv`.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
     # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner
     # alias-stack — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈

@@ -147,6 +147,27 @@ from ._route_predicate import (
 _tensor_cache = {}
 
 
+# K-2088 (S-002) — closed-form residue-48 K-COMPLEMENT ladder predicate.
+# O(1) arithmetic check covering all 8 admitted off-by-48 ladder rungs
+# {816, 880, 944, 1008, 1072, 1136, 1200, 1264} (= every N in [816,1264]
+# with N % 64 == 48).  Replaces the per-rung frozenset chain pattern that
+# would otherwise add +2 LOC dispatcher growth per rung (8 frozensets × 18
+# cells = 144 conceptual entries).  K-1908 unblock: this predicate is the
+# closed-form consolidation that K-1881 demonstrated for K-COMPLEMENT
+# verified-winners (ONE 120-cell frozenset replacing 7 probes); the 8-rung
+# residue-48 family compresses to a single arithmetic check thanks to its
+# strict modular regularity.  Equivalence to the union of 8 frozensets
+# (verified by output/k2088_predicate_validation.json: 8/8 ladder rungs
+# accepted, 13/13 negative cases rejected including wave-aligned mod-64=0,
+# below-origin N<816, and above-ceiling N>1264).
+def _k2088_residue48_kcompl_ladder(M, N, K, a_dtype):
+    n = int(N)
+    return (n % 64 == 48 and 816 <= n <= 1264 and
+            int(M) in (2048, 4096, 8192) and
+            int(K) in (4096, 8192, 16384) and
+            str(a_dtype) in ("torch.bfloat16", "torch.float16"))
+
+
 def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
     # K-989: keep K-971 killswitch env var as the single L3 disable lever
     # (per K-883 R1 — one cohort, one disable). K-1003 layers the R-K979 P5
@@ -415,10 +436,18 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
-    # K-2088 (S-002): P51 skinny_N1264 K-COMPLEMENT alias-stack — 18 cells
-    # (off-by-48 wave-misaligned 8th rung; closed-form predicate
-    # (N%64==48) AND (816<=N<=1264) covers ladder origin through this rung).
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2088_P51_SKINNY_N1264_KCOMPL_ALIASSTACK_18: return True
+    # K-2088 (S-002): off-by-48 K-COMPLEMENT ladder — closed-form predicate
+    # (N % 64 == 48) AND (816 <= N <= 1264) covers the entire 8-rung ladder
+    # (origin K-1978 P45 N=816 → K-1990/1994 P45 N=880 → K-2010/2028 P46 N=944
+    # → K-2031/2036 P47 N=1008 → K-2043/2047/2052 P48 N=1072 → K-2055/2060/2063
+    # P49 N=1136 → K-2071/2075 P50 N=1200 → K-2071/K-2088 P51 N=1264).  Single
+    # O(1) arithmetic check replaces the per-rung +2 LOC frozenset chain
+    # growth pattern.  N=1264 frozenset literal still ships in
+    # _route_predicate.py as the test-invariant data block (R-1532 / R-1720
+    # / R-1775); equivalence to the closed-form is gated by
+    # tests/test_k2088_p51_skinny_n1264_alias_stack.py and verified end-to-end
+    # by output/k2088_predicate_validation.json.  K-1908 unblock realized.
+    if _k2088_residue48_kcompl_ladder(M, N, K, a_dtype): return True
     return False
 
 

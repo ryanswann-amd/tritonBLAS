@@ -132,6 +132,15 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2047 (S-002): P48 (38th-slot) skinny_N1072 K-COMPLEMENT alias-stack —
+    # 18-cell envelope (M ∈ {2048,4096,8192} × N=1072 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned
+    # 5th rung (1072 mod 64 = 48); rejoin to (mod 128 = 48) tail topology
+    # shared with K-1978 P45 N=816, K-1994 N=880, K-2014/2020/2024 P46 N=944
+    # (K-2031 P47 N=1008 had outlier mod-128 = 112 tail).  K-2047 paired
+    # n=30 HIP-graph hot-cache MI300X / gfx942 vs live post-K-1922 oracle
+    # (HEAD 0024a71); probes residue-48 family saturation point.
+    _K2047_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +416,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2047 (S-002): P48 (38th-slot) skinny_N1072 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 5th-rung; rejoin to mod-128 = 48 tail topology;
+    # mirrors K-1978/K-1994/K-2014-2020-2024/K-2031 off-by-48 ladder).  Probes
+    # whether the residue-48 family continues monotonically or saturates at N=1072.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2047_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

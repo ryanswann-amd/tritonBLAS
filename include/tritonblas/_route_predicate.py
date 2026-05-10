@@ -3461,3 +3461,31 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2047 (S-002): P48 (38th-slot) skinny_N1072 K-COMPLEMENT alias-stack —
+# 18-cell envelope (M ∈ {2048,4096,8192} × N=1072 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}).  Wave-misaligned off-by-48 (mod 64 = 48) modular class
+# (1072 mod 64 = 48; 1072 mod 128 = 48 ⇒ packs into 8 full BLOCK_N=128 tiles
+# + 1 BN=48 tail = 8/8.375-tile tail).  5th confirmed rung in the
+# (mod 64 = 48) residue family above K-1978 P45 N=816, K-1990/K-1994 N=880,
+# K-2014/2020/2024 P46 N=944, and K-2031 P47 N=1008
+# (1072 = 1008 + 64 — next 64-stride rung in the off-by-48 class).  Notably,
+# 1072 shares the (mod 128 = 48) tail with N=816, N=880, and N=944
+# (K-2031 P47 N=1008 had the outlier (mod 128 = 112) tail), so this rung is
+# the rejoin to the canonical mod-128 = 48 tail topology of the lower rungs.
+# K-2047 paired n=30 HIP-graph hot-cache MI300X gfx942 ROCm 7.2 / PyTorch
+# 2.10.0+rocm7.2.0 vs LIVE post-K-1922 oracle (HEAD 0024a71).  Probes whether
+# the residue-48 family continues monotonically or finally saturates at this
+# rung — direct mechanistic input to K-2032 PMC attribution work.
+# Sibling-N firewall disjoint by construction with every prior K-COMPLEMENT
+# alias-stack slot.  Promoted as explicit alias-stack literal until the
+# K-1908 S1-form compact predicate is extended above N=384 in a separate
+# task.
+_K2047_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1072, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2047_p48_skinny_n1072_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

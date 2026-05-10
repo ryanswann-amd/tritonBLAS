@@ -58,12 +58,20 @@ import sys
 import time
 from pathlib import Path
 
+import importlib
 import numpy as np
 import torch
 from scipy import stats
 
 import tritonblas
-import tritonblas.matmul as _tb_matmul
+# `tritonblas.matmul` is the FUNCTION (re-exported in __init__.py); we need
+# the module to monkey-patch its module-global frozenset.  Import it
+# explicitly via importlib so we don't pick up the shadowed name.
+_tb_matmul = importlib.import_module("tritonblas.matmul")
+assert hasattr(_tb_matmul, "_K1880_SKINNY_KCOMPL_N320_N352_N416_ROUTEOUT_51"), (
+    "tritonblas.matmul module missing _K1880_..._ROUTEOUT_51 — "
+    "import resolved to the wrong object (the function shadow?)"
+)
 
 
 # K-1880 P38 admit cells (N=416 K-COMPLEMENT, MINUS the P5-aliased

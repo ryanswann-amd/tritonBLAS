@@ -135,6 +135,9 @@ from ._route_predicate import (
     # K-1948 (S-002): three-rung extension above K-1922 P40 — N=608/704/736
     # collapsed into one 50-cell frozenset (P42 N=672 dropped).
     _K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50,
+    # K-1994 (S-002): P45 — N=880 off-by-48 second-member skinny-N
+    # K-COMPLEMENT alias-stack (18 cells; cohort geomean tb_live/hbl=1.438×).
+    _K1994_P45_SKINNY_N880_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -413,6 +416,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-1948 (S-002): P41/P42/P43 wave-misaligned skinny-N extension —
     # one 50-cell frozenset (N=608/704/736); single O(1) hash lookup.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50: return True
+    # K-1994 (S-002): P45 (35th-slot) skinny-N N=880 K-COMPLEMENT alias-stack
+    # — 18 cells (full M ∈ {2048,4096,8192} × N=880 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16}; off-by-48 second-member residue family above K-1978 P45
+    # N=816).  K-1994 paired n=30 HIP-graph hot-cache verification: cohort
+    # geomean tb/hbl = 1.438×, 17/18 strict admit (≥1.05 ∧ CI95-lo > 1.0;
+    # one M=2048,K=4096,bf16 noise-tied cell at 1.003× included at 0.66%
+    # dispatcher overhead per K-1956 full-cohort precedent).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1994_P45_SKINNY_N880_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

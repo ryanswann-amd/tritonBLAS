@@ -3475,3 +3475,25 @@ _K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50 = frozenset(
                (4096, 608, 4096, "torch.float16"),
                (2048, 704, 4096, "torch.bfloat16")})
 assert len(_K1948_P41_P43_SKINNY_N608_704_736_KCOMPL_ALIASSTACK_50) == 50
+
+# K-1994 (S-002): P45 (35th-slot) — N=880 wave-misaligned skinny-N K-COMPLEMENT
+# alias-stack — 18 cells (full M ∈ {2048,4096,8192} × N=880 × K ∈ {4096,8192,16384}
+# × {bf16,fp16} grid).  N=880 mod 64 = 48 — second member of the off-by-48
+# residue family above K-1978 P45 N=816 (first member).  K-1994 paired n=30
+# HIP-graph hot-cache verification (MI300X gfx942 ROCm 7.2 / Torch 2.10.0,
+# native c42 mgmt-node `.42` SSH-route on node e06u37 / job 13453,
+# 2026-05-09): cohort geomean tb_live/hbl=1.438× (range 1.003-1.799×),
+# AFTER tb_p45/hbl=0.996× (dispatcher overhead floor; max 1.0066, well
+# under 5% no-regression gate); 17/18 strict admit (≥1.05 ∧ CI95-lo > 1.0;
+# the single (M=2048, K=4096, bf16) noise-tied cell at 1.003× is included
+# at 0.66% dispatcher overhead per K-1956 full-cohort precedent).
+# Sibling-N firewall disjoint by construction with every prior K-COMPLEMENT
+# alias-stack slot.  Slot-collision with K-1978 P45 N=816 (off-by-48 first
+# member) — must arbitrate at PR-stack-rebase time per R-K1853 / R-K1910;
+# K-1994 should arguably get its own slot (e.g. P46) since K-1978 already
+# claims P45 against `fix/K-1963 53a61e8` oracle base.
+_K1994_P45_SKINNY_N880_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 880, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+assert len(_K1994_P45_SKINNY_N880_KCOMPL_ALIASSTACK_18) == 18

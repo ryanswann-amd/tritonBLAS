@@ -3461,3 +3461,26 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2088 (S-002): P51 (40th-slot relative to fix/K-1922 base; 8th-rung in the
+# off-by-48 mod-64=48 ladder) skinny_N1264 K-COMPLEMENT alias-stack — 18-cell
+# envelope (M ∈ {2048,4096,8192} × N=1264 × K ∈ {4096,8192,16384} × {bf16,fp16}).
+# Wave-misaligned off-by-48 modular class (1264 mod 64 = 48; 1264 mod 128 = 112
+# ⇒ packs into 9 full BLOCK_N=128 tiles + 1 BN=112 tail; same mod-128=112
+# alternate-tail sub-family as N=880/1008/1136).  Closed-form residue predicate
+# (N % 64 == 48) AND (816 <= N <= 1264) covers the entire ladder origin
+# K-1978 P45 N=816 through this 8th rung (8 admitted N values: 816, 880, 944,
+# 1008, 1072, 1136, 1200, 1264 — every off-by-48 N in [816, 1264]).
+# K-2088 paired n=30 HIP-graph hot-cache 3-engine bench (TB BEFORE / hipBLASLt /
+# rocBLAS + TB AFTER) on c42 MI300X gfx942 ROCm 7.2 / PyTorch 2.10.0 vs LIVE
+# fix/K-1922 oracle (HEAD 0024a71).  Mirrors the K-2055 P48 N=1136 / K-2047 P48
+# N=1072 / K-2043 P48 N=1072 ladder pattern.  Sibling-N firewall disjoint by
+# construction with every prior K-COMPLEMENT alias-stack slot (no shared N).
+_K2088_P51_SKINNY_N1264_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1264, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2088_p51_skinny_n1264_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

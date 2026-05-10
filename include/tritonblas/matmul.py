@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from ._route_predicate import route_to_hbl as _k971_route_to_hbl
 
 
 
@@ -404,6 +405,14 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-1938 / K-1926 — wave-misaligned skinny-N K-COMPLEMENT alias-stack:
+    # for verified-winner shapes (currently the P41 N=608 slot), route to
+    # hipBLASLt rather than the persistent-matmul path.  See
+    # ``_route_predicate.py`` for the per-cell frozenset and methodology.
+    if not enable_streamk and _k971_route_to_hbl(M, N, K, a.dtype, b.dtype):
+        torch.matmul(a, b, out=out)
+        return out
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +469,12 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-1938 / K-1926 — wave-misaligned skinny-N K-COMPLEMENT alias-stack
+    # (see ``_matmul``).  Mirror the dispatch decision in the out= path.
+    if not enable_streamk and _k971_route_to_hbl(M, N, K, a.dtype, b.dtype):
+        torch.matmul(a, b, out=out)
+        return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

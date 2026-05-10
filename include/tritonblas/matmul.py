@@ -156,6 +156,21 @@ from ._route_predicate import (
     # off-by-48 ladder rungs.  Naturally disjoint with every prior slot
     # (no shared N).
     _K2052_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18,
+    # K-2066 (S-002): P49 (39th-slot) skinny_N1136 K-COMPLEMENT alias-stack —
+    # 18-cell envelope (M ∈ {2048,4096,8192} × N=1136 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned
+    # 6th rung (1136 mod 64 = 48; 1136 mod 128 = 112 — same mod-128 class
+    # as K-2031 P47 N=1008, complementing the (mod 128 = 48) rungs P45/P46/P48
+    # which separated wave-lane mismatch from the BLOCK_N=128 packing tail).
+    # K-2066 paired n=30 HIP-graph hot-cache MI300X / gfx942 vs live
+    # post-K-2052 oracle (fix/K-2052 HEAD 2664b8b): BEFORE cohort geomean
+    # tb/hbl matches the K-2052-extended curve-fit `1 + 335/N` plateau
+    # (1 + 335/1136 ≈ 1.295×) within ±5 % noise band.  K-2044 closed-form
+    # predicate upper bound now extends to (816 ≤ N ≤ 1136) AND
+    # (N % 64 == 48).  Mirrors the K-1978 / K-1994 / K-2010 / K-2031 /
+    # K-2052 off-by-48 ladder rungs.  Naturally disjoint with every prior
+    # slot (no shared N).
+    _K2066_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -441,6 +456,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # cohort geomean tb/hbl ≈ 1.31× per the K-2031 curve-fit `1+335/N` plateau;
     # mirrors K-1978/K-1994/K-2010/K-2031 off-by-48 ladder).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2052_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18: return True
+    # K-2066 (S-002): P49 (39th-slot) skinny_N1136 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 6th-rung; 1136 mod 64 = 48, mod 128 = 112; BEFORE
+    # cohort geomean tb/hbl ≈ 1.30× per the K-2031/K-2052 curve-fit `1+335/N` plateau;
+    # K-2044 closed-form upper bound now (816 ≤ N ≤ 1136); mirrors K-1978/K-1994/
+    # K-2010/K-2031/K-2052 off-by-48 ladder).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2066_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

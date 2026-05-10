@@ -3514,3 +3514,35 @@ _K2052_P48_SKINNY_N1072_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2052_p48_skinny_n1072_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2066 (S-002): P49 (39th-slot) skinny_N1136 K-COMPLEMENT alias-stack —
+# 18-cell envelope (M ∈ {2048,4096,8192} × N=1136 × K ∈ {4096,8192,16384}
+# × {bf16,fp16}).  Wave-misaligned off-by-48 (mod 64) modular class
+# (1136 mod 64 = 48; 1136 mod 128 = 112 ⇒ packs into 8 full BLOCK_N=128
+# tiles + 1 BN=112 tail = 7/8-tile tail).  6th confirmed rung in the
+# (mod 64 = 48) residue family above K-1978 P45 N=816, K-1990/K-1994 P45
+# N=880, K-2010/K-2028 P46 N=944, K-2031/K-2041 P47 N=1008, and K-2052
+# P48 N=1072 (1136 = 1072 + 64 — next 64-stride rung in the off-by-48
+# class).  N=1136's mod-128 residue (=112) returns to the same
+# packing-tail class as K-2031 P47 N=1008, again disambiguating the
+# (mod 64 = 48) wave-lane mismatch from the BLOCK_N=128 packing tail
+# (the family now spans both mod-128 classes 4-rung × {48}, 2-rung × {112}).
+# K-2066 paired n=30 HIP-graph hot-cache MI300X gfx942 ROCm 7.2 / PyTorch
+# 2.10.0+rocm7.2.0 vs LIVE post-K-2052 oracle (fix/K-2052 HEAD 2664b8b,
+# itself off fix/K-2031 2a8c0e0): 18-cell BEFORE cohort geomean TB/HBL
+# matches the K-2052-extended curve-fit `1 + 335/N` plateau (1 + 335/1136
+# ≈ 1.295×) within ±5 % noise band.  K-2044 closed-form predicate upper
+# bound now extends to (816 ≤ N ≤ 1136) AND (N % 64 == 48).  Mirrors the
+# K-1978 / K-1994 / K-2010 / K-2031 / K-2052 ladder pattern.  Sibling-N
+# firewall disjoint by construction with every prior K-COMPLEMENT
+# alias-stack slot (no shared N).  Promoted as explicit alias-stack
+# literal until the K-1908 S1-form compact predicate is extended above
+# N=384 in a separate task.
+_K2066_P49_SKINNY_N1136_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1136, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2066_p49_skinny_n1136_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

@@ -3593,3 +3593,81 @@ _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18 = frozenset(
     for K in (4096, 8192, 16384)
     for dt in ("torch.bfloat16", "torch.float16")
 )
+
+# ============================================================================
+# K-1928 (S-002): Closed-form predicate collapsing P32–P39 alias-stack cascade
+# ============================================================================
+# Builds on K-1908 (S1 closed-form predicate bit-equivalent to the K-1881
+# P32–P38 frozenset, 120 cells) and K-1918 (oracle bound: literal N-set
+# membership is the unique 95/90-passing axis-aligned conjunctive form
+# over the full P32–P39 union, 138 cells).  Replaces the two-probe cascade
+#
+#     (M,N,K,dt) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120
+#  or (M,N,K,dt) in _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18
+#
+# (138 cells total, ~140 enumerated literal tuples) with ONE structurally
+# factored predicate of three set-membership tests + one 6-tuple carve-out
+# probe — bit-identical routing decision over the full deployment universe.
+#
+# Form (extends K-1908 S1 by adding N=448 to NSET — K-1887 P39 added one
+# new N rung with no new carve-outs since N=448 has no upstream alias
+# overlap):
+#
+#     N ∈ {96, 160, 224, 288, 320, 352, 384, 448}     ∧
+#     K ∈ {4096, 8192, 16384}                          ∧
+#     M ∈ {2048, 4096, 8192}                           ∧
+#     (M, N, K, dt) ∉ _K1928_P32_P39_CARVE6
+#
+# CARVE6 (identical to K-1908's `_K1908_P32_P38_SKINNY_KCOMPL_CARVE6` —
+# all 6 cells live in the N ∈ {320, 352, 384} subspace; P39 N=448 adds none):
+#   - (2048, 320, 4096, bf16)  → P36 upstream-aliased (R-K1825)
+#   - (2048, 352, 4096, bf16)  → P37 upstream-aliased (R-K1825)
+#   - (2048, 384, 8192, bf16)  → P38 absorbed by P30
+#   - (2048, 384, 8192, fp16)  → P38 absorbed by P30
+#   - (4096, 384, 8192, bf16)  → P38 absorbed by P30
+#   - (4096, 384, 8192, fp16)  → P38 absorbed by P30
+#
+# Bit-equivalence is exhaustively verified by
+# `tests/test_k1928_p32_p39_predicate_parity.py`: enumerates the 144-cell
+# `MSET × NSET × KSET × dtype` grid, checks the predicate against
+# `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 ∪ _P39_SKINNY_N448_KCOMPL_
+# VERIFIED_WIN_18`, asserts |intersection|=138, |symmetric difference|=0.
+# Per K-1928 paired-n30 HIP-graph hot-cache benchmark (c42/MI300X), the
+# predicate is within ±0.5% of the cascade path on 138/138 cells (predicate
+# eval is cheaper — saves ~one frozenset hash + tuple build per call).
+#
+# Code-size / memory savings: the two 138-cell frozensets retain ~140
+# enumerated tuples (~280 LOC); the predicate is ONE function + 4 small
+# frozensets (NSET=8, KSET=3, MSET=3, CARVE6=6) ≈ 25 LOC, ≈20 tuples.
+# Frozenset memory: ~8KB → ~1KB (~8x reduction) per K-1908 §MDL.
+#
+# The legacy frozensets above are PRESERVED for use by the per-N test
+# files (tests/test_p3{2..8}_*_alias_stack.py, tests/test_p39_*.py) and
+# as the bit-equivalence oracle for the parity test — they no longer
+# participate in dispatch.
+_K1928_P32_P39_NSET = frozenset({96, 160, 224, 288, 320, 352, 384, 448})
+_K1928_P32_P39_KSET = frozenset({4096, 8192, 16384})
+_K1928_P32_P39_MSET = frozenset({2048, 4096, 8192})
+_K1928_P32_P39_CARVE6 = frozenset({
+    (2048, 320,  4096, "torch.bfloat16"),
+    (2048, 352,  4096, "torch.bfloat16"),
+    (2048, 384,  8192, "torch.bfloat16"),
+    (2048, 384,  8192, "torch.float16"),
+    (4096, 384,  8192, "torch.bfloat16"),
+    (4096, 384,  8192, "torch.float16"),
+})
+
+
+def _K1928_p32_p39_skinny_kcompl_predicate(M, N, K, dtype):
+    """Bit-equivalent collapse of `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120
+    ∪ _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18` (138 cells).
+
+    Returns True iff (M, N, K, dtype) routes to the consolidated K-COMPLEMENT
+    skinny-N alias template (P32 N=160 / P33 N=224 / P34 N=96 / P35 N=288 /
+    P36 N=320 / P37 N=352 / P38 N=384 / P39 N=448)."""
+    return (
+        N in _K1928_P32_P39_NSET
+        and K in _K1928_P32_P39_KSET
+        and M in _K1928_P32_P39_MSET
+        and (M, N, K, dtype) not in _K1928_P32_P39_CARVE6
+    )

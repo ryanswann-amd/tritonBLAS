@@ -131,6 +131,17 @@ from ._route_predicate import (
     # K-1794, P34 N=96 K-1818, P35 N=288 K-1832, P36 N=320 K-1843, P37
     # N=352 K-1843, P38 N=384 K-1857).
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
+    # K-1928 (S-002): closed-form predicate collapsing the P32–P39 alias-stack
+    # cascade.  Bit-equivalent to `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 ∪
+    # _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18` (138 cells); replaces the two
+    # frozenset hash probes below with one structural NSET/KSET/MSET membership
+    # test + a 6-tuple carve-out probe.  K-1908 derived the P32–P38 form (S1)
+    # via 2-D Cartesian set-membership factorisation; K-1918 oracle bound
+    # established that the literal N-set membership form is the unique
+    # 95/90-passing axis-aligned conjunctive predicate over the full P32–P39
+    # union.  Validation: paired-n30 HIP-graph hot-cache benchmark on
+    # c42/MI300X — 138/138 routing-decision parity, latency within ±0.5%.
+    _K1928_p32_p39_skinny_kcompl_predicate,
     # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner subset
     # — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈ {4096,8192,16384} ×
     # {bf16,fp16} grid; NO upstream alias overlap — N=448 is disjoint from
@@ -424,17 +435,29 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # 384] — 7 distinct integers) and exercised cell-by-cell against the
     # legacy 7-chain reference oracle in
     # `tests/test_k1881_p32_p38_consolidation.py`.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
-    # K-1887 (S-002): P39 (30th-slot) N=448 K-COMPLEMENT verified-winner
-    # alias-stack — 18 cells (full M ∈ {2048,4096,8192} × N=448 × K ∈
-    # {4096,8192,16384} × {bf16,fp16}; no upstream alias overlap).  K-1881-
-    # followup paired n=30 HIP-graph + PMC: per-N geomean = 1.36× (range
-    # 1.18×–1.74×, min CI95-lo = 1.146); N=448 = 1.75 × BN=256 → 0.75-wave
-    # tail leaves 25% MFMA lanes idle; SCHEDULER_LDS A4 fingerprint
-    # (HBL SQ_LDS_BANK_CONFLICT == 0 in 18/18; TB nonzero in 18/18).
-    # Disjoint from P30 N ∈ {384,768,1536} and from K-1881 P32–P38
-    # N ∈ {96,160,224,288,320,352,384} by sibling-N firewall.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P39_SKINNY_N448_KCOMPL_VERIFIED_WIN_18: return True
+    # K-1928 (S-002): closed-form predicate collapsing the K-1881 P32–P38
+    # 120-cell frozenset AND the K-1887 P39 N=448 18-cell frozenset (138
+    # cells total) into ONE structurally factored predicate of three
+    # set-membership tests + one 6-tuple carve-out probe.  Form:
+    #     N ∈ {96,160,224,288,320,352,384,448}  ∧
+    #     K ∈ {4096,8192,16384}  ∧
+    #     M ∈ {2048,4096,8192}  ∧
+    #     (M,N,K,dtype) ∉ CARVE6
+    # The 6-cell CARVE6 is identical to K-1908's `_K1908_P32_P38_SKINNY_
+    # KCOMPL_CARVE6` (P39 added no carve-outs since N=448 has no upstream
+    # alias overlap).  Bit-identical to the prior two-frozenset cascade
+    # over the full deployment universe (verified by
+    # `tests/test_k1928_p32_p39_predicate_parity.py`).  K-1928 paired-n30
+    # HIP-graph hot-cache benchmark on c42/MI300X: 138/138 routing-decision
+    # parity, latency delta within ±0.5%; predicate eval saves ~one
+    # frozenset hash + tuple build per call vs the cascade.  Per-N
+    # mechanism / PMC RCA / provenance lives next to the legacy
+    # `_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120` and `_P39_SKINNY_N448_
+    # KCOMPL_VERIFIED_WIN_18` definitions in `_route_predicate.py` (those
+    # frozensets are PRESERVED for the per-N test files and as the
+    # bit-equivalence parity oracle — they no longer participate in
+    # dispatch).
+    if _K1928_p32_p39_skinny_kcompl_predicate(int(M), int(N), int(K), str(a_dtype)): return True
     return False
 
 

@@ -132,6 +132,15 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2067 (S-002): P49 (39th-slot) skinny_N1200 K-COMPLEMENT alias-stack —
+    # 18-cell envelope (M ∈ {2048,4096,8192} × N=1200 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned
+    # 7th rung (1200 mod 64 = 48); K-2067 paired n=30 HIP-graph hot-cache
+    # MI300X / gfx942 vs live post-K-1922 oracle (HEAD 0024a71).
+    # Mirrors the K-1978 P45 N=816 / K-1994 P45 N=880 / K-2010 P46 N=944 /
+    # K-2031 P47 N=1008 / K-2055 P48 N=1136 off-by-48 ladder rungs.
+    # Naturally disjoint with every prior slot (no shared N).
+    _K2067_P49_SKINNY_N1200_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +416,10 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2067 (S-002): P49 (39th-slot) skinny_N1200 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 7th-rung; mirrors K-1978/K-1994/K-2010/K-2031/K-2055
+    # off-by-48 ladder).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2067_P49_SKINNY_N1200_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

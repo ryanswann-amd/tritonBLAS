@@ -3461,3 +3461,29 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2111 (S-002): P53 (the 10th rung of the off-by-48 wave-misaligned
+# skinny-N K-COMPLEMENT residue family) skinny_N1392 alias-stack —
+# 18-cell envelope (M ∈ {2048, 4096, 8192} × N=1392 × K ∈ {4096, 8192,
+# 16384} × dtype ∈ {bf16, fp16}).  Off-by-48 ladder above the prior 9
+# confirmed rungs N ∈ {816, 880, 944, 1008, 1072, 1136, 1200, 1264, 1328}
+# (K-1978 / K-1994 / K-2010 / K-2031 / K-2047 / K-2055 / K-2067 (P49) /
+# K-2085 (P50, P51) / K-2097 (P52)), all with (N mod 64) == 48.
+# N=1392 mod 64 == 48 and N=1392 mod 128 == 112 — same off-tail
+# sub-family as N ∈ {880, 1008, 1136, 1264} (R-1811 wave-misalignment +
+# K-913 §3 LDS-bank-conflict mechanism, dtype-invariant).  Step +64
+# from the K-2097 P52 rung at N=1328.
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
+# slot (N=1392 ∉ any prior frozenset).  Single-N frozenset (per-rung
+# tracking; matches K-1978…K-2097 single-N convention).  +2 executable
+# LOC additive (1 import + 1 membership check) within the K-1922
+# 30-LOC dispatcher budget.
+_K2111_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1392, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2111_p53_skinny_n1392_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

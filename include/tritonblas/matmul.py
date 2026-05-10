@@ -132,6 +132,13 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2111 (S-002): P53 skinny_N1392 K-COMPLEMENT alias-stack — 18 cells
+    # (M ∈ {2048,4096,8192} × N=1392 × K ∈ {4096,8192,16384} × {bf16,fp16}).
+    # 10th contiguous rung of the off-by-48 wave-misaligned residue family
+    # above N ∈ {816, 880, 944, 1008, 1072, 1136, 1200, 1264, 1328}; step +64
+    # from the K-2097 P52 rung at N=1328.  N=1392 mod 128 == 112 places it
+    # in the off-tail sub-family with N ∈ {880, 1008, 1136, 1264}.
+    _K2111_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +414,10 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2111 (S-002): P53 skinny_N1392 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 10th rung above K-2097 P52 N=1328; off-tail
+    # sub-family at N mod 128 == 112, sibling to N ∈ {880, 1008, 1136, 1264}).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2111_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

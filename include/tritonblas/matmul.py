@@ -155,7 +155,7 @@ from ._route_predicate import (
     # K-1857 / K-1880 (S-002): P38 N=384 K-COMPLEMENT — 14 cells (18-cohort
     # minus 4 K-1748 P30 overlap cells); per-N geomean=1.283× (K-1857).
     _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14,
-    _P40_SKINNY_N544_KCOMPL_VERIFIED_WIN_17,
+    _P39_SKINNY_N544_KCOMPL_VERIFIED_WIN_17,
 )
 
 
@@ -507,18 +507,23 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-1857 paired n=30 HIP-graph + PMC: per-N geomean=1.283×; N=384 = 1.5 × BN=256
     # → 50% MFMA lanes idle on tail half-wave; SCHEDULER_LDS A4 fingerprint.
     if (int(M), int(N), int(K), str(a_dtype)) in _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14: return True
-    # K-1910 (S-002): P40 (30th-slot if K-1904 redo lands non-empty P39, else
-    # 29th-slot atop the realised 29-slot stack) N=544 K-COMPLEMENT verified-
-    # winner subset — 17 cells (18-cohort minus 1 R-K979 P5 Clause-1 mid-rect
-    # alias cell at (2048,544,4096,bf16) — TB and HBL run the same hipBLASLt
-    # kernel on that cell so it is upstream-aliased).  K-1910 paired n=30 HIP-
-    # graph + 3-pass rocprofv2 PMC: cohort geomean=1.571× (range 1.004×-2.153×);
-    # admit-only geomean=1.612×.  N=544 wave-misaligned (544 mod 128 = 32);
+    # K-1910 (S-002): P39 (30th-slot atop the realised 29-slot stack ending at
+    # P38; if a future K-1904 redo lands a non-empty P39 N=512 slot, this would
+    # renumber to P40 — frozenset and dispatch insertion point are byte-
+    # identical either way).  Canonical: K-1904 produced 0 verified winners
+    # (cohort geomean 0.999×), so the realised stack remains 29 slots ending
+    # at P38 and the next available label is P39.  N=544 K-COMPLEMENT
+    # verified-winner subset — 17 cells (18-cohort minus 1 R-K979 P5 Clause-1
+    # mid-rect alias cell at (2048,544,4096,bf16) — TB and HBL run the same
+    # hipBLASLt kernel on that cell so it is upstream-aliased).  K-1910
+    # paired n=30 HIP-graph + 3-pass rocprofv2 PMC: cohort geomean=1.571×
+    # (range 1.004×-2.153×); admit-only geomean=1.612× (bf16=1.636×,
+    # fp16=1.592×).  N=544 wave-misaligned (544 mod 128 = 32);
     # SQ_LDS_BANK_CONFLICT TB nonzero in 18/18, SQ_WAIT_INST_LDS TB/HBL median
     # ~9× (peak 28×), SQ_INSTS_MFMA per wave TB/HBL = 0.50 (pipe starved by
     # LDS waits, not over-issued); SCHEDULER_LDS A4 fingerprint per K-1843 /
     # K-1853 / K-1857 / K-1873 / K-1881 / K-1888 / K-1897.
-    if (int(M), int(N), int(K), str(a_dtype)) in _P40_SKINNY_N544_KCOMPL_VERIFIED_WIN_17: return True
+    if (int(M), int(N), int(K), str(a_dtype)) in _P39_SKINNY_N544_KCOMPL_VERIFIED_WIN_17: return True
     return False
 
 

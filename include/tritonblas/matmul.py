@@ -159,11 +159,10 @@ from ._route_predicate import (
     # (mod-64=48, mod-128=112).  Disjoint with every prior slot (no shared
     # N).  Branched off fix/K-2183@9375e7a.
     _K2214_P58_SKINNY_N1776_KCOMPL_ALIASSTACK_10,
-    # K-2229 (S-002): P59 skinny_N1840 K-COMPLEMENT alias-stack — 18-cell
-    # 16th-rung extension of the off-by-48 wave-misaligned ladder
-    # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared
-    # N).  Branched off fix/K-2214@163c3f8.
-    _K2229_P59_SKINNY_N1840_KCOMPL_ALIASSTACK_18,
+    # Skinny_N1840 K-COMPLEMENT alias-stack — 18-cell 16th-rung extension
+    # of the off-by-48 wave-misaligned ladder (mod-64=48, mod-128=48).
+    # Disjoint with every prior slot (no shared N).
+    _SKINNY_N1840_RESIDUE48_HBL_ROUTE,
 )
 
 
@@ -481,15 +480,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # per N-row); mod-128=112 subclass admits identically per K-2150
     # R-K2150.MOD-64-IS-BINDING.
     if (int(M), int(N), int(K), str(a_dtype)) in _K2214_P58_SKINNY_N1776_KCOMPL_ALIASSTACK_10: return True
-    # K-2229 (S-002): P59 skinny_N1840 K-COMPLEMENT alias-stack — next +64
-    # contiguous rung above K-2214 P58 N=1776 in the off-by-48 ladder
-    # (816/880/944/1008/1072/1136/1200/1264/1328/1392/1456/1584/1648/1712/1776 → 1840).
+    # Skinny_N1840 K-COMPLEMENT alias-stack — next +64 contiguous rung
+    # above N=1776 in the off-by-48 ladder
+    # (544/816/880/944/1008/1072/1136/1200/1264/1328/1392/1456/1584/1648/1712/1776 → 1840).
     # 18 cells (M ∈ {2048,4096,8192} × N=1840 × K ∈ {4096,8192,16384} ×
-    # {bf16,fp16}) — full canonical envelope per K-2209 18-cell verification.
+    # {bf16,fp16}) — full canonical envelope per upstream verification.
     # Same off-by-48 wave-misalignment mechanism as every prior rung
     # (BLOCK_N=128 → 14.375 fractional tiles per N-row); mod-128=48
-    # subclass admits identically per K-2150 R-K2150.MOD-64-IS-BINDING.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2229_P59_SKINNY_N1840_KCOMPL_ALIASSTACK_18: return True
+    # subclass admits identically (only mod-64==48 binds).
+    if (int(M), int(N), int(K), str(a_dtype)) in _SKINNY_N1840_RESIDUE48_HBL_ROUTE: return True
     return False
 
 

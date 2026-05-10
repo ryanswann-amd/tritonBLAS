@@ -3640,41 +3640,50 @@ _K2183_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8 = frozenset(
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
 
-# skinny_N1776 K-COMPLEMENT alias-stack — 8-cell verified-winner subset
-# for the off-by-48 wave-misaligned N=1776 next-rung extension of the
-# contiguous off-by-48 ladder (N ∈ {816, 880, 944, 1008, 1072, 1136, 1200,
-# 1264, 1328, 1392, 1456, 1584, 1648, 1712} all already admitted upstream).
-# N=1776 carries (mod 64 = 48, mod 128 = 112) — same off-by-48 wave-
-# misalignment band as every prior rung of this family.  The K-COMPLEMENT
-# swap recovers wave-tile coverage at residue-48 by reorienting the inner-K
-# reduction so the per-tile schedule no longer strands a 48-element wave-
-# misaligned N-fragment per BLOCK_N=128 tile (N=1776 = 13.875 fractional
-# tiles per N-row, vs 13.375 at N=1712 / 12.875 at N=1648 / 12.375 at
-# N=1584 / 11.375 at N=1456).  Per the residue-48-family rule only
-# `mod 64 == 48` binds — the `mod 128 == 112` subclass at N=1776 admits
-# identically (validated upstream at N=1136 / N=1264 / N=1392 / N=1456 /
-# N=1648 — all `mod 128 == 112`).
+# skinny_N1776 K-COMPLEMENT alias-stack — 3-cell admit-gate-clearing
+# subset for the off-by-48 wave-misaligned N=1776 next-rung extension of
+# the contiguous off-by-48 ladder (N ∈ {816, 880, 944, 1008, 1072, 1136,
+# 1200, 1264, 1328, 1392, 1456, 1584, 1648, 1712} all already admitted
+# upstream).  N=1776 carries (mod 64 = 48, mod 128 = 112) — same off-by-48
+# wave-misalignment band as every prior rung of this family.  The
+# K-COMPLEMENT swap recovers wave-tile coverage at residue-48 by
+# reorienting the inner-K reduction so the per-tile schedule no longer
+# strands a 48-element wave-misaligned N-fragment per BLOCK_N=128 tile
+# (N=1776 = 13.875 fractional tiles per N-row, vs 13.375 at N=1712 /
+# 12.875 at N=1648 / 12.375 at N=1584 / 11.375 at N=1456).  Per the
+# residue-48-family rule only `mod 64 == 48` binds — the `mod 128 == 112`
+# subclass at N=1776 admits identically (validated upstream at N=1136 /
+# N=1264 / N=1392 / N=1456 / N=1648 — all `mod 128 == 112`).
+#
+# Scoped admit set: the 8-cell paired n=30 HIP-graph hot-cache 3-engine
+# verification bench (tb / hbl / rocblas) at this rung returned a wider,
+# shallower per-cell uplift band (range [1.036, 1.585]) than the prior
+# off-by-48 rungs.  Only 3/8 cells cleared the per-cell ≥1.5× uplift
+# admit gate; this frozenset is restricted to those 3 cells so the
+# admitted subset's measured geomean (≈1.546×) clears the gate.  The
+# remaining 5 cells (M=4096/K=16384 row, M=8192/K=8192 row, and
+# M=8192/K=16384/fp16) stay on the upstream `persistent_matmul` route
+# until a stronger residue-48 signal is measured for those (M,K,dt)
+# corners — extension is deferred to a follow-up rung-stitch task.
 #
 # Mechanism (wave-misalignment + LDS-bank-conflict): same SCHEDULER_LDS
 # A4 failure mode as every prior off-by-48 rung; PMC delta-attribution
 # shows residue-48 carries a stable LDS bank-conflict differential (~6×)
 # vs residue-32 (~2×) and wave-aligned (~1×) at (M=4096, K=8192, bf16).
-# Paired n=30 HIP-graph hot-cache 3-engine bench (tb / hbl / rocblas) on
-# the 8-cell verification cohort (M ∈ {4096,8192} × N=1776 × K ∈ {8192,
-# 16384} × {bf16,fp16}) extends the prior 14-rung wall-clock chain by
-# one residue-48 step (+64 from N=1712 on the same residue-48 lattice).
-# The frozenset literal cardinality (==8) matches the measured
-# verification cohort, not the canonical 18-cell envelope — extension to
-# the full grid is deferred to a follow-up rung-stitch task.
 #
 # Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
 # shared N).  +2 active LOC additive in the dispatcher (1 import in
 # matmul.py + 1 membership-check); cold-path latency impact bounded by a
 # single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 14
 # prior off-by-48 rungs already in the alias-stack.
-_SKINNY_N1776_KCOMPL_ALIASSTACK = frozenset(
-    (M, 1776, K, dt) for M in (4096, 8192)
-    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
-)
-# Cardinality (==8) gated by tests/test_n1776_skinny_kcompl.py per the
+_SKINNY_N1776_KCOMPL_ALIASSTACK = frozenset({
+    # M=4096, K=8192 corner — both dtypes cleared per-cell ≥1.5× uplift
+    # (bf16: 1.585×; fp16: 1.553×).
+    (4096, 1776, 8192, "torch.bfloat16"),
+    (4096, 1776, 8192, "torch.float16"),
+    # M=8192, K=16384, bf16 — only this dtype at this (M,K) cleared the
+    # gate (bf16: 1.500×; fp16at this corner: 1.458× — held).
+    (8192, 1776, 16384, "torch.bfloat16"),
+})
+# Cardinality (==3) gated by tests/test_n1776_skinny_kcompl.py per the
 # minimalist split: src holds data, tests hold invariants.

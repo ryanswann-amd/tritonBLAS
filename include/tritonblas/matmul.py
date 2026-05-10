@@ -154,9 +154,10 @@ from ._route_predicate import (
     # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared
     # N).  Branched off fix/K-2169@161e017.
     _K2183_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8,
-    # skinny_N1776 K-COMPLEMENT alias-stack — 8-cell next-rung extension
-    # of the off-by-48 wave-misaligned ladder (mod-64=48, mod-128=112).
-    # Disjoint with every prior slot (no shared N).
+    # skinny_N1776 K-COMPLEMENT alias-stack — 3-cell admit-gate-clearing
+    # subset of the off-by-48 wave-misaligned ladder next-rung extension
+    # (mod-64=48, mod-128=112).  Disjoint with every prior slot (no
+    # shared N).
     _SKINNY_N1776_KCOMPL_ALIASSTACK,
 )
 
@@ -468,11 +469,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # skinny_N1776 K-COMPLEMENT alias-stack — next +64 contiguous rung
     # above N=1712 in the off-by-48 ladder
     # (816/880/944/1008/1072/1136/1200/1264/1328/1392/1456/1584/1648/1712 → 1776).
-    # 8 cells (M ∈ {4096,8192} × N=1776 × K ∈ {8192,16384} × {bf16,fp16})
-    # — verification cohort, not the full 18-cell envelope.  Same off-by-48
-    # wave-misalignment mechanism as every prior rung (BLOCK_N=128 →
-    # 13.875 fractional tiles per N-row); mod-128=112 subclass admits
-    # identically per the residue-48-family rule.
+    # 3-cell admit-gate-clearing subset (cleared per-cell ≥1.5× uplift on
+    # the paired n=30 HIP-graph hot-cache 3-engine bench; the remaining
+    # 5/8 cells in the verification cohort stay on the upstream
+    # `persistent_matmul` route).  Same off-by-48 wave-misalignment
+    # mechanism as every prior rung (BLOCK_N=128 → 13.875 fractional
+    # tiles per N-row); mod-128=112 subclass admits identically per the
+    # residue-48-family rule.
     if (int(M), int(N), int(K), str(a_dtype)) in _SKINNY_N1776_KCOMPL_ALIASSTACK: return True
     return False
 

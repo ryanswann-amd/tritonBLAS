@@ -132,6 +132,14 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2097 (S-002): P52 skinny_N1328 K-COMPLEMENT alias-stack — 18 cells
+    # (M ∈ {2048,4096,8192} × N=1328 × K ∈ {4096,8192,16384} × {bf16,fp16}).
+    # 9th contiguous rung of the off-by-48 wave-misaligned residue family
+    # above N ∈ {816, 880, 944, 1008, 1072, 1136, 1200, 1264}; pre-validated
+    # by K-2072 16-cell residue-48 sweep at TB-BEFORE / hipBLASLt 1.748×
+    # (bf16) / 1.745× (fp16) at M=4096, K=8192.  N=1328 mod 128 == 48 places
+    # it in the canonical-tail sub-family with N ∈ {816, 944, 1072, 1200}.
+    _K2097_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +415,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2097 (S-002): P52 skinny_N1328 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned 9th rung above K-2085 P51 N=1264; K-2072
+    # 16-cell residue-48 sweep TB-BEFORE / hipBLASLt 1.748× at M=4096,
+    # K=8192 — strongly admit-eligible at the ≥1.10× gate).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2097_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

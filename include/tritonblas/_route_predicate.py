@@ -3461,3 +3461,35 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2097 (S-002): P52 (the 9th rung of the off-by-48 wave-misaligned
+# skinny-N K-COMPLEMENT residue family) skinny_N1328 alias-stack —
+# 18-cell envelope (M ∈ {2048, 4096, 8192} × N=1328 × K ∈ {4096, 8192,
+# 16384} × dtype ∈ {bf16, fp16}).  Off-by-48 ladder above the prior 8
+# confirmed rungs N ∈ {816, 880, 944, 1008, 1072, 1136, 1200, 1264}
+# (K-1978 / K-1994 / K-2010 / K-2031 / K-2047 / K-2055 / K-2085 P50 /
+# K-2085 P51), all with (N mod 64) == 48.  N=1328 mod 64 == 48 and
+# N=1328 mod 128 == 48 — same canonical-tail sub-family as N ∈ {816,
+# 944, 1072, 1200} (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict
+# mechanism).  Step +64 from the K-2085 P51 rung at N=1264.
+#
+# K-2072's 16-cell residue-48 sweep (N ∈ {1328..1776}, M=4096, K=8192)
+# pre-validated this rung at TB-BEFORE / hipBLASLt 1.748× (bf16) / 1.745×
+# (fp16) — both strongly admit-eligible at the ≥1.10× gate.  K-2097
+# extends to the full M ∈ {2048, 4096, 8192} × K ∈ {4096, 8192, 16384}
+# 18-cell grid for production promotion, matching the K-2055 P48 N=1136
+# 18-cell envelope convention (rather than the K-2085 12-cell envelope —
+# K=4096 retained here because the task spec explicitly enumerates
+# K ∈ {4096, 8192, 16384} for the 9th-rung confirmation sweep).
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
+# slot (N=1328 ∉ any prior frozenset).  Single-N frozenset (per-rung
+# tracking; matches K-1978…K-2055 / K-2085 single-N convention).
+_K2097_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1328, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2097_p52_skinny_n1328_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

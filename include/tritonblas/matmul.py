@@ -132,6 +132,14 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2147 (S-002): P55 (44th-slot) skinny_N1520 K-COMPLEMENT alias-stack
+    # — 18-cell verified-winner subset (M ∈ {2048,4096,8192} × N=1520 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16} grid).  Off-by-48 wave-misaligned
+    # 11th rung (1520 mod 64 = 48); paired n=30 HIP-graph hot-cache MI300X
+    # gfx942 vs live post-K-1922 P40 oracle.  Naturally disjoint with every
+    # prior slot (no shared N).  Promoted as explicit alias-stack until the
+    # K-1908 S1-form compact predicate closed-form is extended.
+    _K2147_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +415,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2147 (S-002): P55 (44th-slot) skinny_N1520 K-COMPLEMENT alias-stack
+    # — 18 cells (full M ∈ {2048,4096,8192} × N=1520 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16} grid; off-by-48 wave-misaligned 11th rung; closes the
+    # ladder by one more contiguous rung past K-2127 N=1456 P54).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2147_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

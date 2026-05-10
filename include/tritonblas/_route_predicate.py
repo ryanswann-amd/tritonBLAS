@@ -3592,3 +3592,54 @@ _K2169_P56_SKINNY_N1648_KCOMPL_ALIASSTACK_8 = frozenset(
 # Cardinality (==8) gated by tests/test_k2169_p56_n1648_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2178 (S-002): P57 (next-position) skinny_N1712 K-COMPLEMENT alias-stack —
+# 8-cell verified-winner subset for the off-by-48 wave-misaligned N=1712
+# **14th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46 N=944),
+# K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48 N=1072),
+# K-2055/K-2060/K-2063/K-2066 (P49 N=1136), K-2071/K-2075/K-2077/K-2085
+# (P50 N=1200), K-2071/K-2085/K-2091 (P51 N=1264), K-2092/K-2101/K-2106
+# (P52 N=1328), K-2107 (P53 N=1392), K-2127 (P54 N=1456), K-2158 (P55
+# N=1584), and K-2169 (P56 N=1648).  N=1712 carries (mod 64 = 48,
+# mod 128 = 48) — sibling phase of N=816/1200/1584 (the (mod-128 == 48)
+# sub-class of the off-by-48 family); the (mod-64 == 48) wave-misalignment
+# invariant continues unbroken from rung 1 (P45 N=816) — 14 contiguous
+# +64 N steps, all wave_count_fraction == 0.75.
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict +
+# F-K2169.K-AXIS-AMPLIFICATION-PEAKS): BLOCK_N=128 packs N=1712 into
+# 13.375 BLOCK_N tiles per N-row (cf. N=1648's 12.875 / N=1584's 12.375
+# / N=1456's 11.375 — same fractional-tile A4 SCHEDULER_LDS failure
+# pattern as every prior off-by-48 rung).  K-2061 PMC delta-attribution
+# (residue-48 ~6x LDS-BC differential vs residue-32 ~2x) and the K-2169
+# 13th-rung wall-clock measurement establish the saturation plateau
+# referenced by K-2179.  K-2178 extends the ladder by one rung
+# (next residue-48 step at +64 = 1648+64 = 1712); per-cell uplift
+# verified at n=30 paired HIP-graph hot-cache, 3-engine bench (TB / HBL /
+# rocBLAS) — task-spec verification cohort, not the full 18-cell envelope.
+#
+# K-2178 measurement (M ∈ {4096,8192} × K ∈ {8192,16384} × {bf16,fp16},
+# 8 cells, MI300X / OCI useocpm2m-097-033, 2026-05-10):
+#     cohort geomean tb/hbl BEFORE = 1.5060×  → AFTER = 0.9898×  (uplift 1.5215×)
+#     8/8 cells admit, peak M=4096 K=8192 bf16 = 1.6206× → 0.9917× (uplift 1.6341×)
+#     rocBLAS/HBL ≈ 1.005× (HBL ≈ rocBLAS on this stack; LT-confound rule-out)
+#     PMC (M=4096 K=16384 bf16 K-axis peak):
+#       SQ_WAIT_INST_LDS  −84.0%  (1.038e9 → 1.665e8) — wave-misalignment cure
+#       SQ_INSTS_VALU     −22.1%  (1.969e9 → 1.534e9) — MFMA-tile compute efficiency
+#       SQ_BUSY_CYCLES    −60.1%  (1.418e9 → 5.655e8)
+#       Kernel: persistent_matmul → Cijk_Ailk_Bljk_..._MT192x128x64_MI16x16x1
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 13
+# prior off-by-48 rungs already in the alias-stack.
+_K2178_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8 = frozenset(
+    (M, 1712, K, dt) for M in (4096, 8192)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==8) gated by tests/test_k2178_p57_n1712_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).
+

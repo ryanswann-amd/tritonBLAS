@@ -137,5 +137,68 @@ def test_dispatcher_uses_predicate_not_cascade():
     )
 
 
+# ----------------------------------------------------------------------------
+# Explicit per-cell negatives — these prevent silent regressions where a
+# future N-rung promotion (e.g. P40 N=512) might widen NSET and accidentally
+# capture cells that DO NOT belong to the K-COMPLEMENT skinny alias-stack.
+# Each assertion has a meaningful per-cell message — bulk `assert all(...)`
+# would lose the failing cell identity.
+# ----------------------------------------------------------------------------
+@pytest.mark.parametrize("M,N,K,dtype,reason", [
+    # N out of NSET (off-rung) — P30/wide territory or unmapped:
+    (2048, 128,  4096, "torch.bfloat16", "N=128 not in NSET (off-rung)"),
+    (4096, 128,  8192, "torch.float16",  "N=128 not in NSET (off-rung)"),
+    (2048, 192,  4096, "torch.bfloat16", "N=192 not in NSET (between rungs)"),
+    (8192, 256,  4096, "torch.bfloat16", "N=256 not in NSET (off-rung)"),
+    (2048, 512,  4096, "torch.bfloat16", "N=512 not in NSET (P40 territory)"),
+    (4096, 768,  8192, "torch.bfloat16", "N=768 belongs to P30 alias-stack"),
+    (2048, 1536, 8192, "torch.bfloat16", "N=1536 belongs to P30 alias-stack"),
+    # K out of KSET (K-complement axis):
+    (2048, 320,  2048, "torch.bfloat16", "K=2048 not in KSET (skinny-K, P30)"),
+    (4096, 384,  2048, "torch.float16",  "K=2048 not in KSET (skinny-K, P30)"),
+    (2048, 224, 32768, "torch.bfloat16", "K=32768 not in KSET (super-K)"),
+    # M out of MSET (batch axis):
+    (1024, 320,  4096, "torch.bfloat16", "M=1024 not in MSET (small-batch)"),
+    (1024, 384,  8192, "torch.float16",  "M=1024 not in MSET (small-batch)"),
+    (16384, 224, 4096, "torch.bfloat16", "M=16384 not in MSET (large-batch)"),
+    (512,  160,  4096, "torch.bfloat16", "M=512 not in MSET (small-batch)"),
+])
+def test_predicate_explicit_out_of_grid_negatives(M, N, K, dtype, reason):
+    """Predicate must reject cells outside the {NSET × KSET × MSET} grid.
+
+    Each cell is labelled with the axis-violation reason so a future
+    regression points at the offending dimension."""
+    cell = (M, N, K, dtype)
+    assert not _K1928_p32_p39_skinny_kcompl_predicate(*cell), (
+        f"K-1928 predicate unexpectedly accepted out-of-grid cell {cell}: "
+        f"{reason}.  This usually means a P-slot promotion silently widened "
+        f"NSET/KSET/MSET — re-litigate before landing."
+    )
+    assert cell not in ORACLE_138, (
+        f"Live cascade oracle contains supposedly-negative cell {cell}: "
+        f"{reason}.  Test assumption is wrong; update the oracle reference."
+    )
+
+
+@pytest.mark.parametrize("cell", sorted(
+    {(2048, 320,  4096, "torch.bfloat16"),
+     (2048, 352,  4096, "torch.bfloat16"),
+     (2048, 384,  8192, "torch.bfloat16"),
+     (2048, 384,  8192, "torch.float16"),
+     (4096, 384,  8192, "torch.bfloat16"),
+     (4096, 384,  8192, "torch.float16")}))
+def test_predicate_each_carve6_cell_individually(cell):
+    """Each CARVE6 cell ASSERTED INDIVIDUALLY (not bulk) — failure prints
+    the offending tuple identity, not just a count."""
+    assert not _K1928_p32_p39_skinny_kcompl_predicate(*cell), (
+        f"CARVE6 cell {cell} unexpectedly routed via K-1928 predicate "
+        f"(P30/upstream owns this cell — predicate must defer)."
+    )
+    assert cell not in ORACLE_138, (
+        f"CARVE6 cell {cell} is present in the live cascade oracle — "
+        f"provenance drift; re-derive carve-out set before landing."
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

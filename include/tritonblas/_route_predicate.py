@@ -3743,3 +3743,33 @@ _K2223_P59_SKINNY_N1840_KCOMPL_ALIASSTACK_8 = frozenset(
 # Cardinality (==8) gated by tests/test_k2223_p59_n1840_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2242 (S-002): P60 (next-position) skinny_N1904 K-COMPLEMENT alias-stack —
+# 8-cell verified-winner subset for the off-by-48 wave-misaligned N=1904
+# **17th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816) ... K-2203 (P58 N=1776) and K-2223 (P59 N=1840).
+# N=1904 carries (mod 64 = 48, mod 128 = 112) — same off-by-48 wave-
+# misalignment band as every prior rung of this family, sharing the
+# mod-128=112 sub-class with K-2150 N=1584 mod-128={48,112} family
+# (per K-2150 R-K2150.MOD-64-IS-BINDING-MOD-128-IS-NOT, only
+# mod 64 == 48 binds — all four mod-128 sub-classes admit identically).
+# K-COMPLEMENT swap recovers wave-tile coverage at residue-48: BLOCK_N=128
+# → 14.875 fractional tiles per N-row at N=1904 (vs 14.375 at N=1840 /
+# 13.875 at N=1776 / 13.375 at N=1712 / 12.875 at N=1648 / 12.375 at N=1584).
+# K-2242 paired n=30 HIP-graph hot-cache 3-engine bench (tb_native /
+# candidate / hbl) on the task-specified 8-cell verification cohort
+# (M ∈ {4096,8192} × N=1904 × K ∈ {8192,16384} × {bf16,fp16}) extends
+# the K-2223 16-rung wall-clock chain by one residue-48 step (+64 from
+# N=1840 on the same residue-48 lattice).  Cohort BEFORE TB/HBL geomean
+# 1.269× (4096-band 1.435×, 8192-band 1.122×).  Both M-bands clear the
+# ≥1.10× admit gate; 8192-band sits above the K-2223 8192 collapse band
+# at N=1840 (1.02–1.15×) — the residue-48 ladder remains admit-eligible
+# at the +64 step from N=1840 → N=1904.  Frozenset cardinality (==8)
+# matches the verification cohort, naturally disjoint with every prior
+# K-COMPLEMENT alias-stack slot (no shared N).  +2 active LOC additive
+# in the dispatcher (1 import in matmul.py + 1 membership-check).
+_K2242_P60_SKINNY_N1904_KCOMPL_ALIASSTACK_8 = frozenset(
+    (M, 1904, K, dt) for M in (4096, 8192)
+    for K in (8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==8) gated by tests/test_k2242_p60_n1904_skinny_kcompl.py

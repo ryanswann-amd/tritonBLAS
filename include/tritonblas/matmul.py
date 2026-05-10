@@ -132,6 +132,10 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2107 (S-002): P53 skinny_N1392 K-COMPLEMENT alias-stack — 18-cell
+    # 9th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=80).  Disjoint with every prior slot (no shared N).
+    _K2107_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +411,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2107 (S-002): P53 skinny_N1392 K-COMPLEMENT alias-stack — 9th rung
+    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
+    # 1264/1328 → 1392).  18 cells (M ∈ {2048,4096,8192} × N=1392 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-misalignment
+    # mechanism as every prior rung (BLOCK_N=128 → 10.875 fractional tiles).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2107_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

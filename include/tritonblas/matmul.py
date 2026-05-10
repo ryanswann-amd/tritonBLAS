@@ -132,6 +132,18 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-1956 (S-002): P41 (31st-slot) skinny_N608 K-COMPLEMENT alias-stack —
+    # 18-cell verified-winner subset (M ∈ {2048,4096,8192} × N=608 ×
+    # K ∈ {4096,8192,16384} × {bf16,fp16}).  Wave-misaligned rung
+    # (608 mod 64 = 32 — same off-by-32-mod-64 band as K-1922 P40 N=544);
+    # K-1938 paired n=30 HIP-graph hot-cache MI300X / gfx942 vs live
+    # post-K-1922 oracle: 18/18 admit at strict ratio<0.95 ∧ Wilcoxon+Holm
+    # q<0.05 gate.  Naturally disjoint with every prior slot (no shared N).
+    # Promoted as explicit alias-stack until the K-1908 S1-form compact
+    # predicate is extended to N>384 in a separate task; K-1937 / K-1942
+    # depth-3/depth-4 closed-form searches both failed at ≥0.98
+    # bit-equivalence and are NOT retried here.
+    _K1956_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +419,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-1956 (S-002): P41 (31st-slot) skinny_N608 K-COMPLEMENT alias-stack
+    # — 18 cells (full M ∈ {2048,4096,8192} × N=608 × K ∈ {4096,8192,16384}
+    # × {bf16,fp16} grid; no upstream-aliased exclusions at this off-band
+    # rung).  K-1938 paired n=30 verification: 18/18 admit at strict
+    # ratio<0.95 ∧ Wilcoxon+Holm q<0.05 gate.  Sibling-N firewall disjoint
+    # by construction with every prior K-COMPLEMENT alias-stack slot
+    # (P40 N=544 sibling sits one wave-misalignment rung below; both rungs
+    # share the off-by-32-mod-64 band but differ on BLOCK_N=128 alignment).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K1956_P41_SKINNY_N608_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

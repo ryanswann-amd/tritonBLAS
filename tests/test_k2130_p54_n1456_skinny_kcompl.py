@@ -45,13 +45,21 @@ R-1720 / R-1775):
      the single excluded bf16 corner; both rows remain strictly load-bearing.
   5. The excluded cell is exactly (M=2048, N=1456, K=16384, bf16) — pinned
      by an explicit non-membership assertion so a silent re-admit (e.g. via
-     a careless edit dropping the `if not (...)` clause) is caught at test
-     time.
-  6. Sibling-N firewall vs every prior K-COMPLEMENT alias-stack at a
+     a careless edit re-adding the dropped tuple to the literal frozenset)
+     is caught at test time.
+  6. Positive-membership critical-path assertions on a representative
+     spread of admitted cells (one bf16 + one fp16 per M-axis value,
+     spanning the K-axis) so a silent contraction of the literal tuple
+     list is caught from the inside, not just the outside.
+  7. Sibling-N firewall vs every prior K-COMPLEMENT alias-stack at a
      different N (P28 N=128, P29 N=64, P30 N ∈ {384, 768, 1536}, P31
      N=256, the consolidated P32–P38 N ∈ {96, 160, 224, 288, 320, 352,
      384}, K-1367/K-1397 P13 N ∈ {128, 256}, and K-1922 P40 N=544).
-  7. Off-by-48 wave-misalignment band membership: 1456 mod 64 == 48
+  8. Sibling-N firewall vs the adjacent rungs of THIS off-by-48 ladder
+     (N=1392 prior K-2107 rung, N=1520 next +64 step) — both share the
+     `N mod 64 == 48` residue class as N=1456, so a band-keyed typo would
+     not be caught by mod-64 / N-axis assertions alone.
+  9. Off-by-48 wave-misalignment band membership: 1456 mod 64 == 48
      (same residue class as the 9 prior rungs of this contiguous
      ladder — distinct N-axis rung, same mechanism).
 """
@@ -105,11 +113,60 @@ def test_dtype_row_balance_8_over_9():
 
 def test_excluded_cell_is_explicit_lt_confound_corner():
     """The single excluded cell is exactly (M=2048, N=1456, K=16384, bf16)
-    — the LT-confound corner where the bench measured TB-AFTER/HBL = 1.1054×
-    co-confirmed by rocBLAS at 1.1115× HBL on the same cell.  This invariant
-    catches a silent re-admit (e.g. via a careless edit that removes the
-    `if not (...)` clause in the frozenset comprehension)."""
+    — the LT-confound corner (rationale lives in REPORT.md, not the
+    dispatcher hot path).  This invariant catches a silent re-admit (e.g.
+    via a careless edit that re-adds the dropped tuple to the literal
+    frozenset)."""
     assert EXCLUDED_CELL not in FZ
+
+
+def test_positive_membership_admitted_cells():
+    """Positive critical-path assertion: every admitted cell of the 17-cell
+    envelope must literally be in FZ.  Pin a few representative cells (one
+    per M-axis value, both dtypes, spanning the K-axis) so a future edit
+    that silently drops a cell from the literal tuple list — for example,
+    deleting the wrong row by accident — is caught at test time rather
+    than as a silent route-OUT regression on production traffic."""
+    # Spot-check coverage: one bf16 + one fp16 per M, spanning K-axis.
+    admitted = [
+        (2048, 1456,  4096, "torch.bfloat16"),
+        (2048, 1456,  8192, "torch.float16"),
+        (4096, 1456,  8192, "torch.bfloat16"),
+        (4096, 1456, 16384, "torch.float16"),
+        (8192, 1456,  4096, "torch.bfloat16"),
+        (8192, 1456, 16384, "torch.float16"),
+        # The (M=2048, K=16384, fp16) cell is the dtype-twin of the
+        # excluded bf16 corner — admitted (fp16 is not LT-confounded
+        # at this corner) and explicitly pinned so the dtype-row
+        # asymmetry stays load-bearing in BOTH directions.
+        (2048, 1456, 16384, "torch.float16"),
+    ]
+    for cell in admitted:
+        assert cell in FZ, f"admitted cell {cell} missing from FZ"
+
+
+def test_sibling_n_firewall_vs_n1392_and_n1520():
+    """Sibling-N firewall on the off-by-48 ladder itself: the immediately
+    adjacent rungs N=1392 (the prior K-2107 P53 rung) and N=1520 (the next
+    +64 step) must NOT appear in the K-2130 envelope.  Both share the same
+    `N mod 64 == 48` residue class as N=1456, so a band-keyed typo (e.g.
+    accidentally substituting one band-mate N-literal for another) would
+    not be caught by mod-64 / N-axis-set assertions alone — only an
+    explicit non-membership assertion against the adjacent rungs catches
+    it.  This locks the 17-cell envelope from BOTH directions: positive
+    membership (admitted cells in) above, and band-mate N-firewall (sibling
+    N out) here."""
+    sibling_ns = (1392, 1520)
+    for sibling_n in sibling_ns:
+        assert sibling_n % 64 == 48, (
+            f"sibling N={sibling_n} must be in the off-by-48 band for this "
+            f"firewall test to be load-bearing")
+        for M in (2048, 4096, 8192):
+            for K in (4096, 8192, 16384):
+                for dt in ("torch.bfloat16", "torch.float16"):
+                    assert (M, sibling_n, K, dt) not in FZ, (
+                        f"sibling-N cell {(M, sibling_n, K, dt)} leaked "
+                        f"into the K-2130 N=1456 envelope")
 
 
 def test_envelope_equals_full_n1456_kcompl_grid_minus_excluded():

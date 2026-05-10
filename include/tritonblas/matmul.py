@@ -135,10 +135,6 @@ from ._route_predicate import (
     # K-2130 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 17-cell
     # 10th-rung extension of the off-by-48 wave-misaligned ladder
     # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared N).
-    # Excludes the (M=2048, K=16384, bf16) corner where the bench measured
-    # AFTER/HBL = 1.1054× co-confirmed by rocBLAS at 1.1115× HBL — the cell
-    # fails the strict all-cells-AFTER ≥ 0.95× HBL gate so it is dropped
-    # rather than admitted on a "bench-variance" hand-wave.
     _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_17,
 )
 
@@ -417,13 +413,9 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
     # K-2130 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 10th rung
     # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
-    # 1264/1328/1392 → 1456).  17 admitted cells (M ∈ {2048,4096,8192} ×
-    # N=1456 × K ∈ {4096,8192,16384} × {bf16,fp16} minus the single corner
-    # (M=2048, K=16384, bf16) where the bench measured AFTER/HBL = 1.1054×
-    # co-confirmed by rocBLAS at 1.1115× HBL — explicitly excluded so the
-    # strict all-cells-AFTER ≥ 0.95× HBL admit gate passes honestly).  Same
-    # off-by-48 wave-misalignment mechanism as every prior rung (BLOCK_N=128
-    # → 11.375 fractional tiles).
+    # 1264/1328/1392 → 1456).  17 admitted cells; same off-by-48 wave-
+    # misalignment mechanism as every prior rung (BLOCK_N=128 → 11.375
+    # fractional tiles).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_17: return True
     return False
 

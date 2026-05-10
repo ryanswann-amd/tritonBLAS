@@ -2447,6 +2447,13 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
+    # K-2118 P54: skinny_N1456 K-COMPLEMENT alias-stack 18-cell strict-equality
+    # -> hipBLASLt.  10th rung of the off-by-48 wave-misaligned residue family
+    # (step +64 above K-2111 P53 N=1392, anchored at the N=816 floor).
+    # Mirrors the matmul.py final clause; no upstream route in this helper
+    # carries N=1456 so the check is order-independent at the tail.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18:
+        return True
     return False
 
 
@@ -3459,5 +3466,38 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
     for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
 )
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).
+
+
+# K-2118 (S-002): P54 (the 10th rung of the off-by-48 wave-misaligned
+# skinny-N K-COMPLEMENT residue family) skinny_N1456 alias-stack —
+# 18-cell envelope (M ∈ {2048, 4096, 8192} × N=1456 × K ∈ {4096, 8192,
+# 16384} × dtype ∈ {bf16, fp16}).  Off-by-48 ladder anchored at the
+# N=816 floor (rung k = 816 + k*64); N=1456 = 816 + 10*64 → k=10.  The 9
+# prior rungs k ∈ {1..9} are N ∈ {880, 944, 1008, 1072, 1136, 1200, 1264,
+# 1328, 1392}, contiguously confirmed across K-1978 / K-1994 / K-2010 /
+# K-2031 / K-2047 / K-2055 / K-2067 / K-2085 P50 / K-2085 P51 / K-2097 P52
+# / K-2111 P53.  All 11 ladder N values (floor + 10 rungs) satisfy
+# (N mod 64) == 48.  N=1456 mod 64 == 48 and N=1456 mod 128 == 48
+# — REJOIN to the canonical-tail sub-family shared with N ∈ {816, 944,
+# 1072, 1200, 1328} (vs the off-tail sub-family at N mod 128 == 112,
+# N ∈ {880, 1008, 1136, 1264, 1392}).  Step +64 from the K-2111 P53 rung
+# at N=1392 — continues the strict 48/112/48/112/48/112/48/112/48/112/48
+# mod-128 alternation across the residue-48 ladder (a mechanical
+# consequence of stride-64 sampling of a mod-128 axis: each +64 step
+# toggles the high bit of the residue-48 BLOCK_N tail).  R-1811
+# wave-misalignment + K-913 §3 LDS-bank-conflict mechanism, dtype-invariant.
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
+# slot (N=1456 ∉ any prior frozenset).  Single-N frozenset (per-rung
+# tracking; matches K-1978…K-2111 single-N convention).  +2 executable
+# LOC additive (1 import + 1 membership check) within the K-1922
+# 30-LOC dispatcher budget.
+_K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1456, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2118_p54_skinny_n1456_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).

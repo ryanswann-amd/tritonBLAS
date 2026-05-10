@@ -116,20 +116,10 @@ from ._route_predicate import (
     # {bf16,fp16} minus 2 paired-n30 LOSER cells at (2048, 256, 2048, *)).
     _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28,
     # K-1881 (S-002): consolidated P32–P38 K-COMPLEMENT verified-winner
-    # alias-stack — ONE 120-cell frozenset replacing what would otherwise
-    # be 7 chained per-slot checks (P32 N=160 / P33 N=224 / P34 N=96 /
-    # P35 N=288 / P36 N=320 / P37 N=352 / P38 N=384).  Extends the K-1864
-    # 5-slot consolidation in-place to absorb the two newer K-COMPLEMENT
-    # promotions before they could re-fragment the dispatcher into a
-    # 7-probe chain.  Cells are inlined as literal tuples (single source
-    # of truth) in `_route_predicate.py`; the legacy per-slot named
-    # frozensets (`_P3{2..8}_..._WIN_{14,17,18}`) survive there ONLY as
-    # N-axis projection views consumed by `tests/test_p3{2..8}_*_alias_
-    # stack.py` — the dispatcher never references them.  Per-slot
-    # mechanism / PMC RCA / provenance lives next to the canonical
-    # inlined block in `_route_predicate.py` (P32 N=160 K-1794, P33 N=224
-    # K-1794, P34 N=96 K-1818, P35 N=288 K-1832, P36 N=320 K-1843, P37
-    # N=352 K-1843, P38 N=384 K-1857).
+    # alias-stack — ONE 120-cell frozenset replacing what would be a 7-probe
+    # chain (N ∈ {96,160,224,288,320,352,384}). Extends K-1864 in-place to
+    # absorb P37 (N=352, K-1868) + P38 (N=384, K-1880); see audit and
+    # per-slot provenance inline in `_route_predicate.py`.
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
 )
 
@@ -395,25 +385,9 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≥1.05 ∧ p<0.05 gate; the 2 (M=2048, K=2048) LOSER cells are excluded).
     if (int(M), int(N), int(K), str(a_dtype)) in _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28: return True
     # K-1881 (S-002): consolidated P32–P38 K-COMPLEMENT verified-winner
-    # alias-stack lookup — ONE membership probe over a single 120-cell
-    # frozenset (cells inlined as literal tuples in `_route_predicate.py`)
-    # replacing what would otherwise be a chain of 7 back-to-back probes
-    # (P32 N=160 / P33 N=224 / P34 N=96 / P35 N=288 / P36 N=320 /
-    # P37 N=352 / P38 N=384).  Extends the K-1864 5-slot consolidation in
-    # place to absorb the K-1868 P37 + K-1880 P38 promotions before they
-    # could re-fragment the dispatcher.  Worst-case dispatch stays at
-    # O(1) hash lookup + 1 tuple build per call (vs the 7-probe
-    # alternative), halting the chain-growth pattern at this position
-    # for future PMC promotions.
-    #
-    # Bit-identical routing equivalence vs the 7-chain hypothetical is
-    # an algebraic identity (`x in (A1 ∪ … ∪ A7)` ≡ `any(x in Ai)` for
-    # disjoint Python sets); empirical disjointness of the 7 N-axis
-    # projections is enforced by the literal cell roster
-    # (sorted({c[1] for c in canonical}) == [96, 160, 224, 288, 320, 352,
-    # 384] — 7 distinct integers) and exercised cell-by-cell against the
-    # legacy 7-chain reference oracle in
-    # `tests/test_k1881_p32_p38_consolidation.py`.
+    # alias-stack — ONE 120-cell frozenset replacing what would be a
+    # 7-probe chain (N ∈ {96,160,224,288,320,352,384}).  O(1) hash lookup
+    # vs O(7); equivalence pinned by tests/test_k1881_p32_p38_consolidation.py.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
     return False
 

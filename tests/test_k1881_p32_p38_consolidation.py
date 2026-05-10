@@ -1,48 +1,24 @@
 """K-1881 (S-002) — P32–P38 alias-stack frozenset consolidation tests.
 
-Audit context: extends the K-1864 P32–P36 consolidation in-place to absorb
-the two newer K-COMPLEMENT route-out promotions (P37 N=352 / K-1868 ex
-K-1843, and P38 N=384 / K-1880 ex K-1857) before they could re-fragment
-``_k971_route_to_hbl()`` into a 7-probe chain.  K-1881 collapses what
-would be 7 chained ``frozenset`` membership checks (P32–P38) into ONE
-membership probe over a single 120-cell frozenset
-(``_K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120``) whose admit cells are
-inlined as literal tuples in ``_route_predicate.py`` (single source of
-truth).
+Extends K-1864 in-place to absorb P37 (N=352, K-1868) + P38 (N=384, K-1880).
+ONE 120-cell frozenset replaces the would-be 7-probe chain.
 
-The full production roster at this branch is **120 cells** at
-N ∈ {96, 160, 224, 288, 320, 352, 384} = 18+18+18+18+17+17+14 = 120.
-The full roster is enumerated cell-by-cell as ``ALL_PROMOTED_CELLS``
-below — the source of truth for the bit-identical-routing replay
-against the legacy 7-chain reference oracle.
+Roster: N ∈ {96, 160, 224, 288, 320, 352, 384} = 18+18+18+18+17+17+14 = 120.
+The "missing" cells (vs the PRD's ~125 estimate) are the 6 upstream-aliased
+exclusions enforced by ``test_upstream_aliased_exclusions_are_preserved``.
 
-Invariants pinned by this file (per the minimalist split convention
-R-1532 / R-1720 / R-1775 — source holds data, tests hold structural
-invariants):
-
-  1. The canonical 120-cell roster is exactly the literal cells
-     enumerated here (any silent expansion, contraction, or tuple-shape
-     drift fires).
-  2. The 7 per-slot N-axis projection views derived in
-     ``_route_predicate.py`` each return the expected sub-cardinality
-     (P32=18 / P33=18 / P34=18 / P35=18 / P36=17 / P37=17 / P38=14).
-  3. Pairwise disjointness is empirical (not a relabelled set): the
-     actual N-axis projection of the canonical roster is exactly the 7
-     distinct integers {96, 160, 224, 288, 320, 352, 384}, so per-slot
-     views cannot overlap.
-  4. **Bit-identical routing replay**: for every cell in
-     ``ALL_PROMOTED_CELLS`` AND every cell in a hostile-shape control
-     sample (cells that should NOT route via P32–P38), the consolidated
-     single-frozenset lookup returns the SAME verdict as the legacy
-     7-chain reference oracle ``_chained_7frozenset_lookup_PRE_K1881``.
-     This is the load-bearing contract: dispatcher behaviour must be
-     byte-for-byte preserved across the consolidation.
-  5. The 6 explicit cell-level exclusions are preserved (per R-K1825.
-     CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST):
-       * (2048, 320, 4096, bf16) — P36 upstream parity-band
-       * (2048, 352, 4096, bf16) — P37 upstream parity-band
-       * (2048, 384, 8192, {bf16,fp16}) — P38 P30-overlap
-       * (4096, 384, 8192, {bf16,fp16}) — P38 P30-overlap
+Invariants:
+  1. Canonical roster equals literal ``ALL_PROMOTED_CELLS`` (silent expansion
+     or contraction fires).
+  2. Per-slot N-axis projection cardinalities (18/18/18/18/17/17/14).
+  3. Bit-identical routing replay: consolidated lookup == legacy 7-chain
+     oracle on full roster + hostile-shape sample.
+  4. The 6 upstream-aliased exclusions stay absent (parametrised).
+  5. Predicate-audit boundary cases — the rejected compact predicates
+     ``A: N%64!=0 ∧ N≤384 ∧ K≥4096`` and ``B: N%128!=0 ∧ N≤384 ∧ K≥4096``
+     would silently mis-route specific cells; those cells are pinned in
+     ``test_predicate_audit_boundary_*`` so the audit's NO-PREDICATE
+     conclusion becomes an enforced invariant rather than an offline note.
 """
 from __future__ import annotations
 
@@ -464,9 +440,77 @@ def test_upstream_aliased_exclusions_are_preserved(cell):
     """The 6 upstream-aliased cells excluded from P36/P37/P38 per
     R-K1825.CHECK-ALIAS-STACK-COVERAGE-MAP-FIRST MUST remain absent from
     the consolidated roster, otherwise the consolidation would silently
-    re-introduce duplicate routing."""
+    re-introduce duplicate routing.  These boundary cells are exactly the
+    cells the predicate-audit (output/k1881_predicate_audit.txt) called
+    out as the disqualifier of any compact-predicate substitution — the
+    rejected predicates would silently admit them and route LOSER cells
+    down the WRONG kernel path (R-K1825 violation).  Pinning them as
+    parametrised invariants here promotes the offline audit's
+    boundary-case conclusions to enforced regressions."""
     assert cell not in CONSOLIDATED, (
         f"upstream-aliased exclusion cell {cell} leaked back into the "
         f"K-1881 canonical roster — duplicate routing would result"
     )
     assert cell not in ALL_PROMOTED_CELLS
+
+
+# ---------------------------------------------------------------------------
+# 6. Predicate-audit boundary cases — these cells are why no compact
+#    predicate substitutes for the literal frozenset.  Each entry pins
+#    one of the failure modes documented in
+#    output/k1881_predicate_audit.txt against silent regression.
+# ---------------------------------------------------------------------------
+
+
+def _predicate_a(M, N, K, dt): return (N % 64 != 0) and (N <= 384) and (K >= 4096)
+def _predicate_b(M, N, K, dt): return (N % 128 != 0) and (N <= 384) and (K >= 4096)
+
+
+# (cell, predicate-A admits?, predicate-B admits?, in canon?, failure-mode)
+PREDICATE_AUDIT_BOUNDARIES = (
+    # parity-band LOSERS — predicate-B silently admits, canon excludes:
+    ((2048, 320, 4096, "torch.bfloat16"), False, True,  False, "B-admits-LOSER"),
+    ((2048, 352, 4096, "torch.bfloat16"), True,  True,  False, "AB-admit-LOSER"),
+    # P30-alias overlaps — both predicates AND canon agree (canon-excludes):
+    ((2048, 384, 8192, "torch.bfloat16"), False, False, False, "all-exclude"),
+    ((4096, 384, 8192, "torch.float16"),  False, False, False, "all-exclude"),
+    # canon-INCLUDES that predicate-A would silently DROP (N=320, N=384 ≡ 0 mod 64):
+    ((4096, 320, 4096, "torch.bfloat16"), False, True,  True,  "A-drops-WIN"),
+    ((8192, 384, 4096, "torch.float16"),  False, False, True,  "AB-drop-WIN-N384"),
+    # canon-EXCLUDES at N rungs predicate-B would over-admit (N=64, N=192):
+    ((2048,  64, 4096, "torch.bfloat16"), False, True,  False, "B-over-admits-N64"),
+    ((4096, 192, 8192, "torch.float16"),  False, True,  False, "B-over-admits-N192"),
+)
+
+
+@pytest.mark.parametrize("cell,pa,pb,in_canon,mode", PREDICATE_AUDIT_BOUNDARIES)
+def test_predicate_audit_boundary_canon_membership(cell, pa, pb, in_canon, mode):
+    """Pin the 8 boundary cells that justify rejecting the compact
+    predicate (per output/k1881_predicate_audit.txt).  This makes the
+    audit's exclusion conclusions an enforced regression: any future
+    refactor that swaps the literal frozenset for one of the rejected
+    predicates will fire here at the cell granularity, not as a generic
+    routing-drift hit."""
+    assert (cell in CONSOLIDATED) is in_canon, (
+        f"predicate-audit boundary cell {cell} (mode={mode}): expected "
+        f"in-canon={in_canon}, got {cell in CONSOLIDATED}"
+    )
+
+
+@pytest.mark.parametrize("cell,pa,pb,in_canon,mode", PREDICATE_AUDIT_BOUNDARIES)
+def test_predicate_audit_boundary_predicate_disagreement(cell, pa, pb, in_canon, mode):
+    """For each boundary cell, confirm that at least one of the rejected
+    predicates disagrees with the canonical set.  This locks the
+    "no-predicate-substitutes" conclusion: if a future engineer claims a
+    compact predicate matches canon, this test fails on the very cells
+    that disprove it."""
+    M, N, K, dt = cell
+    assert _predicate_a(M, N, K, dt) is pa, f"pred-A on {cell}"
+    assert _predicate_b(M, N, K, dt) is pb, f"pred-B on {cell}"
+    if mode != "all-exclude":
+        # mode != "all-exclude" implies at least one predicate disagrees with canon
+        assert (pa != in_canon) or (pb != in_canon), (
+            f"boundary cell {cell} (mode={mode}) does NOT actually expose "
+            f"a predicate-vs-canon disagreement — audit is wrong or boundary "
+            f"is mislabelled"
+        )

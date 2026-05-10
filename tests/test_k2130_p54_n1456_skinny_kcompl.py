@@ -6,8 +6,15 @@ sub-cohort M ∈ {2048, 4096, 8192} × N=1456 × K ∈ {4096, 8192, 16384} ×
 {bf16, fp16}, branched off the LIVE oracle base
 ryanswann-amd/tritonBLAS:fix/K-1922@0024a71.
 
-Result: 18/18 cells gate-pass at the relaxed ≥1.05 ∧ p<0.05 floor; admit
-gate (cohort AFTER ≥ 1.0× HBL ∧ no individual cell < 0.95× HBL) PASS.
+Result: 17/18 cells gate-pass at the strict admit gate (AFTER ≤ 1.0526× HBL
+∧ no individual cell < 0.95× HBL).  The single non-admit corner (M=2048,
+K=16384, bf16) measured AFTER/HBL = 1.1054× — co-confirmed by rocBLAS at
+1.1115× HBL on the SAME cell (so it is an LT-confound on the host hipBLASLt
+path, not a TB-AFTER regression) — but is excluded from the routed set per
+the explicit reviewer mandate to either re-bench with higher n to disprove
+variance or shrink the frozenset to 17 cells; the latter path is taken
+here so the strict admit gates pass honestly without a hand-wave.
+
 N=1456 is the 10th contiguous rung of the off-by-48 wave-misaligned ladder
 (816/880/944/1008/1072/1136/1200/1264/1328/1392 → 1456) — same residue
 class (N mod 64 == 48) as every prior rung; mod-128 lands on 48 (the 6th
@@ -29,17 +36,22 @@ Invariants pinned in this file (cardinality lives here per the minimalist
 split: source holds data, tests hold structural invariants — R-1532 /
 R-1720 / R-1775):
 
-  1. Cardinality is exactly 18 (full grid; no upstream-aliased exclusions).
+  1. Cardinality is exactly 17 (full-grid 18 minus the explicitly-excluded
+     LT-confound corner (M=2048, K=16384, bf16)).
   2. N axis is exactly {1456}.
   3. M ∈ {2048, 4096, 8192}; K ∈ {4096, 8192, 16384};
      dtype ∈ {torch.bfloat16, torch.float16}.
-  4. Both dtype rows are complete 9/9 (off-band N=1456 has no R-K979 P5
-     Clause-3 bf16 alias — strictly load-bearing on both rows).
-  5. Sibling-N firewall vs every prior K-COMPLEMENT alias-stack at a
+  4. Dtype-row balance is 8/9 (bf16 has 8 cells, fp16 has 9), reflecting
+     the single excluded bf16 corner; both rows remain strictly load-bearing.
+  5. The excluded cell is exactly (M=2048, N=1456, K=16384, bf16) — pinned
+     by an explicit non-membership assertion so a silent re-admit (e.g. via
+     a careless edit dropping the `if not (...)` clause) is caught at test
+     time.
+  6. Sibling-N firewall vs every prior K-COMPLEMENT alias-stack at a
      different N (P28 N=128, P29 N=64, P30 N ∈ {384, 768, 1536}, P31
      N=256, the consolidated P32–P38 N ∈ {96, 160, 224, 288, 320, 352,
      384}, K-1367/K-1397 P13 N ∈ {128, 256}, and K-1922 P40 N=544).
-  6. Off-by-48 wave-misalignment band membership: 1456 mod 64 == 48
+  7. Off-by-48 wave-misalignment band membership: 1456 mod 64 == 48
      (same residue class as the 9 prior rungs of this contiguous
      ladder — distinct N-axis rung, same mechanism).
 """
@@ -53,16 +65,17 @@ from tritonblas._route_predicate import (
     _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34,
     _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120,
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
-    _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18,
+    _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_17,
     _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28,
 )
 
 
-FZ = _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18
+FZ = _K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_17
+EXCLUDED_CELL = (2048, 1456, 16384, "torch.bfloat16")
 
 
-def test_cardinality_is_18():
-    assert len(FZ) == 18
+def test_cardinality_is_17():
+    assert len(FZ) == 17
 
 
 def test_n_axis_is_skinny_n1456():
@@ -75,34 +88,47 @@ def test_m_k_dtype_axes_are_minimal():
     assert {dt for (_, _, _, dt) in FZ} == {"torch.bfloat16", "torch.float16"}
 
 
-def test_dtype_row_balance():
-    """Both dtype rows complete 9/9.  Off-band N=1456 has no R-K979 P5
-    Clause-3 bf16 alias coverage at this rung; both rows are strictly
-    load-bearing.  K-913 §3 LDS-bank-conflict is dtype-invariant on the
-    column-narrow N=1456 tile (same fingerprint as P53 N=1392, P52 N=1328,
-    P51 N=1264, P50 N=1200 — every prior off-by-48 rung shows balanced
-    bf16/fp16 admit per K-2055 / K-2071 / K-2085 / K-2091 / K-2101 / K-2107)."""
+def test_dtype_row_balance_8_over_9():
+    """Dtype-row balance reflects the single excluded bf16 corner: bf16 has
+    8 cells (3M × 3K - 1 excluded), fp16 has the full 9 cells (3M × 3K).
+    Pin the asymmetry explicitly so a future edit that drops the wrong cell
+    or expands back to 9/9 without re-validating the gate is caught."""
     bf = {(M, N, K) for (M, N, K, dt) in FZ if dt == "torch.bfloat16"}
     fp = {(M, N, K) for (M, N, K, dt) in FZ if dt == "torch.float16"}
-    assert len(bf) == 9
+    assert len(bf) == 8
     assert len(fp) == 9
-    assert bf == fp
+    # The fp16 row covers the full M×K grid; bf16 row is missing exactly
+    # the one excluded (M, K) corner.
+    assert fp - bf == {(2048, 1456, 16384)}
+    assert bf - fp == set()
 
 
-def test_envelope_equals_full_n1456_kcompl_grid():
+def test_excluded_cell_is_explicit_lt_confound_corner():
+    """The single excluded cell is exactly (M=2048, N=1456, K=16384, bf16)
+    — the LT-confound corner where the bench measured TB-AFTER/HBL = 1.1054×
+    co-confirmed by rocBLAS at 1.1115× HBL on the same cell.  This invariant
+    catches a silent re-admit (e.g. via a careless edit that removes the
+    `if not (...)` clause in the frozenset comprehension)."""
+    assert EXCLUDED_CELL not in FZ
+
+
+def test_envelope_equals_full_n1456_kcompl_grid_minus_excluded():
     """The verified-winner envelope is exactly the 18-cell M ∈ {2048,
-    4096,8192} × N=1456 × K ∈ {4096,8192,16384} × {bf16,fp16} grid (no
-    upstream-aliased exclusions at this off-band rung) — pinned to detect
-    any silent contraction (a false-NEGATIVE that would leak winner cells
-    back to TB) or expansion (a false-POSITIVE that would leak non-winner
-    cells out to HBL) of the K-2130 verification envelope."""
+    4096,8192} × N=1456 × K ∈ {4096,8192,16384} × {bf16,fp16} grid MINUS
+    the single LT-confound corner — pinned to detect any silent contraction
+    (a false-NEGATIVE that would leak winner cells back to TB) or expansion
+    (a false-POSITIVE that would re-admit the LT-confound corner) of the
+    K-2130 verification envelope."""
     full = frozenset(
         (M, 1456, K, dt) for M in (2048, 4096, 8192)
         for K in (4096, 8192, 16384)
         for dt in ("torch.bfloat16", "torch.float16")
     )
-    assert FZ == full
-    assert len(full) == 18
+    expected = full - {EXCLUDED_CELL}
+    assert FZ == expected
+    assert len(expected) == 17
+    # Symmetric-difference is exactly the excluded cell.
+    assert (full ^ FZ) == {EXCLUDED_CELL}
 
 
 def test_off_by_48_wave_misalignment_band_membership():

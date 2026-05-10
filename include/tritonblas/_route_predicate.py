@@ -3463,7 +3463,7 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # (R-1532 / R-1720 / R-1775).
 
 # K-2130 (S-002): P54 (next-position) skinny_N1456 K-COMPLEMENT alias-stack —
-# 18-cell verified-winner subset for the off-by-48 wave-misaligned N=1456
+# 17-cell verified-winner subset for the off-by-48 wave-misaligned N=1456
 # **10th-rung extension** of the contiguous off-by-48 ladder admitted across
 # K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46 N=944),
 # K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48 N=1072),
@@ -3501,10 +3501,22 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # matmul.py + 1 membership-check); cold-path latency impact bounded by a
 # single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 9
 # prior off-by-48 rungs already in the alias-stack.
-_K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
+# Per K-2130 paired n=30 HIP-graph hot-cache 4-engine MI300X bench, 17/18
+# cells pass the strict admit gate (AFTER ≤ 1.0526× HBL); the single corner
+# (M=2048, K=16384, bf16) measured AFTER/HBL = 1.1054× — co-confirmed by
+# rocBLAS at 1.1115× HBL on the same cell — and is excluded from the
+# admit set per the all-cells AFTER ≥ 0.95× HBL gate (the "shrink to 17"
+# path explicitly approved over the variance-hand-wave alternative).  All
+# 17 admitted cells pass: AFTER/HBL ∈ [0.9877, 1.0086], geomean uplift
+# (BEFORE/AFTER) ≈ 1.4193×, geomean AFTER/HBL ≈ 0.9988×.
+_K2130_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_17 = frozenset(
     (M, 1456, K, dt) for M in (2048, 4096, 8192)
     for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+    # Exclude the single non-admit corner: AFTER/HBL = 1.1054× co-confirmed
+    # by rocBLAS at 1.1115× HBL (LT-confound, not a TB regression — but
+    # excluded to keep the strict admit gate honest).
+    if not (M == 2048 and K == 16384 and dt == "torch.bfloat16")
 )
-# Cardinality (==18) gated by tests/test_k2130_p54_n1456_skinny_kcompl.py
+# Cardinality (==17) gated by tests/test_k2130_p54_n1456_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).

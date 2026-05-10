@@ -179,3 +179,100 @@ def test_sibling_n_firewall_vs_consolidated_p32_p38():
     352, 384}; K-2163 P57 covers N=1648 — disjoint by natural N-axis
     separation (different wave-misalignment band entirely)."""
     assert FZ & _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120 == set()
+
+
+# ---------------------------------------------------------------------------
+# End-to-end dispatcher routing assertions (Testing Zealot retry feedback —
+# the structural-invariant tests above gate the data table; these gate the
+# behavior the PRD actually cares about: that ``_k971_route_to_hbl()``
+# returns ``True`` for every N=1648 cell in the admit envelope and NOT for
+# the next un-admitted +64 step (N=1712), under the same sttreamk=False /
+# work_stealing=False / matched-dtype carve-out conditions the dispatcher
+# enforces upstream.
+#
+# Imports are local to this section (not module-top) so that the structural
+# data-table tests above remain importable in environments without torch /
+# triton available.
+# ---------------------------------------------------------------------------
+import pytest
+
+
+@pytest.fixture(scope="module")
+def route_fn():
+    """Bind ``_k971_route_to_hbl`` lazily so the import-cost (torch/triton)
+    is paid only when these end-to-end tests actually run."""
+    from tritonblas.matmul import _k971_route_to_hbl
+    return _k971_route_to_hbl
+
+
+@pytest.mark.parametrize("M,N,K,dtype_str", sorted(FZ))
+def test_dispatcher_routes_every_admitted_n1648_cell_to_hbl(
+        route_fn, M, N, K, dtype_str):
+    """Happy path: every (M,N=1648,K,dtype) tuple in the K-2163 frozenset
+    must cause ``_k971_route_to_hbl`` to return True under the standard
+    streamk=False / work_stealing=False / matched-dtype carve-out
+    conditions.  This is the assertion the PRD actually rests on:
+    "admit N=1648" means "the dispatcher routes N=1648 cells to HBL"."""
+    assert route_fn(M, N, K, dtype_str, dtype_str,
+                    enable_streamk=False, work_stealing=False) is True, (
+        f"K-2163 admit broken: ({M},{N},{K},{dtype_str}) is in the "
+        f"K-2163 frozenset but _k971_route_to_hbl returned False — "
+        f"the matmul.py dispatch site is missing the membership check.")
+
+
+@pytest.mark.parametrize("M,K,dtype_str", [
+    (M, K, dt) for M in (4096, 8192) for K in (8192, 16384)
+    for dt in ("torch.bfloat16", "torch.float16")
+])
+def test_dispatcher_does_not_route_n1712_negative_path(
+        route_fn, M, K, dtype_str):
+    """Negative path: N=1712 is the next +64 step beyond the K-2163 P57
+    N=1648 admit (1712 % 64 == 48, same off-by-48 family) but is NOT yet
+    admitted by any predicate in the dispatcher.  ``_k971_route_to_hbl``
+    must return False for these cells — otherwise the dispatcher has
+    silently widened to leak un-evidenced cells to HBL.  This guards
+    against an N-axis typo in the K-2163 frozenset (e.g. 1712 in place of
+    1648) AND against a future ladder rung being accidentally admitted by
+    a too-permissive closed-form predicate."""
+    routed = route_fn(M, 1712, K, dtype_str, dtype_str,
+                      enable_streamk=False, work_stealing=False)
+    assert routed is False, (
+        f"Dispatcher leak: ({M},1712,{K},{dtype_str}) routed to HBL but "
+        f"N=1712 is NOT in any admitted predicate (next un-admitted +64 "
+        f"step beyond K-2163 P57 N=1648).  Either the K-2163 frozenset "
+        f"contains a typo or a wider predicate has silently absorbed it.")
+
+
+@pytest.mark.parametrize("M,K,dtype_str", [
+    (4096, 8192, "torch.bfloat16"),
+    (8192, 16384, "torch.float16"),
+])
+def test_dispatcher_routes_sibling_n1584_to_hbl(route_fn, M, K, dtype_str):
+    """Adjacency check: N=1584 is the K-2150 P56 12th rung (one step
+    BELOW K-2163 P57 N=1648 on the same off-by-48 ladder).  It must
+    continue to route to HBL after the K-2163 admit — otherwise the new
+    membership check has somehow displaced the prior rung's admit (which
+    would mean the dispatcher is overwriting state, not appending an
+    additive lookup as the +2-LOC patch claims)."""
+    assert route_fn(M, 1584, K, dtype_str, dtype_str,
+                    enable_streamk=False, work_stealing=False) is True, (
+        f"K-2150 P56 N=1584 admit regressed by K-2163: "
+        f"({M},1584,{K},{dtype_str}) no longer routes to HBL.")
+
+
+def test_dispatcher_n1648_streamk_carveout_overrides_admit(route_fn):
+    """Carve-out check: enable_streamk=True must veto the K-2163 admit
+    (so the streamk path keeps its own kernel selection).  Same carve-out
+    semantics as every other admitted cohort — adding K-2163 must not
+    bypass the upstream carve-outs."""
+    assert route_fn(4096, 1648, 8192, "torch.bfloat16", "torch.bfloat16",
+                    enable_streamk=True, work_stealing=False) is False
+
+
+def test_dispatcher_n1648_dtype_mismatch_carveout_overrides_admit(route_fn):
+    """Carve-out check: mixed-dtype (a_dtype != b_dtype) must veto the
+    K-2163 admit.  Same carve-out semantics as every other admitted
+    cohort — the mixed-dtype guard at the top of ``_k971_route_to_hbl``
+    fires before the K-2163 membership check."""
+    assert route_fn(4096, 1648, 8192, "torch.bfloat16", "torch.float16",
+                    enable_streamk=False, work_stealing=False) is False

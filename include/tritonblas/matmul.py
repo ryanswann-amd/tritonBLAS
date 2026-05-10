@@ -136,6 +136,10 @@ from ._route_predicate import (
     # 12th-rung extension of the off-by-48 wave-misaligned ladder
     # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared N).
     _K2150_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18,
+    # K-2163 (S-002): P57 skinny_N1648 K-COMPLEMENT alias-stack — 18-cell
+    # 13th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=80).  Disjoint with every prior slot (no shared N).
+    _K2163_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -418,6 +422,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.375
     # fractional tiles).  Cohort geomean tb/hbl ≈ 1.45×, 18/18 admit.
     if (int(M), int(N), int(K), str(a_dtype)) in _K2150_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18: return True
+    # K-2163 (S-002): P57 skinny_N1648 K-COMPLEMENT alias-stack — 13th rung
+    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
+    # 1264/1328/1392/1456/1520/1584 → 1648).  18 cells (M ∈ {2048,4096,8192}
+    # × N=1648 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-
+    # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.875
+    # fractional tiles, 1648/wave64 = 25.75 waves per N-row).  Cohort geomean
+    # tb/hbl ≈ 1.45×, 18/18 admit.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2163_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

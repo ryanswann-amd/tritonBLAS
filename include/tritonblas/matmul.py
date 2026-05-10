@@ -154,6 +154,11 @@ from ._route_predicate import (
     # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared
     # N).  Branched off fix/K-2169@161e017.
     _K2183_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8,
+    # K-2203 (S-002): P58 skinny_N1776 K-COMPLEMENT alias-stack — 8-cell
+    # 15th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=112).  Disjoint with every prior slot (no shared
+    # N).  Branched off fix/K-2183@9375e7a.
+    _K2203_P58_SKINNY_N1776_KCOMPL_ALIASSTACK_8,
 )
 
 
@@ -461,6 +466,15 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # (BLOCK_N=128 → 13.375 fractional tiles per N-row); mod-128=48
     # subclass admits identically per K-2150 R-K2150.MOD-64-IS-BINDING.
     if (int(M), int(N), int(K), str(a_dtype)) in _K2183_P57_SKINNY_N1712_KCOMPL_ALIASSTACK_8: return True
+    # K-2203 (S-002): P58 skinny_N1776 K-COMPLEMENT alias-stack — next +64
+    # contiguous rung above K-2183 P57 N=1712 in the off-by-48 ladder
+    # (816/880/944/1008/1072/1136/1200/1264/1328/1392/1456/1584/1648/1712 → 1776).
+    # 8 cells (M ∈ {4096,8192} × N=1776 × K ∈ {8192,16384} × {bf16,fp16})
+    # — task-specified verification cohort, not the full 18-cell envelope.
+    # Same off-by-48 wave-misalignment mechanism as every prior rung
+    # (BLOCK_N=128 → 13.875 fractional tiles per N-row); mod-128=112
+    # subclass admits identically per K-2150 R-K2150.MOD-64-IS-BINDING.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2203_P58_SKINNY_N1776_KCOMPL_ALIASSTACK_8: return True
     return False
 
 

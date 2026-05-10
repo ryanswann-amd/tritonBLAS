@@ -160,6 +160,15 @@ from ._route_predicate import (
     # equivalence test can re-prove the union still equals their disjoint
     # union after every future rung admit.
     _KCOMPL_ALIASSTACK_UNION,
+    # K-2175-perfhawk-followup-v3 (Rev 5): N-axis projection sets used as
+    # cheap pre-filter for the two consolidated frozenset membership-check
+    # sites below.  Lets the dispatcher skip the `_key` tuple construction
+    # (3 int coercions + 1 alloc) AND the two large-frozenset probes when
+    # int(N) is not even a candidate for either lookup — the common path
+    # for everyday training shapes.  Equivalence + disjointness pinned by
+    # tests/test_kcompl_aliasstack_union_n_projection_equivalence.py.
+    _K971_ROUTE_TABLE_N_SET,
+    _KCOMPL_ALIASSTACK_UNION_N_SET,
 )
 
 
@@ -189,7 +198,29 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # work cached only the str, not the ints/tuple).
     _dt_s = str(a_dtype)
     if enable_streamk or work_stealing or _dt_s != str(b_dtype): return False
-    _key = (int(M), int(N), int(K), _dt_s)
+    # K-2175-perfhawk-followup-v3 (Rev 5): N-axis pre-filter for the two
+    # consolidated frozenset membership-check sites below (the
+    # `_K971_ROUTE_TABLE` strict-equality table and the consolidated
+    # `_KCOMPL_ALIASSTACK_UNION`).  The K-2175-PR Performance-Hawk
+    # follow-up review observed that the Rev 4 hot path was paying 3
+    # int() coercions + 1 tuple allocation + 2 large-frozenset probes
+    # for every dispatcher call, even when both probes were going to
+    # miss (the common path: everyday training-step N values like
+    # 4096/8192 are NOT alias-stack candidates).  Pre-projecting the
+    # two source frozensets onto their N-axis (cardinality 5 + 9 = 14
+    # vs the source 12 + 247 = 259) lets a single int(N) coercion
+    # short-circuit the `_key` build + both large-frozenset probes for
+    # any non-candidate N.  Strict necessary condition: any
+    # (M, N, K, dt) in either source set has N in the corresponding
+    # projection by construction (admit-set identity preserved; pinned
+    # by tests/test_kcompl_aliasstack_union_n_projection_equivalence.py).
+    _N_i = int(N)
+    _in_table_n = _N_i in _K971_ROUTE_TABLE_N_SET
+    _in_union_n = _N_i in _KCOMPL_ALIASSTACK_UNION_N_SET
+    if _in_table_n or _in_union_n:
+        _key = (int(M), _N_i, int(K), _dt_s)
+    else:
+        _key = None
     # K-1144 (S-002): P8 MFMA-issue-stall direct hipBLASLt route-OUT for
     # the triply-validated 25-cell envelope (13 K-1121 anchors + 12 K-1131
     # neighbors).  Consulted BEFORE the K-1089 P6 admit so K-1121's paired
@@ -218,7 +249,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-905/K-971 strict-equality table) is short-circuited for the cell.
     if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype): return False
     if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
-    if _key in _K971_ROUTE_TABLE: return True
+    # K-2175-perfhawk-followup-v3 (Rev 5): N-axis pre-filter gate.  When
+    # _in_table_n is False the `_key` tuple was deliberately not built
+    # (`_key is None`) — skip the large-frozenset probe.  This is the
+    # common path (everyday N values are not in the 5-N projection set).
+    if _in_table_n and _key in _K971_ROUTE_TABLE: return True
     # K-1361 (S-002): P12 square_mid PMC-driven 4-cell route-OUT (6th-position
     # envelope). Stacks AFTER the K971 LDS-BC table per K-1175 stacked-predicate
     # convention; productionises K-1345's Predicate-Q (square_mid 2048³) and
@@ -449,7 +484,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # in `_route_predicate.py` as data oracles + audit handles so any
     # future rung admit (K-2175-followup, etc.) just adds a `|` term to
     # the union without touching the dispatcher.  Cardinality 247 cells.
-    if _key in _KCOMPL_ALIASSTACK_UNION: return True
+    # K-2175-perfhawk-followup-v3 (Rev 5): N-axis pre-filter gate.  When
+    # _in_union_n is False the `_key` tuple was deliberately not built
+    # (`_key is None`) — skip the large-frozenset probe (cardinality 247).
+    # This is the common path on everyday training shapes.
+    if _in_union_n and _key in _KCOMPL_ALIASSTACK_UNION: return True
     return False
 
 

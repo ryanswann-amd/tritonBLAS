@@ -3713,3 +3713,51 @@ _KCOMPL_ALIASSTACK_UNION = (
     | _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18
     | _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18
 )
+
+
+# K-2175-perfhawk-followup-v3 (Rev 5): N-axis projection sets to allow
+# the dispatcher hot path (`_k971_route_to_hbl`) to short-circuit the
+# `_key = (int(M), int(N), int(K), _dt_s)` tuple construction (3 int
+# coercions + 1 tuple alloc) AND the two consolidated frozenset
+# membership probes BEFORE paying any of those costs, on shapes whose
+# N value is not even a candidate for either lookup.
+#
+# The K-2175-PR Performance-Hawk follow-up review observed that on
+# realistic training workloads the vast majority of GEMM shapes are
+# NOT alias-stack candidates (N is some everyday value like 4096,
+# 8192, etc.), yet the Rev 4 dispatcher still paid:
+#   - 3 int() coercions + 1 tuple allocation to build `_key`
+#   - 2 frozenset hash probes (`_K971_ROUTE_TABLE`, `_KCOMPL_ALIASSTACK_UNION`)
+# even when both probes were going to miss.  At thousands of GEMMs/
+# training-step that is pure tax for shapes that will never route.
+#
+# These two pre-projection sets let the dispatcher do a SINGLE int(N)
+# coercion + 1 or 2 small-frozenset hash probes (cardinality 13 N values
+# for the union; 2 N values for the strict-equality table) and skip the
+# `_key` build + the two large-frozenset probes entirely on the common
+# path.  The pre-filter is a STRICT necessary condition for either
+# membership-check to succeed (admit-set identity is preserved: any
+# (M,N,K,dt) in `_K971_ROUTE_TABLE` has N in `_K971_ROUTE_TABLE_N_SET`
+# by construction; same for the union).  Equivalence + disjointness
+# pinned by tests/test_kcompl_aliasstack_union_n_projection_equivalence.py.
+#
+# Why N-projection (and not (M,N,K)-projection): the N axis is the
+# narrowest by far — `_KCOMPL_ALIASSTACK_UNION` covers 247 cells over
+# 9 distinct N values; `K971_ROUTE_TABLE` covers 12 cells over 5
+# distinct N values.  An (M,N,K) projection would cost 3 int()
+# coercions + 1 tuple alloc to even probe — defeating the savings.
+# An N-only projection costs 1 int() coercion + 1 tiny-frozenset
+# hash probe (~30 ns on Zen3) and rejects every non-candidate N
+# in a single check.
+_K971_ROUTE_TABLE_N_SET = frozenset(t[1] for t in K971_ROUTE_TABLE)
+_KCOMPL_ALIASSTACK_UNION_N_SET = frozenset(
+    t[1] for t in _KCOMPL_ALIASSTACK_UNION
+)
+# Cardinality pins (data-oracle invariants the equivalence test asserts
+# directly so a future stray entry / typo cannot silently widen the
+# pre-filter).  K971 covers N ∈ {1024, 2048} (2 values; mid-square
+# long-K LDS-BC anchors).  Union covers N ∈ {64, 96, 160, 224, 256,
+# 288, 320, 352, 384, 544, 768, 1536, 1648} (13 values; per the 6
+# source alias-stack frozensets).  Cardinality is computed dynamically
+# by the equivalence test so future rung admits (K-2175-followup, etc.)
+# just bump the length pin in one place.

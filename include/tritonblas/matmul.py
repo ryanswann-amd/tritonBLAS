@@ -137,6 +137,12 @@ from ._route_predicate import (
     # misaligned ladder (mod-64=48, mod-128=48).  Disjoint with every prior
     # slot (no shared N).  Branched off fix/K-1922@0024a71.
     _K2127_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18,
+    # K-2158 (S-002): P55 skinny_N1584 K-COMPLEMENT alias-stack — 18-cell
+    # 12th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared
+    # N).  Branched off fix/K-2127@9c4f984 (which itself branches off
+    # fix/K-1922@0024a71).
+    _K2158_P55_SKINNY_N1584_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -419,6 +425,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # Same off-by-48 wave-misalignment mechanism as every prior rung
     # (BLOCK_N=128 → 11.375 fractional tiles per N-row).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2127_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18: return True
+    # K-2158 (S-002): P55 skinny_N1584 K-COMPLEMENT alias-stack — next
+    # contiguous rung above K-2127 P54 N=1456 in the off-by-48 ladder
+    # (816/880/944/1008/1072/1136/1200/1264/1328/1392/1456 → 1584).  18
+    # cells (M ∈ {2048,4096,8192} × N=1584 × K ∈ {4096,8192,16384} ×
+    # {bf16,fp16}).  Same off-by-48 wave-misalignment mechanism as every
+    # prior rung (BLOCK_N=128 → 12.375 fractional tiles per N-row).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2158_P55_SKINNY_N1584_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

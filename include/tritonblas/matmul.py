@@ -132,6 +132,13 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    # K-2092 (S-002): P52 (40th-slot) skinny_N1328 K-COMPLEMENT alias-stack
+    # — 18 cells (M ∈ {2048, 4096, 8192} × N=1328 × K ∈ {4096, 8192, 16384}
+    # × {bf16, fp16}).  Next contiguous rung above K-2085 P51 N=1264 in the
+    # off-by-48 wave-misaligned residue family (1328 mod 64 = 48); K-2072
+    # paired n=30 HIP-graph bench previously confirmed N=1328 in this family
+    # beats baseline tritonblas, formalized as alias-stack admit here.
+    _K2092_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +414,11 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2092 (S-002): P52 skinny_N1328 K-COMPLEMENT alias-stack — 18 cells
+    # (off-by-48 wave-misaligned next rung above K-2085 P51 N=1264; K-2072
+    # paired n=30 HIP-graph bench confirmed N=1328 already beats baseline TB
+    # in the residue-48 family — same R-1811 + K-913 §3 mechanism).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2092_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

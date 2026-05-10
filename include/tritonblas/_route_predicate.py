@@ -3461,3 +3461,37 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2092 (S-002): P52 (40th-slot) skinny_N1328 K-COMPLEMENT alias-stack —
+# 18-cell envelope for the next contiguous rung (N=1328, 1328 mod 64 = 48)
+# above K-2085 P51 N=1264 in the off-by-48 wave-misaligned residue family.
+# Ladder so far (all (N mod 64) == 48):
+#   N ∈ {816, 880, 944, 1008, 1072, 1136} — K-1978/K-1994/K-2010/K-2031/
+#                                            K-2047/K-2055 (P45–P49 + earlier)
+#   N ∈ {1200, 1264}                       — K-2085 P50/P51
+#   N == 1328                              — K-2092 P52  (this entry)
+#
+# K-2072 paired n=30 HIP-graph hot-cache 3-engine bench on c42 / MI300X
+# (gfx942, ROCm 7.2) showed N=1328 in the residue-48 family already beating
+# baseline tritonblas (TB-baseline / hipBLASLt < 1.0×; route-to-HBL ≈ parity),
+# confirming the same R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict
+# mechanism as every prior off-by-48 rung.  K-2092 formalizes this admission
+# with the full 18-cell M ∈ {2048, 4096, 8192} × K ∈ {4096, 8192, 16384} ×
+# {bf16, fp16} grid (the K-1922 envelope, also used for P47–P49).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=1328 into 10.375 BLOCK_N tiles per N-row — same
+# SCHEDULER_LDS A4 failure mode as every prior off-by-48 wave-misaligned
+# skinny-N rung.  hipBLASLt's split-K kernel selection clears the band.
+#
+# Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
+# slot (N=1328 ∉ any prior frozenset).  Single-N entry per the K-1978…
+# K-2055 + K-2085 single-N convention (per-rung tracking).
+_K2092_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1328, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2092_p52_skinny_n1328_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

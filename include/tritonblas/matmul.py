@@ -150,6 +150,16 @@ from ._route_predicate import (
     # entry per orchestrator R-K2175 minimal-additive-diff spec; a
     # follow-up PR may collapse 1648 into _K1908_OFFBY48_ADMIT_N.
     _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18,
+    # K-2175-perfhawk-followup (S-002): consolidated O(1) union of all
+    # alias-stack frozensets currently membership-checked in the dispatcher
+    # chain (K-1700, K-1711, P31, K-1881, K-1922, K-2175).  Replaces the
+    # O(rungs) chain of independent hash lookups + tuple rebuilds with a
+    # single hash lookup.  Equivalence pinned by
+    # tests/test_kcompl_aliasstack_union_equivalence.py.  Original per-rung
+    # frozensets are KEPT (data oracles + per-rung audit trail) so the
+    # equivalence test can re-prove the union still equals their disjoint
+    # union after every future rung admit.
+    _KCOMPL_ALIASSTACK_UNION,
 )
 
 
@@ -165,7 +175,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # than per-shape entries; strict-equality table retained for K-905/K-971
     # mid-square long-K anchors that structurally collide with K-950 LAND.
     if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
-    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    # K-2175-perfhawk-followup: cache (M_i, N_i, K_i, dt_s) ONCE per call.
+    # Prior dispatcher rebuilt the (int(M), int(N), int(K), str(a_dtype))
+    # tuple on every chained membership check (~7 sites in the alias-stack
+    # chain alone), each rebuild costing ~150 ns on Zen3.  Caching cuts
+    # this to a single rebuild and exposes the cached `_dt_s` to the
+    # short-circuit dtype-mismatch check below for free.
+    _dt_s = str(a_dtype)
+    if enable_streamk or work_stealing or _dt_s != str(b_dtype): return False
     # K-1144 (S-002): P8 MFMA-issue-stall direct hipBLASLt route-OUT for
     # the triply-validated 25-cell envelope (13 K-1121 anchors + 12 K-1131
     # neighbors).  Consulted BEFORE the K-1089 P6 admit so K-1121's paired
@@ -194,7 +211,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # K-905/K-971 strict-equality table) is short-circuited for the cell.
     if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype): return False
     if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
-    if (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE: return True
+    if (int(M), int(N), int(K), _dt_s) in _K971_ROUTE_TABLE: return True
     # K-1361 (S-002): P12 square_mid PMC-driven 4-cell route-OUT (6th-position
     # envelope). Stacks AFTER the K971 LDS-BC table per K-1175 stacked-predicate
     # convention; productionises K-1345's Predicate-Q (square_mid 2048³) and
@@ -401,30 +418,6 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # ≈ 0.6-0.9 cyc/inst) — sibling-N firewall preserves the per-N audit
     # handles per the K-1175 stacked-predicate convention.
     if _R_K1673_P28_skinny_n128_kcompl_aliasstack_routeout(int(M), int(N), int(K), a_dtype): return True
-    # K-1700 P29 (20th-slot): N=64 K-COMPLEMENT alias-stack (29 cells; cohort geomean tb_forced/hbl=1.93×).
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29: return True
-    # K-1748 P30 (21st-slot): skinny_Nmid (N ∈ {384, 768, 1536}) K-COMPLEMENT alias-stack
-    # (34 K-1711-verified cells; cohort geomean 1.456×, range 1.18×-1.83×).  Audit:
-    # post-K-1709 oracle had 0/34 cells active; K-1720 (parallel branch off K-1685) never
-    # merged into K-1709 lineage.  Ship at 21st slot per K-1709/K-1720 disjoint-N rationale.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34: return True
-    # P31 (22nd-slot): N=256 K-COMPLEMENT verified-winner subset — 28 cells (TB-native
-    # vs HBL-native paired n=30 hot-cache HIP-graph on MI300X with route-OUT ablated:
-    # geomean HBL/TB = 1.392×, range 1.07×–2.12×, 28/28 cells pass the strict
-    # ≥1.05 ∧ p<0.05 gate; the 2 (M=2048, K=2048) LOSER cells are excluded).
-    if (int(M), int(N), int(K), str(a_dtype)) in _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28: return True
-    # K-1881 (S-002): consolidated P32–P38 K-COMPLEMENT verified-winner
-    # alias-stack — ONE 120-cell frozenset replacing what would be a
-    # 7-probe chain (N ∈ {96,160,224,288,320,352,384}).  O(1) hash lookup
-    # vs O(7); equivalence pinned by tests/test_k1881_p32_p38_consolidation.py.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120: return True
-    # K-1922 (S-002): P40 (30th-slot) skinny_N544 K-COMPLEMENT alias-stack
-    # — 18 cells (full M ∈ {2048,4096,8192} × N=544 × K ∈ {4096,8192,16384}
-    # × {bf16,fp16} grid; no upstream-aliased exclusions at this off-by-32
-    # wave-misaligned rung).  K-1912 paired n=30 verification: cohort
-    # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
-    # construction with every prior K-COMPLEMENT alias-stack slot.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
     # K-1908 (S-002) closed-form refactor: replaces the prior K-2136 P55
     # N=1520 + K-2152 P56 N=1584 chained frozenset membership-checks with
     # one closed-form admit predicate over the off-by-48 (`N % 64 == 48`)
@@ -432,19 +425,24 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # Performance-Hawk feedback: replaces O(rungs) of independent hash
     # lookups with a single closed-form check (1 modulo + 2 set lookups)
     # while preserving exact admit-set identity (pinned by
-    # tests/test_k1908_offby48_closed_form_equivalence.py).
+    # tests/test_k1908_offby48_closed_form_equivalence.py).  Fires AHEAD
+    # of the K-2175-perfhawk-followup union below so the {1520, 1584}
+    # mod-based path remains the canonical one for K-1908-admit cells.
     if _is_k1908_offby48_kcompl_admit(M, N, K, a_dtype): return True
-    # K-2175 (S-002): P57 skinny_N1648 K-COMPLEMENT alias-stack — 13th rung
-    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
-    # 1264/1328/1392/1456/1520/1584 → 1648).  18 cells (M ∈ {2048,4096,8192}
-    # × N=1648 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-
-    # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.875
-    # fractional tiles, 25.75 fractional waves; mod-128=112 sibling to
-    # N=1520 / N=1392 / N=1264).  Disjoint with K-1908 closed-form admit
-    # set ({1520, 1584}) — no double-route.  +2 active LOC additive in
-    # dispatcher (this membership-check + matching import).  Follow-up
-    # PR may consolidate 1648 into `_K1908_OFFBY48_ADMIT_N`.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18: return True
+    # K-2175-perfhawk-followup (S-002): consolidated O(1) union check for
+    # the ENTIRE alias-stack frozenset family (K-1700 N=64 + K-1711 N∈{384,
+    # 768,1536} + P31 N=256 + K-1881 N∈{96,160,224,288,320,352,384} +
+    # K-1922 N=544 + K-2175 N=1648).  Single hash lookup on the cached
+    # (M_i, N_i, K_i, _dt_s) tuple (`_dt_s` cached at top-of-function),
+    # replacing the prior O(rungs) chain of 6 independent membership-
+    # checks each rebuilding the tuple.  Equivalence pinned by
+    # tests/test_kcompl_aliasstack_union_equivalence.py (asserts the
+    # union equals the disjoint union of the 6 source frozensets and
+    # checks pairwise disjointness).  Per-rung sub-frozensets are kept
+    # in `_route_predicate.py` as data oracles + audit handles so any
+    # future rung admit (K-2175-followup, etc.) just adds a `|` term to
+    # the union without touching the dispatcher.  Cardinality 247 cells.
+    if (int(M), int(N), int(K), _dt_s) in _KCOMPL_ALIASSTACK_UNION: return True
     return False
 
 

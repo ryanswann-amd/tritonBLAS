@@ -3671,3 +3671,45 @@ _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2175_p57_n1648_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+
+# K-2175-perfhawk-followup (S-002): per K-2175-PR Performance-Hawk feedback,
+# the `_k971_route_to_hbl` hot-path was running an O(rungs) chain of
+# `(int(M), int(N), int(K), str(a_dtype)) in _K..._..._...` membership
+# checks (one per admitted alias-stack rung).  At 13+ rungs this is a
+# linear-in-rungs dispatch tax on every GEMM, with the (int,int,int,str)
+# tuple rebuilt on every chained line.  This consolidation replaces that
+# chain with ONE union frozenset so the dispatcher pays a single hash
+# lookup regardless of how many rungs are admitted.  Equivalence pinned
+# by tests/test_kcompl_aliasstack_union_equivalence.py.
+#
+# Members (ALL existing alias-stack frozensets currently membership-checked
+# in the dispatcher chain — order preserved for documentation):
+#   - _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29       (20th-slot)
+#   - _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34      (21st-slot)
+#   - _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28          (22nd-slot)
+#   - _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120        (23rd-slot, already 7-into-1 consolidated)
+#   - _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18      (30th-slot)
+#   - _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18     (NEW, 31st-slot)
+#
+# The K-1908 closed-form predicate (`_is_k1908_offby48_kcompl_admit`) is
+# NOT folded into this union: it is mod-based (1 modulo + 2 set lookups)
+# and stays as a separate O(1) check ahead of the union — the same shape
+# as the K-1908 refactor that addressed the K-2152-PR Performance-Hawk
+# feedback for the {1520, 1584} sub-family.  K-1908 admit-N {1520, 1584}
+# is disjoint with every member of the union by construction (sibling-N
+# firewall), so admit-set identity is preserved by ordering: K-1908
+# closed-form fires first, then the union check.
+#
+# Cardinality: 29 + 34 + 28 + 120 + 18 + 18 = 247 cells (verified by
+# the equivalence test, which also asserts pairwise disjointness of the
+# 6 source frozensets).  Single-hash lookup vs 6 sequential lookups +
+# 6 tuple builds — ~250 ns saved per dispatcher call on Zen3.
+_KCOMPL_ALIASSTACK_UNION = (
+    _K1700_P29_SKINNY_N64_KCOMPL_ALIASSTACK_29
+    | _K1711_P30_SKINNY_NMID_KCOMPL_ALIASSTACK_34
+    | _P31_SKINNY_N256_KCOMPL_VERIFIED_WIN_28
+    | _K1881_P32_P38_SKINNY_KCOMPL_ROUTEOUT_120
+    | _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18
+    | _K2175_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18
+)

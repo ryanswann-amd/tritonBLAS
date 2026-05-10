@@ -136,6 +136,13 @@ from ._route_predicate import (
     # 11th-rung extension of the off-by-48 wave-misaligned ladder
     # (mod-64=48, mod-128=112).  Disjoint with every prior slot (no shared N).
     _K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18,
+    # K-2152 (S-002): P56 skinny_N1584 K-COMPLEMENT alias-stack — 18-cell
+    # 12th-rung extension of the off-by-48 wave-misaligned ladder
+    # (mod-64=48, mod-128=48; 24.75 fractional waves; 0.375 fractional
+    # BLOCK_N=128 tile sub-class shared with N=1456 / N=1328 / N=1200).
+    # Disjoint with every prior slot (no shared N).  Crosses the K-1908
+    # ≥12-rung closed-form refactor actionability threshold.
+    _K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -417,6 +424,14 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-misalignment
     # mechanism as every prior rung (BLOCK_N=128 → 11.875 fractional tiles).
     if (int(M), int(N), int(K), str(a_dtype)) in _K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18: return True
+    # K-2152 (S-002): P56 skinny_N1584 K-COMPLEMENT alias-stack — 12th rung
+    # of the off-by-48 contiguous ladder (816/880/944/1008/1072/1136/1200/
+    # 1264/1328/1392/1456/1520 → 1584).  18 cells (M ∈ {2048,4096,8192} ×
+    # N=1584 × K ∈ {4096,8192,16384} × {bf16,fp16}).  Same off-by-48 wave-
+    # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.375
+    # fractional tiles, 24.75 fractional waves; mod-128=48 sibling to N=1456).
+    # Crosses K-1908 ≥12-rung closed-form refactor actionability threshold.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

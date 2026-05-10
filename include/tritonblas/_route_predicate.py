@@ -3508,3 +3508,61 @@ _K2136_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2136_p55_n1520_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2152 (S-002): P56 (next-position) skinny_N1584 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset for the off-by-48 wave-misaligned N=1584
+# **12th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46 N=944),
+# K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48 N=1072),
+# K-2055/K-2060/K-2063 (N=1136), K-2071/K-2075/K-2077/K-2085 (P50 N=1200),
+# K-2071/K-2085/K-2091 (P51 N=1264), K-2097/K-2101/K-2106 (P52 N=1328),
+# K-2107 (P53 N=1392), K-2118/K-2124/K-2130 (P54 N=1456), and the K-2136
+# (P55 N=1520) baseline directly preceding this rung.  N=1584 carries
+# (mod 64 = 48, mod 128 = 48, fractional waves = 24.75) — same off-by-48
+# wave-misalignment band as every prior rung; mod-128 alternates 48/112
+# across consecutive +64 steps with N=1584 returning to the **48-class**
+# (sibling to N=1456).  Per K-2091/K-2107/K-2124/K-2136
+# F-K2091.LADDER-CLIMB-NOT-DECAY, the K-2031/K-2041 plateau-decay forecast
+# (family floor ~1.30×, decay knee N=1300–1500) remains empirically
+# falsified for 5 consecutive rungs (P51→P52→P53→P54→P55, geomean BEFORE/HBL
+# ladder = 1.626 / 1.606 / 1.527 / 1.450 / 1.470); K-2072 wide-N sweep
+# confirms ladder admit-eligible past N=1776 with no observed decay onset,
+# so N=1584 (next contiguous +64 step beyond P55 N=1520) sits squarely
+# inside the climbing/plateau regime.  K-2136 noted that the rung-10/11
+# 1.45–1.47× plateau is "the first tentative signal of a flattening upper
+# bound"; the K-2152 12th-rung admission (this) is the load-bearing test
+# of whether that plateau holds (continued admit) or the ladder finally
+# saturates (admit-fail forecast per F-K2061.PMC-FAMILY-CEILING).
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=1584 into 12.375 BLOCK_N tiles per N-row (vs N=1520's
+# 11.875 / N=1456's 11.375 / N=1392's 10.875 — the alternating 0.375/0.875
+# fractional-tile pattern is the same SCHEDULER_LDS A4 failure mode as
+# every prior off-by-48 rung; N=1584 returns to the 0.375 sub-class shared
+# with N=1456 / N=1328 / N=1200, distinct from the 0.875 sub-class shared
+# with N=1520 / N=1392 / N=1264).  Per K-2061 PMC delta-attribution,
+# residue-48 carries a stable LDS bank-conflict differential (~6×) vs
+# residue-32 (~2×) and wave-aligned (~1×) at (M=4096, K=8192, bf16);
+# K-2091/K-2107/K-2124/K-2136 independent confirmations at N=1264/1392/
+# 1456/1520 wall-clock refuted the K-2061 PMC-derived family ceiling for
+# the 7th consecutive task-line; K-2152 admission would be the 8th.
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 11
+# prior off-by-48 rungs already in the alias-stack.
+#
+# Closed-form refactor trigger: this 12th rung crosses the K-1908
+# actionability threshold (≥12 contiguous rungs).  Recommend collapsing
+# K-1978..K-2152 (N=816..1584) into a single closed-form predicate
+# `(N % 64 == 48) AND (816 <= N <= 1584)` AND envelope-membership in a
+# follow-up PR; this admission is the load-bearing data point for that
+# refactor.
+_K2152_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1584, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2152_p56_n1584_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

@@ -3506,3 +3506,40 @@ _P38_SKINNY_N384_KCOMPL_VERIFIED_WIN_14 = frozenset(
     (4096, 384, 8192, "torch.bfloat16"), (4096, 384, 8192, "torch.float16"),
 })
 # Cardinality (==14) gated by tests/test_p38_skinny_n384_alias_stack.py.
+
+# K-1910 (S-002) — P40 (30th-slot if K-1904 redo lands non-empty P39, otherwise
+# 29th-slot atop the realised 29-slot stack): N=544 K-COMPLEMENT verified-
+# winner subset — 17 cells (18-cell M×K cohort minus 1 R-K979 P5 Clause-1 mid-
+# rect alias cell at (2048,544,4096,bf16)).  K-1910 paired n=30 HIP-graph + 3-
+# pass rocprofv2 PMC on MI300X / gfx942 vs fix/K-1880 LIVE oracle: 17/18
+# measured cells admit at strict ratio>=1.05 ∧ p<0.01; cohort geomean=1.571×
+# (range 1.004×-2.153×), admit-only geomean=1.612×.  N=544 wave-misaligned
+# (544 mod 64 = 32; 544 mod 128 = 32; matches K-1892 alignment_remainder
+# predicate); BLOCK_N=128 packs N=544 into 4 full BLOCK_N tiles plus 32-wide
+# remainder per N-row → wave-misaligned tail half-wave.
+# SQ_LDS_BANK_CONFLICT TB nonzero in 18/18, HBL zero in many cells;
+# SQ_WAIT_INST_LDS TB/HBL median ratio ~9× (peak 28.4×); SQ_INSTS_MFMA / SQ_WAVES
+# TB/HBL median = 0.50 (TB does LESS MFMA per wave — pipe is starved by LDS
+# waits, not over-issued).  SCHEDULER_LDS A4 fingerprint per K-1843/K-1853/
+# K-1857/K-1873/K-1881/K-1888/K-1897.
+_P40_SKINNY_N544_KCOMPL_VERIFIED_WIN_17 = frozenset({
+    # M=2048 row × N=544 (1 P5 alias cell excluded at K=4096, bf16)
+    (2048, 544,  8192, "torch.bfloat16"), (2048, 544, 16384, "torch.bfloat16"),
+    (2048, 544,  4096, "torch.float16"),  (2048, 544,  8192, "torch.float16"),
+    (2048, 544, 16384, "torch.float16"),
+    # M=4096 row × N=544 × all K × all dtype (no P5 alias)
+    (4096, 544,  4096, "torch.bfloat16"), (4096, 544,  8192, "torch.bfloat16"),
+    (4096, 544, 16384, "torch.bfloat16"),
+    (4096, 544,  4096, "torch.float16"),  (4096, 544,  8192, "torch.float16"),
+    (4096, 544, 16384, "torch.float16"),
+    # M=8192 row × N=544 × all K × all dtype (no P5 alias)
+    (8192, 544,  4096, "torch.bfloat16"), (8192, 544,  8192, "torch.bfloat16"),
+    (8192, 544, 16384, "torch.bfloat16"),
+    (8192, 544,  4096, "torch.float16"),  (8192, 544,  8192, "torch.float16"),
+    (8192, 544, 16384, "torch.float16"),
+})
+assert len(_P40_SKINNY_N544_KCOMPL_VERIFIED_WIN_17) == 17, (
+    "K-1910 P40 N=544 K-COMPLEMENT frozenset must be exactly 17 cells "
+    "(18-cohort minus 1 R-K979 P5 Clause-1 alias at (2048,544,4096,bf16)); "
+    "got {}".format(len(_P40_SKINNY_N544_KCOMPL_VERIFIED_WIN_17)))
+# Cardinality (==17) gated by tests/test_p40_skinny_n544_alias_stack.py.

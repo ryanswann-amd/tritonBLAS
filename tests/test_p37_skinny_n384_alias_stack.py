@@ -207,6 +207,27 @@ def test_sibling_n_firewall_vs_p36_n320():
     assert FZ & _P36_SKINNY_N320_KCOMPL_VERIFIED_WIN_17 == set()
 
 
+def test_negative_adjacent_n_values_excluded():
+    """Negative-case guard against gate over-matching: every (M, K, dtype)
+    that DOES appear in P37 at N=384 must NOT appear at N=383 or N=385 (or
+    any nearby N value other than 384).  This proves the frozenset gate
+    matches N exactly and does not accidentally widen via integer-coercion,
+    range-membership, or stripe-aliasing bugs.  Critical guard per
+    reviewer-feedback (Skeptic + Testing Zealot, K-1871 RETRY round) — without
+    this, a refactor that changed the predicate from `tuple in frozenset` to
+    e.g. `(M, N // 64 * 64, K, dt) in frozenset` would silently re-route
+    N∈{384±63} traffic, causing performance regressions on the entire
+    wave-misaligned skinny-N band rather than just the verified-winner cells."""
+    for (M, _, K, dt) in FZ:
+        for N_adj in (383, 385, 320, 448):  # 320 = P36 (separate slot), 448 = no slot
+            assert (M, N_adj, K, dt) not in FZ, (
+                f"P37 frozenset over-matched: (M={M}, N={N_adj}, K={K}, dt={dt}) "
+                f"must NOT be in P37 (only N=384 cells permitted)"
+            )
+    # And explicitly: P37 contains NO cell with N != 384.
+    assert all(N == 384 for (_, N, _, _) in FZ)
+
+
 def test_envelope_equals_n384_kcompl_grid_minus_p30_alias():
     """The verified-winner envelope is exactly the 18-cell M ∈ {2048,
     4096,8192} × N=384 × K ∈ {4096,8192,16384} × {bf16,fp16} grid MINUS

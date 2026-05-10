@@ -3545,3 +3545,48 @@ _K2158_P55_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2158_p55_n1584_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2170 (S-002): P56 (next-position) skinny_N1648 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset for the off-by-48 wave-misaligned N=1648
+# **13th-rung extension** of the contiguous off-by-48 ladder admitted across
+# K-1978 (P45 N=816), K-1990/K-1994 (N=880), K-2010/K-2014/K-2024 (P46
+# N=944), K-2031/K-2036/K-2041 (P47 N=1008), K-2043/K-2047/K-2052 (P48
+# N=1072), K-2055/K-2060/K-2063/K-2066 (P49 N=1136), K-2071/K-2075/K-2077/
+# K-2085 (P50 N=1200), K-2071/K-2085/K-2091 (P51 N=1264), K-2092/K-2101/
+# K-2106 (P52 N=1328), K-2107 (P53 N=1392), K-2127 (P54 N=1456), and
+# K-2158 (P55 N=1584).  N=1648 carries (mod 64 = 48, mod 128 = 112) — the
+# off-by-48 wave-misalignment band continues (mod 64 = 48 invariant), with
+# the mod-128 phase advancing to 112 (sibling of N=1392's 112 phase, two
+# rungs prior).  The K-COMPLEMENT swap recovers wave-tile coverage at
+# residue-48 by reorienting the inner-K reduction so the per-tile schedule
+# no longer strands a 48-element wave-misaligned N-fragment per BLOCK_N=128
+# tile.
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=1648 into 12.875 BLOCK_N tiles per N-row (vs N=1584's
+# 12.375 / N=1456's 11.375 / N=1392's 10.875 — the fractional-tile pattern
+# is the same SCHEDULER_LDS A4 failure mode as every prior off-by-48 rung).
+# Per K-2061 PMC delta-attribution, residue-48 carries a stable LDS bank-
+# conflict differential (~6×) vs residue-32 (~2×) and wave-aligned (~1×) at
+# (M=4096, K=8192, bf16); K-2091 4th-independent confirmation at N=1264,
+# K-2107 6th-independent confirmation at N=1392, K-2127 7th-independent at
+# N=1456 and K-2158 8th-independent at N=1584 wall-clock have refuted all
+# prior PMC-derived family ceilings.  K-2170 extends the ladder by one rung
+# (next residue-48 step at +64 = 1584+64 = 1648) measured at n=30 paired
+# HIP-graph hot-cache.  Per K-2107 K-axis amplification slope and K-2158
+# rung-12 saturation observation, expected worst-cell (M=4096, N=1648,
+# K=16384) BEFORE TB/HBL projects in the 1.6×–1.8× range (continued
+# saturation plateau, NOT decay).
+#
+# Naturally disjoint with every prior K-COMPLEMENT alias-stack slot (no
+# shared N).  +2 active LOC additive in the dispatcher (1 import in
+# matmul.py + 1 membership-check); cold-path latency impact bounded by a
+# single hash lookup (~30 ns on Zen3) per dispatch — equivalent to the 12
+# prior off-by-48 rungs already in the alias-stack.
+_K2170_P56_SKINNY_N1648_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1648, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2170_p56_n1648_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

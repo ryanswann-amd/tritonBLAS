@@ -3461,3 +3461,34 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k1922_p40_skinny_n544_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2115 (S-002): P53 (43rd-slot) skinny_N1392 K-COMPLEMENT alias-stack —
+# 18-cell verified-winner subset (M ∈ {2048,4096,8192} × N=1392 ×
+# K ∈ {4096,8192,16384} × {bf16,fp16}).  Off-by-48 wave-misaligned 9th-rung
+# of the (N % 64 == 48) ladder (K-2055 P49 N=1136 → K-2075 P50 N=1200 →
+# K-2091 P51 N=1264 → K-2104 P52 N=1328 → K-2115 P53 N=1392); 1392 mod 64
+# = 48, 1392 mod 128 = 112 — REJOIN to the N=1264 mod-128 topology,
+# continuing the 48/112/.../48/112 alternation across the residue-48 family.
+# Per K-2056 PMC delta-attribution (TRITONBLAS-0091): residue-48 grids
+# divide gfx942's CU array more evenly than residue-32 grids → GRBM_GUI_
+# ACTIVE per-wg drops ~24% (Spearman ρ = -0.930, p~1e-5) despite a +5.5%
+# TCC_READ_REQ_sum L2-traffic premium; the K-2056 retry revised the
+# surviving within-tile discriminator to TCC_ACCESS_sum_per_wg (partial
+# ρ = +0.71, p = 0.014) — i.e. L2 write/atomic traffic, with
+# VALU_BUSY_per_wg bit-identical at 98280 across the 12-cell tile.  This
+# is grid-routing-bound (wave-lane misalignment) not compute-bound; hence
+# hipBLASLt's split-K kernel selection clears the band by selecting tile
+# shapes whose grids land cleanly on the gfx942 CU partition.  Sibling-N
+# firewall disjoint by construction with every prior K-COMPLEMENT alias-
+# stack slot (no shared N).  Promoted as explicit alias-stack until the
+# K-1908 S1-form compact predicate is extended to absorb the closed-form
+# `(N % 64 == 48) ∧ (816 ≤ N ≤ 1392)` envelope in a separate task; per
+# K-1900 lesson, compact-predicate substitution at depth-2 closure is not
+# attempted in this rung-promotion task.
+_K2115_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1392, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2115_p53_skinny_n1392_alias_stack.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

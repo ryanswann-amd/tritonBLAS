@@ -132,6 +132,7 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
+    _K2115_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18,
 )
 
 
@@ -407,6 +408,13 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
+    # K-2115 (S-002): P53 (43rd-slot) skinny_N1392 K-COMPLEMENT alias-stack
+    # — 18 cells (off-by-48 wave-misaligned 9th-rung; 1392 mod 64 = 48,
+    # 1392 mod 128 = 112 — REJOIN to N=1264 mod-128 topology).  Per K-2056
+    # PMC delta-attribution, residue-48 grids divide gfx942's CU array
+    # more evenly than residue-32; grid-routing-bound (not compute-bound)
+    # per bit-identical VALU_BUSY across the 12-cell tile.
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2115_P53_SKINNY_N1392_KCOMPL_ALIASSTACK_18: return True
     return False
 
 

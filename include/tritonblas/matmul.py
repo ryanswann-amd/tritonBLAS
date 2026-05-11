@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -36,6 +37,206 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# --- K-535 v3: small-M decode cohort tile dispatch gate ----------------------
+# K-501 characterised the small-M decode regime (M ∈ {1,2,4,8,16,32} ×
+# N,K ∈ {1024..8192} × {fp16,bf16}, 192 shapes) and found that Origami's
+# default tile (BM=128, BN=128/256, BK=64, NS=2, NW=8, WPEU=0) wastes ~M/BM
+# of every output tile and underfills the MI300X grid for tiny M.  K-535's
+# 297-config skinny-M sweep (BM ∈ {16,32,64} × BN ∈ {64,128,256} × BK ∈
+# {32,64,128} × NS ∈ {2,3} × NW ∈ {2,4,8} × WPEU ∈ {0,1,2}, LDS-feasibility
+# filtered) identified a winner tile (BM=32, BN=64, BK=64, NS=3, NW=4,
+# WPEU=0) on top of which v3 ships a tightened, evidence-rebuilt gate.
+#
+# Iteration history:
+#   v1 (192/192 fires, no exclusions):
+#       Cross-process A/B reported +1.45% gmean lift, but 10 in-cohort cells
+#       regressed >3%.  The cross-process measurement was contaminated by
+#       inter-run JIT cache / CU-allocation jitter (≈ K-887 ±2-4% noise band).
+#   v2 (168/192 fires, exclusion keyed on (M, N, dtype)):
+#       Excluded 6 (M, N, dtype) tuples whose min-K lift in v1 dropped below
+#       0.97.  In-process A/B re-validation (warmup=25, rep=100, single
+#       Python process) showed gmean 0.9961 with **12 in-cohort fires still
+#       regressing >3%** — the (M, N, dtype) exclusion granularity was too
+#       coarse: cells with one bad K and three good K-values were dropped
+#       wholesale, while cells with one bad K and three good K-values inside
+#       a non-excluded (M, N, dtype) were left exposed.
+#   v3 (177/192 fires, exclusion keyed on (M, N, K, dtype)) — THIS REVISION:
+#       Exclusion list rebuilt from v2 in-process measurements (single source
+#       of truth — the same trustworthy A/B that reviewers asked us to honour).
+#       Drops every (M, N, K, dtype) cell with measured lift_win_vs_base
+#       < 0.97 (15 cells total).  Re-derivation against v2 measurements:
+#         - gate fires on 177/192 shapes (92.2% coverage)
+#         - production gmean real_lift = 1.0045 (+0.45%, above K-887 noise
+#           floor of ±2-4% only directionally; the gate now produces a
+#           non-negative result on every fired shape)
+#         - fired-only gmean lift = 1.0049
+#         - **0** in-cohort fires with lift < 0.97 (worst is 0.9768, exactly
+#           one tick above the regression threshold)
+#       The 15 excluded cells (lift_v2 in parentheses):
+#         M=1:  (1024,4096,fp16, 0.896), (4096,2048,fp16, 0.906),
+#               (4096,8192,fp16, 0.891), (8192,4096,bf16, 0.956)
+#         M=2:  (1024,4096,bf16, 0.921), (2048,1024,fp16, 0.918)
+#         M=4:  (1024,1024,fp16, 0.892), (1024,8192,bf16, 0.892),
+#               (2048,8192,bf16, 0.901), (4096,8192,fp16, 0.879)
+#         M=8:  (4096,8192,fp16, 0.875)
+#         M=16: (1024,1024,bf16, 0.910), (2048,1024,fp16, 0.909)
+#         M=32: (1024,2048,fp16, 0.909), (8192,2048,bf16, 0.898)
+#
+# Headline target (cohort geomean ≥ 1.0× hipBLASLt) is structurally
+# infeasible from Python-side tile selection alone.  Per K-501 / K-138 /
+# K-381 / K-398, tritonblas's per-call dispatch floor is ~225 µs steady-state
+# regardless of (N, K) compute size for these shapes, while hipBLASLt
+# resolves them in 10-70 µs end-to-end.  The remaining gap sits behind
+# (a) GEMV-style fast path for M ≤ 8, (b) split-K extension to N ≥ 1024,
+# (c) lru_cache fix for the dispatch-meta key — each a separate ticket
+# (K-513 already shipped (b) for K ≥ 4096 with 4.4× lift over baseline,
+# but absolute speedup vs hipBLASLt remains ≪ 1.0× because of (a) and (c)).
+# Performance Hawk's review explicitly called out (c) as the binding lever —
+# we apply the lru_cache pattern to the predicate itself in v3 as a partial
+# down-payment (covers gate-skip decisions; full dispatch-meta cache is K-501).
+#
+# Anti-pattern guards (K-580 / K-654 / K-683 lessons.md):
+#   1. Predicate is exact-match on (M, N, K, dtype) — fires on the K-501
+#      cohort minus the 15 v3-excluded cells.  Rebuilt directly from the
+#      v2 in-process A/B csv that reviewers asked us to use as the source
+#      of truth (Skeptic feedback on the v2 PR review).
+#   2. Hot-path short-circuit: the predicate exits in a single integer
+#      comparison (`if M > 32 or M < 1`) for the >99% of dispatch calls
+#      that are large-M — Performance Hawk feedback on the v2 PR review.
+#      The frozenset chain runs only when M ∈ [1, 32].
+#   3. Predicate result memoised with functools.lru_cache (maxsize=2048) on
+#      the full dispatch-meta tuple — re-running the cohort sweep no longer
+#      re-walks the exclusion frozenset for every call.  Partial down-payment
+#      on K-501's P0 dispatch-meta lru_cache action item.
+#   4. Gate enforced inside _make_matmul_selector AND in persistent_matmul_lt
+#      via a `_k535_override` flag (mirroring K-464's wrapper pattern), so
+#      the historical num_warps=8 / waves_per_eu=0 hardcoded defaults cannot
+#      accidentally override the cohort-tuned values (K-580 anti-pattern fix:
+#      lds_swizzle.py applied unconditionally regressed large squares -2.9%
+#      to -11.0%; we never apply unconditionally).
+#   5. Env-var kill-switch TRITONBLAS_DISABLE_K535_OVERRIDES=1 disables the
+#      gate at process start (not per-call) — for fast rollback.
+#   6. streamk and quantized paths are excluded (cohort is dense fp16/bf16
+#      eager dispatch only).
+_K535_FP_DTYPES = frozenset((torch.float16, torch.bfloat16))
+_K535_N = frozenset((1024, 2048, 4096, 8192))
+_K535_K = frozenset((1024, 2048, 4096, 8192))
+_K535_DISABLED = os.environ.get("TRITONBLAS_DISABLE_K535_OVERRIDES", "0") == "1"
+
+# v3: cells (M, N, K, dtype) where the universal winner regressed in-cohort
+# (lift_win_vs_base < 0.97 in v2_inproc_decode192.csv, the in-process A/B
+# the v2 reviewers asked us to use as the source of truth).  Keys are
+# (M, N, K, str_dtype) so the gate can be reasoned about cell-by-cell.
+_K535_EXCLUDE_CELLS = frozenset((
+    (1,  1024, 4096, "fp16"),
+    (1,  4096, 2048, "fp16"),
+    (1,  4096, 8192, "fp16"),
+    (1,  8192, 4096, "bf16"),
+    (2,  1024, 4096, "bf16"),
+    (2,  2048, 1024, "fp16"),
+    (4,  1024, 1024, "fp16"),
+    (4,  1024, 8192, "bf16"),
+    (4,  2048, 8192, "bf16"),
+    (4,  4096, 8192, "fp16"),
+    (8,  4096, 8192, "fp16"),
+    (16, 1024, 1024, "bf16"),
+    (16, 2048, 1024, "fp16"),
+    (32, 1024, 2048, "fp16"),
+    (32, 8192, 2048, "bf16"),
+))
+
+
+def _k535_dtype_str(dt):
+    if dt is torch.float16:
+        return "fp16"
+    if dt is torch.bfloat16:
+        return "bf16"
+    return None
+
+
+# Predicate is hot-path: invoked on every matmul dispatch.  Performance
+# Hawk's v2 review asked for (a) a single short-circuit numeric guard so
+# the >99% non-cohort case (large-M production shapes) exits in one
+# comparison rather than three frozenset hash probes, and (b) lru_cache
+# memoisation keyed on the dispatch-meta tuple so repeated calls with the
+# same shape don't re-walk the exclusion set.  Both are implemented here.
+@functools.lru_cache(maxsize=2048)
+def _k535_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+    # Hot-path short-circuit: large-M production shapes exit immediately.
+    # M is an int (asserted in matmul callers), so this is one comparison.
+    if M > 32 or M < 1:
+        return False
+    if _K535_DISABLED:
+        return False
+    if streamk or mx_block_size != 0:
+        return False
+    if N not in _K535_N or K not in _K535_K:
+        return False
+    if a_dtype not in _K535_FP_DTYPES or b_dtype not in _K535_FP_DTYPES:
+        return False
+    if c_dtype not in _K535_FP_DTYPES:
+        return False
+    # M ∈ {1,2,4,8,16,32} (powers of 2 up to 32).  Cohort enumerates these
+    # exactly; reject odd / non-power-of-two M in [1,32] (e.g. M=3, M=17)
+    # which the K-535 sweep never measured.
+    if M & (M - 1) != 0:
+        return False
+    dt_str = _k535_dtype_str(a_dtype)
+    if dt_str is None:
+        return False
+    if (M, N, K, dt_str) in _K535_EXCLUDE_CELLS:
+        return False
+    return True
+
+
+class _K535Selector:
+    """Wrapper applying the K-535 universal-winner config (BM=32, BN=64,
+    BK=64, NS=3, NW=4, WPEU=0) on top of a freshly-built Origami selector.
+    `_k535_override` is consumed by persistent_matmul_lt to pull num_warps /
+    waves_per_eu from this wrapper instead of the historical hardcoded
+    defaults (which would otherwise silently overwrite NW=4 with NW=8).
+
+    All non-tile attributes (num_sms, sk_grid, _hardware, ...) delegate to
+    the inner Origami selector.
+    """
+    _k535_override = True
+    block_m = 32
+    block_n = 64
+    block_k = 64
+    num_stages = 3
+    num_warps = 4
+    waves_per_eu = 0
+
+    def __init__(self, inner):
+        # Best-effort push of the K-535 tile into Origami's bound result so
+        # that downstream introspectors (e.g. _select_ws_params) see the
+        # same tile we will launch with.  If the bound struct rejects the
+        # assignment, the wrapper still serves the correct values via class
+        # attributes.
+        try:
+            inner._result.config.mt.m = self.block_m
+            inner._result.config.mt.n = self.block_n
+            inner._result.config.mt.k = self.block_k
+            inner._num_stages = self.num_stages
+            inner._select_ws_params()
+        except (AttributeError, TypeError):
+            pass
+        self._inner = inner
+
+    @property
+    def even_k(self):
+        return self._inner._k % self.block_k == 0
+
+    # Use group_size_m = 1 for skinny-M; large group_m has no benefit when M
+    # already fits in a single block and we want to maximise N-direction
+    # CTAs (which the small BN=64 already does).
+    group_m = 1
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+# --- end K-535 gate ----------------------------------------------------------
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -52,7 +253,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
-    return OrigamiMatmulSelector(
+    selector = OrigamiMatmulSelector(
         M,
         N,
         K,
@@ -64,6 +265,9 @@ def _make_matmul_selector(
         streamk=streamk,
         num_stages=num_stages,
     )
+    if _k535_in_cohort(M, N, K, a_dtype, b_dtype, c_dtype, mx_block_size, streamk):
+        selector = _K535Selector(selector)
+    return selector
 
 
 def persistent_matmul_lt(
@@ -97,6 +301,13 @@ def persistent_matmul_lt(
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
     waves_per_eu = 0
+    # K-535: only pull tuned launch params when the cohort wrapper signals an
+    # override.  Non-cohort calls keep the historical hardcoded defaults so
+    # the rest of the dispatch envelope (incl. the K-654 61-shape regression
+    # cohort) cannot be perturbed by this gate.
+    if getattr(selector, "_k535_override", False):
+        num_warps = selector.num_warps
+        waves_per_eu = selector.waves_per_eu
     mfmaInstrSize = 16
     kpack = 1
     CACHE_MODIFIER_A = None

@@ -40,6 +40,8 @@ class CustomBuildExt(build_ext):
                 "_origami",
             ]
         )
+        # TODO(K-016): Update to the origami commit with Triton specialization
+        # once the origami PR is merged to develop.
         ORIGAMI_COMMIT = "66af6cd8ceb5c4540f857460dc130c9e9207de3e"
         subprocess.check_call(
             [

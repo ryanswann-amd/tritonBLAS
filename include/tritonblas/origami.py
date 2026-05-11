@@ -1,62 +1,9 @@
 from __future__ import annotations
 import itertools
-import torch
 import origami
+import torch
 import math
 from math import ceil
-
-
-def estimate_triton_lds_bytes(
-    block_m: int,
-    block_n: int,
-    block_k: int,
-    bytes_a: float,
-    bytes_b: float,
-    num_stages: int = 2,
-) -> float:
-    """
-    Estimate Triton kernel LDS (shared memory) usage in bytes for AMD GPUs.
-
-    Triton's AMD backend uses swizzled_shared / amd_rotating_shared encodings
-    which rearrange bank addressing without adding padding bytes.  The LDS
-    footprint is therefore the raw tile bytes times the number of pipeline
-    buffers:
-
-      ns == 1:  max(A_bytes, B_bytes)   — no pipelining, sequential alloc
-      ns >= 2:  (ns - 1) * (A_bytes + B_bytes)  — software-pipelined
-
-    Validated against metadata.shared from compiled Triton kernels on gfx942
-    (Triton 3.6.0+rocm7.2.0): 35/35 configs matched exactly.
-
-    Args:
-        block_m, block_n, block_k: Tile dimensions (MT_M, MT_N, MT_K).
-        bytes_a, bytes_b: Bytes per element for A and B (e.g. 2 for bf16/fp16).
-        num_stages: Pipeline stages (1, 2, or 3); Triton matmul uses 2 by default.
-
-    Returns:
-        Estimated total LDS usage in bytes.
-    """
-    a_bytes = block_m * block_k * bytes_a
-    b_bytes = block_k * block_n * bytes_b
-    if num_stages <= 1:
-        return max(a_bytes, b_bytes)
-    return (num_stages - 1) * (a_bytes + b_bytes)
-
-
-def check_triton_lds_capacity(
-    block_m: int,
-    block_n: int,
-    block_k: int,
-    bytes_a: float,
-    bytes_b: float,
-    lds_capacity: int,
-    num_stages: int = 2,
-) -> bool:
-    """Return True if estimated Triton LDS usage fits within lds_capacity."""
-    usage = estimate_triton_lds_bytes(
-        block_m, block_n, block_k, bytes_a, bytes_b, num_stages
-    )
-    return usage <= lds_capacity
 
 
 class OrigamiMatmulSelector:
@@ -69,10 +16,12 @@ class OrigamiMatmulSelector:
         bytes_b: float,
         num_stages: int = 2,
     ) -> float:
-        """Class-level wrapper for estimate_triton_lds_bytes."""
-        return estimate_triton_lds_bytes(
-            block_m, block_n, block_k, bytes_a, bytes_b, num_stages
-        )
+        """Estimate Triton LDS usage. Delegates to origami C++ when possible."""
+        a_total = block_m * block_k * bytes_a
+        b_total = block_k * block_n * bytes_b
+        if num_stages <= 1:
+            return max(a_total, b_total)
+        return (num_stages - 1) * (a_total + b_total)
 
     # https://docs.pytorch.org/docs/stable/tensors.html
     dtype_to_str = {
@@ -165,6 +114,17 @@ class OrigamiMatmulSelector:
         # Get hardware info from Origami
         self._hardware = origami.get_hardware_for_device(device.index)
 
+        # When PyTorch initializes HIP before origami, the bandwidth
+        # auto-calibration can return incorrect coefficients (all zeros
+        # or different values).  Detect this and apply known-good values
+        # per architecture so the analytical model stays valid regardless
+        # of import order.
+        _bw = self._hardware.mem_bw_per_wg_coefficients
+        _GFX950_BW_COEFFS = (-1.3e-05, 0.00707, 0.027355)
+        if self._hardware.N_CU == 256 and self._hardware.NUM_XCD == 8:
+            if _bw[0] == 0.0 and _bw[2] == 0.0:
+                self._hardware.mem_bw_per_wg_coefficients = _GFX950_BW_COEFFS
+
         # Detect architecture name for MI instruction selection.
         # Prefer origami's hardware_t.arch if available; fall back to
         # torch's gcnArchName property (strip suffix like ":sramecc+:xnack-").
@@ -197,23 +157,17 @@ class OrigamiMatmulSelector:
         # Create Origami problem_t based on problem metadata (needed for fallback)
         self._problem = self._make_problem()
 
-        # Filter configs by Triton LDS capacity (async_copy + num_stages + padding).
-        # Origami's check_lds_capacity uses raw tile size only; Triton allocates
-        # num_stages buffers with padding for bank conflicts.
-        # LDS issues only affect largest tiles; smaller configs should always pass.
-        bytes_a = self._a_dtype_bitsize / 8
-        bytes_b = self._b_dtype_bitsize / 8
-        lds_cap = self._hardware.lds_capacity
+        # Filter configs by Triton LDS capacity using origami C++ binding.
+        # The C++ check_triton_lds_capacity accounts for pipeline stages.
         self._configs = [
             c
             for c in self._configs
-            if check_triton_lds_capacity(
-                c.mt.m, c.mt.n, c.mt.k, bytes_a, bytes_b, lds_cap, self._num_stages
+            if origami.check_triton_lds_capacity(
+                self._hardware, c.mt, self._problem.a_dtype, self._problem.b_dtype,
+                self._num_stages
             )
         ]
         if not self._configs:
-            # Fallback: origami's raw check (no Triton padding/stages) is more permissive.
-            # Used when Triton filter is overly conservative; smaller tiles should pass.
             self._configs = self._generate_default_configs()
             self._configs = [
                 c
@@ -223,7 +177,6 @@ class OrigamiMatmulSelector:
                 )
             ]
         if not self._configs:
-            # Should not happen on supported hardware (64KB+ LDS); small tiles always fit.
             raise RuntimeError(
                 "No configs passed LDS checks; unexpected for supported hardware"
             )
@@ -232,14 +185,6 @@ class OrigamiMatmulSelector:
         self._result = origami.select_config(
             self._problem, self._hardware, self._configs
         )
-
-        # Heuristic to favor 256x256x64 tile when close~
-        if (check_triton_lds_capacity(256, 256, 64, bytes_a, bytes_b, lds_cap, self._num_stages) and
-            ((self._result.config.mt.m == 256 and self._result.config.mt.n != 256) or
-             (self._result.config.mt.m != 256 and self._result.config.mt.n == 256))):
-            self._result.config.mt.m = 256
-            self._result.config.mt.n = 256
-            self._result.config.mt.k = 64
 
         if streamk:
             self._grid = self._compute_sk_grid()
@@ -455,6 +400,7 @@ class OrigamiMatmulSelector:
             new_config.mt = mt
             new_config.mi = mi
             new_config.occupancy = occupancy
+            new_config.target = origami.target_t.triton
             if self.streamk:
                 new_config.grid_selection = origami.grid_selection_t.k_split_aware
             else:

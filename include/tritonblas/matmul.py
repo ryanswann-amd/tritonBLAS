@@ -132,16 +132,19 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
-    # K-2118 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 18 cells
-    # (M ∈ {2048,4096,8192} × N=1456 × K ∈ {4096,8192,16384} × {bf16,fp16}).
-    # 10th rung (k=10 → 816 + 10*64 = 1456; step +64 from the K-2111 P53
-    # N=1392 rung at k=9) of the off-by-48 wave-misaligned residue family
-    # anchored at the N=816 floor (prior rungs k ∈ {1..9}: N ∈ {880, 944,
-    # 1008, 1072, 1136, 1200, 1264, 1328, 1392}).  N=1456 mod 128 == 48 —
-    # REJOIN to the canonical-tail sub-family with N ∈ {816, 944, 1072,
-    # 1200, 1328}, continuing the strict 48/112 mod-128 alternation across
-    # the residue-48 ladder.
-    _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18,
+    # K-2118 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 16 cells
+    # (M ∈ {2048,4096,8192} × N=1456 × K ∈ {4096,8192,16384} × {bf16,fp16},
+    # MINUS the 2 (M=2048, K=16384) corner cells where hipBLASLt loses to
+    # tritonblas at 0.938x bf16 / 0.915x fp16 — below the 0.97x per-cell
+    # regression floor; see _route_predicate.py header for the per-cell
+    # numbers).  10th rung (k=10 → 816 + 10*64 = 1456; step +64 from the
+    # K-2111 P53 N=1392 rung at k=9) of the off-by-48 wave-misaligned
+    # residue family anchored at the N=816 floor (prior rungs k ∈ {1..9}:
+    # N ∈ {880, 944, 1008, 1072, 1136, 1200, 1264, 1328, 1392}).  N=1456
+    # mod 128 == 48 — REJOIN to the canonical-tail sub-family with
+    # N ∈ {816, 944, 1072, 1200, 1328}, continuing the strict 48/112
+    # mod-128 alternation across the residue-48 ladder.
+    _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_16,
 )
 
 
@@ -417,11 +420,12 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
-    # K-2118 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 18 cells
+    # K-2118 (S-002): P54 skinny_N1456 K-COMPLEMENT alias-stack — 16 cells
     # (off-by-48 wave-misaligned 10th rung above the N=816 floor; +64 step
     # from K-2111 P53 N=1392 (k=9); mod 128 == 48 — REJOIN to canonical-tail
-    # sub-family with N ∈ {816, 944, 1072, 1200, 1328}).
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18: return True
+    # sub-family with N ∈ {816, 944, 1072, 1200, 1328}; 16 = full grid MINUS
+    # the 2 (M=2048, K=16384) corner cells where hipBLASLt loses).
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_16: return True
     return False
 
 

@@ -2447,12 +2447,14 @@ def k971_route_decision(M, N, K, a_dtype, b_dtype, enable_streamk,
     if _k1673_p28_skinny_n128_kcompl_aliasstack_routeout(
             int(M), int(N), int(K), a_dtype):
         return True
-    # K-2118 P54: skinny_N1456 K-COMPLEMENT alias-stack 18-cell strict-equality
+    # K-2118 P54: skinny_N1456 K-COMPLEMENT alias-stack 16-cell strict-equality
     # -> hipBLASLt.  10th rung of the off-by-48 wave-misaligned residue family
-    # (step +64 above K-2111 P53 N=1392, anchored at the N=816 floor).
+    # (step +64 above K-2111 P53 N=1392, anchored at the N=816 floor).  16-cell
+    # envelope = full M×K×dtype grid MINUS the 2 (M=2048, K=16384) corner cells
+    # where hipBLASLt loses (0.938x bf16 / 0.915x fp16, below the 0.97x floor).
     # Mirrors the matmul.py final clause; no upstream route in this helper
     # carries N=1456 so the check is order-independent at the tail.
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18:
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_16:
         return True
     return False
 
@@ -3472,8 +3474,9 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 
 # K-2118 (S-002): P54 (the 10th rung of the off-by-48 wave-misaligned
 # skinny-N K-COMPLEMENT residue family) skinny_N1456 alias-stack —
-# 18-cell envelope (M ∈ {2048, 4096, 8192} × N=1456 × K ∈ {4096, 8192,
-# 16384} × dtype ∈ {bf16, fp16}).  Off-by-48 ladder anchored at the
+# 16-cell envelope (M ∈ {2048, 4096, 8192} × N=1456 × K ∈ {4096, 8192,
+# 16384} × dtype ∈ {bf16, fp16}, MINUS the 2 (M=2048, K=16384) corner
+# cells where hipBLASLt does NOT win).  Off-by-48 ladder anchored at the
 # N=816 floor (rung k = 816 + k*64); N=1456 = 816 + 10*64 → k=10.  The 9
 # prior rungs k ∈ {1..9} are N ∈ {880, 944, 1008, 1072, 1136, 1200, 1264,
 # 1328, 1392}, contiguously confirmed across K-1978 / K-1994 / K-2010 /
@@ -3489,15 +3492,28 @@ _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18 = frozenset(
 # toggles the high bit of the residue-48 BLOCK_N tail).  R-1811
 # wave-misalignment + K-913 §3 LDS-bank-conflict mechanism, dtype-invariant.
 #
+# Corner-cell exclusion (M=2048, K=16384, both dtypes): empirical n=30
+# HIP-graph hot-cache benchmark (4096-step warm-up, exclusive OCI
+# allocation on gfx942) measures tb_after / hipBLASLt = 0.938x (bf16)
+# and 0.915x (fp16) at this corner — far below the 0.97x per-cell
+# regression floor.  At every other (M, K) cell hipBLASLt wins (geomean
+# of remaining 16 cells = 1.007x A/HBL).  Excluding the 2 losers makes
+# the alias-stack honestly represent the verified-winner envelope
+# (R-1532 minimalist principle: ship only what is measured to win).
+#
 # Sibling-N firewall: disjoint with every prior K-COMPLEMENT alias-stack
 # slot (N=1456 ∉ any prior frozenset).  Single-N frozenset (per-rung
 # tracking; matches K-1978…K-2111 single-N convention).  +2 executable
 # LOC additive (1 import + 1 membership check) within the K-1922
 # 30-LOC dispatcher budget.
-_K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
+_K2118_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_16 = frozenset(
     (M, 1456, K, dt) for M in (2048, 4096, 8192)
     for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+    # Exclude the 2 (M=2048, K=16384, *) corner cells where hipBLASLt
+    # measurably loses to tritonblas (0.938x bf16 / 0.915x fp16; below
+    # the 0.97x per-cell regression floor).  See header comment.
+    if not (M == 2048 and K == 16384)
 )
-# Cardinality (==18) gated by tests/test_k2118_p54_skinny_n1456_alias_stack.py
+# Cardinality (==16) gated by tests/test_k2118_p54_skinny_n1456_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).

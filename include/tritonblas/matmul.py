@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,10 +13,67 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from . import guarded_override as _go
+# NOTE: no override package is imported here.  GuardedOverride instances
+# register themselves explicitly only after passing the K-883 §5 LAND
+# verdict via run_falsification (K-901 design).  Keeping the dispatch site
+# override-naive means an empty registry is the safe default.
+
+# K-1003 R-K979 P5 Gate-0 admission predicate + K-905/K-971 anchors live in
+# a torch-free helper module so unit/integration tests can import them
+# without booting the GPU stack (triton/origami/torch.cuda init chain).
+from ._route_predicate import (
+    K971_ROUTE_TABLE as _K971_ROUTE_TABLE,
+    R_K979_P5_route_to_hbl as _R_K979_P5_route_to_hbl,
+    R_K1037_P6_admit_wpeu1 as _R_K1037_P6_admit_wpeu1,
+    _p8_mfma_issue_stall_routeout as _R_K1144_P8_mfma_issue_stall_routeout,
+    R_K1142_E1_route_to_hbl as _R_K1142_E1_route_to_hbl,
+)
 
 
 
 _tensor_cache = {}
+
+
+def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing):
+    # K-989: keep K-971 killswitch env var as the single L3 disable lever
+    # (per K-883 R1 — one cohort, one disable). K-1003 layers the R-K979 P5
+    # Gate-0 admission predicate AHEAD of the strict-equality table so the
+    # broader K-984+K-989+K-931 cohort dispatches via closed-form rather
+    # than per-shape entries; strict-equality table retained for K-905/K-971
+    # mid-square long-K anchors that structurally collide with K-950 LAND.
+    if os.environ.get("TRITONBLAS_DISABLE_K971") == "1": return False
+    if enable_streamk or work_stealing or str(a_dtype) != str(b_dtype): return False
+    # K-1144 (S-002): P8 MFMA-issue-stall direct hipBLASLt route-OUT for
+    # the triply-validated 25-cell envelope (13 K-1121 anchors + 12 K-1131
+    # neighbors).  Consulted BEFORE the K-1089 P6 admit so K-1121's paired
+    # n=30 measurement evidence (hipBLASLt wins on S24, S29 at ~1.20-1.22x;
+    # K-1131 N11 at >=1.15x) overrides the K-1089 envelope admit on the
+    # small subset of cells where the two envelopes overlap.  K-1074's
+    # paired n=30 LAND audit and K-1098's clause-by-clause backtest
+    # falsified the K-1089 admit on those cells; P8 codifies the
+    # correction.  No double-routing: for cells already routed OUT by P5
+    # Clause-2 / K-1062 Clause-4, P8's strict-equality match returns the
+    # same True verdict (frozenset O(1) lookup; harmless).
+    if _R_K1144_P8_mfma_issue_stall_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1209-stacked / K-1216 (S-002): E1 axis-aligned envelope as defense-
+    # in-depth AFTER P8 28-cell strict-equality. K-1209 ablation on K-931
+    # always-uncovered top-40 (40 cells) confirmed E1 contributes 0 marginal
+    # cells beyond P8+K-1175 (16/40 union vs 16/40 P8+K-1175); E1 is retained
+    # for non-K-931 cohorts where the K-1142 -> K-1161 -> K-1175 audit chain
+    # has not yet enumerated every K-1142-envelope-admittable cell. The
+    # K-1142 carve-out (M >= 4480) ∧ (K >= 256) holds at 0 FPs on K-931.
+    # E2 K-floor=128 EXCLUDED per K-1176 cross-arch failure (0/8 cells on
+    # MI325X/MI355X) — the K-axis floor stays pinned at K=256.
+    if _R_K1142_E1_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
+    # K-1089 (S-002): R-K1037 P6 structural surrogate admits MFMA-issue-stall
+    # cells back to in-kernel dispatch with waves_per_eu=1 (set in the
+    # persistent dispatch path below). When P6 admits, route-OUT (P5 + the
+    # K-905/K-971 strict-equality table) is short-circuited for the cell.
+    if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a_dtype): return False
+    if _R_K979_P5_route_to_hbl(int(M), int(N), int(K), a_dtype): return True
+    return (int(M), int(N), int(K), str(a_dtype)) in _K971_ROUTE_TABLE
+
 
 current_device_index = torch.cuda.current_device()
 current_device = torch.cuda.get_device_properties(current_device_index)
@@ -102,6 +160,14 @@ def persistent_matmul_lt(
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
+    # K-1089: structural surrogate of K-1037 P6 admits the MFMA-issue-stall
+    # cohort to in-kernel dispatch with waves_per_eu=1 (K-1051 confirmed via
+    # 4-iter PMC research that wpeu=1 wins are predictable on K-1032 cells).
+    # The route-OUT short-circuit in `_k971_route_to_hbl` already vetoes
+    # routing for these cells; we only need to set the in-kernel knob here.
+    if _R_K1037_P6_admit_wpeu1(int(M), int(N), int(K), a.dtype):
+        waves_per_eu = 1
+
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
     if num_xcds > 0:
@@ -159,6 +225,32 @@ def persistent_matmul_lt(
         )
     else:
         grids = total_tiles
+
+        # K-883/K-901 guarded-override registry hook.  Single dispatch site,
+        # routed first (before any future range-keyed hook, R1 — dispatch-
+        # order-first routing).  The registry enforces L1/L2/L3/L5/L6; the
+        # call-site honors L4 (LDS budget) below via _overrides_apply.
+        _ovr_updates = _go.apply_override_in_dispatcher(
+            M=M, N=N, K=K, dtype=a.dtype,
+            block_m=BLK_M, block_n=BLK_N, block_k=BLK_K,
+            num_stages=num_stages, num_warps=num_warps,
+            waves_per_eu=waves_per_eu, kpack=kpack,
+            mfma_instr_size=mfmaInstrSize,
+            total_tiles=total_tiles, n_cu=selector._hardware.N_CU,
+            work_stealing=work_stealing,
+            bytes_per_elem=a.element_size(),
+        )
+        if _ovr_updates and not _ovr_updates.get("lds_blocked"):
+            BLK_M = _ovr_updates.get("BLOCK_SIZE_M", BLK_M)
+            BLK_N = _ovr_updates.get("BLOCK_SIZE_N", BLK_N)
+            BLK_K = _ovr_updates.get("BLOCK_SIZE_K", BLK_K)
+            num_stages = _ovr_updates.get("num_stages", num_stages)
+            num_warps = _ovr_updates.get("num_warps", num_warps)
+            waves_per_eu = _ovr_updates.get("waves_per_eu", waves_per_eu)
+            kpack = _ovr_updates.get("kpack", kpack)
+            mfmaInstrSize = _ovr_updates.get("matrix_instr_nonkdim", mfmaInstrSize)
+            grids = _ovr_updates.get("grids", grids)
+            total_programs = _ovr_updates.get("total_programs", total_programs)
 
         kk = _maybe_wrap(persistent_matmul, probe_tensor=a)[(grids,)](
             a,
@@ -402,6 +494,8 @@ def _matmul(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        return torch.matmul(a, b)
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
@@ -461,6 +555,9 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if _k971_route_to_hbl(M, N, K, a.dtype, b.dtype, enable_streamk, work_stealing):
+        torch.matmul(a, b, out=out)
+        return None
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 

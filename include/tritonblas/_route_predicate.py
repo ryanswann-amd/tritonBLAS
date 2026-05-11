@@ -3501,3 +3501,9 @@ _K2127_P54_SKINNY_N1456_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2127_p54_n1456_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2156 (S-002): P56 N=1584 K-COMPLEMENT alias-stack — 12th rung of off-by-48 (mod-64=48) ladder, +64 above K-2127 P55 N=1520.
+_K2156_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1584, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)

@@ -37,6 +37,9 @@ from ._route_predicate import (
     # K-1417 (S-002): P15 skinny_N512 K-COMPLEMENT EXTENSION 12-cell route-OUT
     # (9th-position).
     _k1409_p15_skinny_n512_routeout as _R_K1409_P15_skinny_n512_routeout,
+    # K-1429 (S-002): P16 skinny_N1024 K-COMPLEMENT 29-cell route-OUT
+    # (10th-position).
+    _k1429_p16_skinny_n1024_routeout as _R_K1429_P16_skinny_n1024_routeout,
 )
 
 
@@ -129,6 +132,29 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # construction with all P1–P14 sub-frozensets via cross-frozenset
     # asserts at module load.
     if _R_K1409_P15_skinny_n512_routeout(int(M), int(N), int(K), a_dtype): return True
+    # K-1429 (S-002): P16 skinny_N1024 K-COMPLEMENT 29-cell route-OUT
+    # (10th-position envelope).  Stacks AFTER K-1417 P15 per K-1175
+    # stacked-predicate convention; closes the fourth-N successive sibling
+    # of the K-COMPLEMENT axis at N=1024 across the FULL K-axis sweep
+    # K ∈ {2048, 4096, 8192, 16384, 32768} (BASE + EXTREMES merged into a
+    # single 29-cell frozenset).  Mechanism: at N=1024 the persistent_matmul
+    # tile aspect misaligns against the M ∈ {2048, 4096, 8192} anchors,
+    # accumulating LDS-bank conflicts beyond the K-913 §3 N=512 attenuation;
+    # hipBLASLt's split-K kernel re-selects at N=1024 to a pattern that
+    # better matches the M anchors.  The R-1409 monotone N-axis attenuation
+    # (1.678 → 1.471 → 1.372 across N=128/256/512) REVERSES upward at
+    # N=1024 to cohort geomean tb/hbl = 2.23× (BASE 2.08× / EXTREMES 2.48×),
+    # exceeding every prior N bucket including N=128 — the K-1131 A2 1.40×
+    # cohort floor (MISSED by 2.8 pp at N=512) is RECOVERED at N=1024
+    # (R-1429.SKINNY-N1024-K-COMPLEMENT-DISCRIMINATOR-REVERSES-ATTENUATION-AT-N1024).
+    # K-1429 paired n=30 + B=10000 vectorised bootstrap CI95 on MI300X
+    # gfx942 (OCI amd-arad MI300X fallback): 29/30 ROUTE-OUT, range
+    # 1.26×–8.85×, min CI95-lo = 1.267, single reject at
+    # (2048, 1024, 4096, bf16) at r=1.015 (CI95-lo 1.008 > 1.0 but ratio
+    # below strict 1.05 floor).  Envelope grows 97 → 126 cells.  Disjoint
+    # by construction with all P1–P15 sub-frozensets via cross-frozenset
+    # asserts at module load.
+    if _R_K1429_P16_skinny_n1024_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

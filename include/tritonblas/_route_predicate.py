@@ -3515,21 +3515,16 @@ _K2106_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18 = frozenset(
 # (R-1532 / R-1720 / R-1775).
 
 
-# K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate.
-# Set-equivalent to the union of 10 per-N alias-stack frozensets (P45..P52
-# plus K-2089 forward-predicted upper bound) covering N in {816, 880, 944,
-# 1008, 1072, 1136, 1200, 1264, 1328, 1392}, each on the verified envelope
-# M in {2048, 4096, 8192} x K in {4096, 8192, 16384} x {bf16, fp16}
-# (10 * 18 = 180 cells; vs the equivalent literal frozenset cascade ~ 242
-# LOC).  Closed form: (N % 64 == 48) AND (816 <= N <= 1392), refined by
-# the M/K/dtype envelope to preserve exact set-equivalence with the
-# per-rung cascades documented at K-1978 P45 / K-1994 P45 / K-2010 P46 /
-# K-2031 P47 / K-2047 P48 / K-2066 P49 / K-2077 P50 / K-2091 P51 / K-2106
-# P52 / K-2089 P52a (N=1392 forward).  Test:
-# tests/test_residue48_predicate.py pins per-rung admits, in-range
-# non-residue rejects (e.g. N=832, 864), and predicate <-> documented
-# rung-set equivalence over N in [0, 4096].
+# K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate; subsumes
+# 10 per-N alias-stacks N in {816,880,944,1008,1072,1136,1200,1264,1328,1392}
+# x M in {2048,4096,8192} x K in {4096,8192,16384} x {bf16,fp16} (180 cells).
+def _dtype_is_fp16(dtype) -> bool:
+    """Match torch.float16 without importing torch (mirror of _dtype_is_bf16)."""
+    return str(dtype) == "torch.float16"
+
+
 def _R_K2089_residue48_kcompl_routeout(M, N, K, a_dtype):
+    """(N%64==48) AND (816<=N<=1392) AND envelope(M,K,dtype)."""
     return ((N % 64 == 48) and (816 <= N <= 1392)
             and M in (2048, 4096, 8192) and K in (4096, 8192, 16384)
-            and str(a_dtype) in ("torch.bfloat16", "torch.float16"))
+            and (_dtype_is_bf16(a_dtype) or _dtype_is_fp16(a_dtype)))

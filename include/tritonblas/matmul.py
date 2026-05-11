@@ -132,18 +132,12 @@ from ._route_predicate import (
     # task; K-1900 compact-predicate substitution failed at depth-2 closure
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
-    # K-2106 (S-002): P52 (42nd-slot) skinny_N1328 K-COMPLEMENT alias-stack --
-    # kept as the test-pinned per-rung literal (cardinality + invariant
-    # tests in tests/test_k2106_p52_skinny_n1328_alias_stack.py).  Dispatch
-    # itself routes via _R_K2089_residue48_kcompl_routeout below — the
-    # closed-form predicate that subsumes the entire residue-48 ladder
-    # (N in {816..1392} every 64) into a single membership check.
+    # K-2106 N=1328 frozenset retained as test fixture only; live dispatch
+    # uses K-2089 closed-form predicate below (subsumes it set-equivalently).
     _K2106_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18,
-    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate -- a
-    # single +5 LOC drop-in replacement for the per-rung frozenset cascade
-    # P45..P52 (and K-2089 forward N=1392).  Set-equivalent to the union
-    # of the 10 documented per-N alias-stacks over the verified envelope.
-    _R_K2089_residue48_kcompl_routeout as _R_K2089_residue48_kcompl_routeout,
+    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate replacing
+    # the per-N alias-stack cascade P45..P52 (N=816..1392 step 64).
+    _R_K2089_residue48_kcompl_routeout,
 )
 
 
@@ -419,16 +413,8 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
-    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate -- one
-    # +5 LOC closed-form replacement for the per-N alias-stack cascade
-    # P45..P52 (and the K-2089 forward N=1392 upper bound) covering N in
-    # {816,880,944,1008,1072,1136,1200,1264,1328,1392}.  Set-equivalent
-    # to the union of the 10 per-N frozensets on the verified envelope
-    # M in {2048,4096,8192} x K in {4096,8192,16384} x {bf16,fp16}.  The
-    # K-2106 N=1328 frozenset above is retained as the test-pinned literal
-    # (cardinality + sibling-N firewall invariants); this predicate is
-    # the live dispatch path and subsumes it (1328 % 64 == 48 and
-    # 816 <= 1328 <= 1392).
+    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate
+    # subsumes per-N alias-stacks P45..P52 + K-2089 N=1392 forward.
     if _R_K2089_residue48_kcompl_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 

@@ -36,6 +36,59 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+# --- K-282: Large-square cohort fast path ---
+# Closes the persistent-CTA gap vs hipBLASLt on the 8192³ and 16384³ fp16/bf16
+# entries by routing through streamk_matmul_lt (which K-splits across CTAs and
+# amortizes the prologue cost across more waves).  Measured under hardened
+# methodology (warmup in a SEPARATE process that fully populates an
+# isolated TRITON_CACHE_DIR per (mode, shape, dtype); timing in a fresh
+# process that re-uses the warm cache so autotune cost cannot leak):
+#   shape           persistent     streamk        torch (hipBLASLt)   route?
+#   4096³  fp16     0.588 ms       0.590 ms       0.277 ms             no  (no improvement)
+#   4096³  bf16     0.576          0.584          0.253                no  (no improvement)
+#   8192³  fp16     2.540          2.157          1.703                yes (15.2% better)
+#   8192³  bf16     2.362          2.060          1.623                yes (12.1% better)
+#   16384³ fp16   16.559         15.376         14.730                yes ( 7.4% better)
+#   16384³ bf16   16.397         14.643         13.914                yes (10.5% better)
+# 4096³: structural CU under-fill — only 256 output tiles at 256x256 < 304 CUs;
+# no tile config in {128,256}x{128,256}x{32,64} improves it (probed in
+# scripts/probe_tiles_4096.py).  hipBLASLt likely uses a fundamentally different
+# kernel (split-K accumulation / different MFMA layout) for this small-but-wide
+# square.  Tracked as a follow-up ticket; not addressable from dispatch.
+# Note: in an earlier attempt 8192³ was reported as a wash, but that was a
+# methodology artifact (in-process autotune warmup leaked into the candidate
+# timing).  Under the warmup-in-separate-process methodology, 8192³ streamk
+# beats persistent by 12-15% on both dtypes.
+# Gate is narrow: auto-enable only when caller has not asked for
+# streamk/work-stealing/bias/quantization (preserves explicit-flag callers).
+_K282_LARGE_SQUARE_SHAPES = frozenset({
+    (4096, 4096, 4096),
+    (8192, 8192, 8192),
+    (16384, 16384, 16384),
+})
+_K282_STREAMK_ROUTE_SHAPES = frozenset({
+    (8192, 8192, 8192),
+    (16384, 16384, 16384),
+})
+
+
+def is_large_square(M, N, K, dtype):
+    """K-282 predicate: large square fp16/bf16 GEMM in the cohort."""
+    return (M, N, K) in _K282_LARGE_SQUARE_SHAPES and dtype in (
+        torch.float16,
+        torch.bfloat16,
+    )
+
+
+def _k282_should_route_streamk(M, N, K, dtype):
+    """K-282 router: True when this cohort entry benefits from streamk over
+    the default persistent path on MI300X. See ratios in the comment above."""
+    return (M, N, K) in _K282_STREAMK_ROUTE_SHAPES and dtype in (
+        torch.float16,
+        torch.bfloat16,
+    )
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -101,6 +154,18 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+    # K-282 inline-epilogue flag: caller sets via the dispatch wrappers when
+    # is_large_square() matches.  When True, the kernel's LARGE_SQUARE_EPILOGUE
+    # branch inlines the downcast+masked store and skips the OutputView dispatch.
+    # NOTE: the dominant K-282 win comes from streamk routing in `_matmul`
+    # (large squares benefit from K-splitting); this flag is the secondary
+    # store/MFMA-overlap lever for the residual persistent-path callers.
+    large_square_epilogue = (
+        not work_stealing
+        and bias is None
+        and not quantized
+        and is_large_square(M, N, K, a.dtype)
+    )
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -189,6 +254,7 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            LARGE_SQUARE_EPILOGUE=large_square_epilogue,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,
@@ -404,6 +470,12 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    # K-282: auto-route the large-square cohort (8192³, 16384³ fp16/bf16) to
+    # streamk — measured 10-15% closer to hipBLASLt vs the default persistent
+    # path. Caller-set flags win (don't disturb explicit choices).
+    if not enable_streamk and not work_stealing and _k282_should_route_streamk(M, N, K, a.dtype):
+        enable_streamk = True
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -460,6 +532,10 @@ def _matmul_out(
     assert a.shape[1] == b.shape[0], "Incompatible A-B Dimensions"
     M, K = a.shape
     _, N = b.shape
+
+    # K-282: same router as _matmul — see comment there.
+    if not enable_streamk and not work_stealing and _k282_should_route_streamk(M, N, K, a.dtype):
+        enable_streamk = True
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

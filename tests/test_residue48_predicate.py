@@ -258,3 +258,112 @@ def test_predicate_subsumes_k2106_n1328_frozenset():
         if PRED(M, 1328, K, dt)
     )
     assert pred_n1328 == K2106_FZ
+
+
+# ---------------------------------------------------------------------------
+# 7. PAIRED EQUIVALENCE — predicate vs the historic 8-rung explicit
+#    frozenset cascade across the FULL Cartesian envelope (including all
+#    non-admitted N values where N % 64 != 48 OR N is outside [816, 1392]).
+#    This is the Testing-Zealot-v8 requirement: the failure mode "any rung
+#    where predicate admits but frozenset rejected (or vice versa)" must be
+#    captured by a one-shot two-sided test that fails LOUDLY on any
+#    disagreement.  N is swept densely from 0..2048 (covering the full
+#    pre-admit + admitted + post-admit window) and we also include 4 wide-N
+#    points (4096, 8192, 16384, 32768) representative of larger N values
+#    that live outside the residue-48 family entirely.
+# ---------------------------------------------------------------------------
+
+def _baseline_frozenset_cascade(M, N, K, a_dtype):
+    """The pre-K-2089 admit decision: union of the 10 per-N alias-stack
+    frozensets (P45..P52 + the K-2089 forward N=1392 alias slot, which is the
+    cascade we are replacing).  Encoded directly here so the test does not
+    depend on production alias-stack imports being individually exposed.
+
+    Returns True iff (M, N, K, a_dtype) lives in the union of:
+      {(M', N', K', dt) : N' in ADMITTED_RUNGS,
+                          M' in {2048,4096,8192},
+                          K' in {4096,8192,16384},
+                          dt in {torch.bfloat16, torch.float16}}
+    """
+    if N not in ADMITTED_RUNGS:
+        return False
+    if M not in ENVELOPE_M:
+        return False
+    if K not in ENVELOPE_K:
+        return False
+    return str(a_dtype) in ENVELOPE_DT
+
+
+def test_predicate_equivalent_to_baseline_cascade_full_envelope():
+    """Two-sided paired equivalence over the full Cartesian envelope:
+    predicate(M,N,K,dt) MUST equal baseline_cascade(M,N,K,dt) for every cell.
+    Includes:
+      * ALL N in 0..2048 step 16 (covers all residue classes, including
+        in-range non-residue and out-of-range residue-48 values)
+      * extra wide-N points (4096, 8192, 16384, 32768) outside the family
+      * Cartesian product with M in {1024, 2048, 4096, 8192, 16384}
+        (incl. 2 out-of-envelope M values)
+      * K in {2048, 4096, 8192, 16384, 32768} (incl. 2 out-of-envelope)
+      * dtype in {bf16, fp16, fp32, int8} (incl. 2 out-of-envelope)
+    Total cells probed: 132 N × 5 M × 5 K × 4 dt = 13,200 cells.
+    """
+    Ns = list(range(0, 2049, 16)) + [4096, 8192, 16384, 32768]
+    Ms = (1024, 2048, 4096, 8192, 16384)
+    Ks = (2048, 4096, 8192, 16384, 32768)
+    Dts = ("torch.bfloat16", "torch.float16", "torch.float32", "torch.int8")
+
+    mismatches = []
+    n_cells = 0
+    for M in Ms:
+        for N in Ns:
+            for K in Ks:
+                for dt in Dts:
+                    n_cells += 1
+                    pred = bool(PRED(M, N, K, dt))
+                    base = bool(_baseline_frozenset_cascade(M, N, K, dt))
+                    if pred != base:
+                        mismatches.append((M, N, K, dt, pred, base))
+
+    assert len(mismatches) == 0, (
+        f"Predicate disagrees with the explicit frozenset cascade on "
+        f"{len(mismatches)} of {n_cells} cells (first 10): {mismatches[:10]}"
+    )
+    assert n_cells == len(Ms) * len(Ns) * len(Ks) * len(Dts), n_cells
+
+
+def test_predicate_equivalent_to_baseline_zero_admit_outside_admitted_rungs():
+    """Targeted negative-side check: for every N in 0..2048 that is NOT one
+    of the 10 admitted rungs, the predicate must admit ZERO cells across the
+    full M×K×dtype envelope. Failure mode caught: predicate over-admits
+    (admits a non-rung N that the frozenset cascade would have rejected)."""
+    over_admitted = []
+    for N in range(0, 2049):
+        if N in ADMITTED_RUNGS:
+            continue
+        for M in ENVELOPE_M:
+            for K in ENVELOPE_K:
+                for dt in ENVELOPE_DT:
+                    if PRED(M, N, K, dt):
+                        over_admitted.append((M, N, K, dt))
+    assert over_admitted == [], (
+        f"Predicate over-admits {len(over_admitted)} non-rung cells "
+        f"(first 5): {over_admitted[:5]}"
+    )
+
+
+def test_predicate_equivalent_to_baseline_full_admit_at_admitted_rungs():
+    """Targeted positive-side check: at every admitted N rung, the
+    predicate must admit ALL 18 cells of the M×K×dtype envelope (matching
+    the historic per-N frozenset's exact 18-cell shape). Failure mode
+    caught: predicate under-admits at an admitted rung."""
+    under_admitted = []
+    for N in ADMITTED_RUNGS:
+        for M in ENVELOPE_M:
+            for K in ENVELOPE_K:
+                for dt in ENVELOPE_DT:
+                    if not PRED(M, N, K, dt):
+                        under_admitted.append((M, N, K, dt))
+    assert under_admitted == [], (
+        f"Predicate under-admits {len(under_admitted)} admitted-rung cells "
+        f"(first 5): {under_admitted[:5]}"
+    )

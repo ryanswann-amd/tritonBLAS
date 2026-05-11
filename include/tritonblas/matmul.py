@@ -133,15 +133,17 @@ from ._route_predicate import (
     # and is NOT retried here.
     _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18,
     # K-2106 (S-002): P52 (42nd-slot) skinny_N1328 K-COMPLEMENT alias-stack --
-    # 18-cell envelope (M in {2048,4096,8192} x N=1328 x K in {4096,8192,16384}
-    # x {bf16,fp16}).  Off-by-48 wave-misaligned 9th rung (1328 mod 64 = 48);
-    # mod-128 = 48 -- REJOIN to N=1200 mod-128 topology, continuing the strict
-    # 48/112/48/112/48/112/48/112/48 mod-128 alternation across the residue-48
-    # ladder (N in {816,880,944,1008,1072,1136,1200,1264,1328}).  K-2106
-    # paired n=30 HIP-graph hot-cache MI300X / gfx942 vs live post-K-1922
-    # oracle (HEAD 0024a71); 9th-rung continuity probe extending K-2091's
-    # 8-rung ladder per K-2072 wide-N admit-eligible finding (N>=1328).
+    # kept as the test-pinned per-rung literal (cardinality + invariant
+    # tests in tests/test_k2106_p52_skinny_n1328_alias_stack.py).  Dispatch
+    # itself routes via _R_K2089_residue48_kcompl_routeout below — the
+    # closed-form predicate that subsumes the entire residue-48 ladder
+    # (N in {816..1392} every 64) into a single membership check.
     _K2106_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18,
+    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate -- a
+    # single +5 LOC drop-in replacement for the per-rung frozenset cascade
+    # P45..P52 (and K-2089 forward N=1392).  Set-equivalent to the union
+    # of the 10 documented per-N alias-stacks over the verified envelope.
+    _R_K2089_residue48_kcompl_routeout as _R_K2089_residue48_kcompl_routeout,
 )
 
 
@@ -417,10 +419,17 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # geomean tb/hbl ≈ 1.51×, 18/18 admit.  Sibling-N firewall disjoint by
     # construction with every prior K-COMPLEMENT alias-stack slot.
     if (int(M), int(N), int(K), str(a_dtype)) in _K1922_P40_SKINNY_N544_KCOMPL_ALIASSTACK_18: return True
-    # K-2106 (S-002): P52 (42nd-slot) skinny_N1328 K-COMPLEMENT alias-stack -- 18 cells
-    # (off-by-48 wave-misaligned 9th-rung; mod-128 = 48 -- REJOIN to N=1200 tail topology;
-    # continues the 48/112/48/112/48/112/48/112/48 mod-128 alternation across the residue-48 ladder).
-    if (int(M), int(N), int(K), str(a_dtype)) in _K2106_P52_SKINNY_N1328_KCOMPL_ALIASSTACK_18: return True
+    # K-2089 (S-002): residue-48 K-COMPLEMENT closed-form predicate -- one
+    # +5 LOC closed-form replacement for the per-N alias-stack cascade
+    # P45..P52 (and the K-2089 forward N=1392 upper bound) covering N in
+    # {816,880,944,1008,1072,1136,1200,1264,1328,1392}.  Set-equivalent
+    # to the union of the 10 per-N frozensets on the verified envelope
+    # M in {2048,4096,8192} x K in {4096,8192,16384} x {bf16,fp16}.  The
+    # K-2106 N=1328 frozenset above is retained as the test-pinned literal
+    # (cardinality + sibling-N firewall invariants); this predicate is
+    # the live dispatch path and subsumes it (1328 % 64 == 48 and
+    # 816 <= 1328 <= 1392).
+    if _R_K2089_residue48_kcompl_routeout(int(M), int(N), int(K), a_dtype): return True
     return False
 
 

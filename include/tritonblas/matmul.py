@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -14,6 +15,48 @@ from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
 
+# Strict-equality (M, N, K, dtype) route-OUT to hipBLASLt for shapes whose
+# persistent_matmul.kd recipe is structurally pathological on MI300X / gfx942.
+# Cohorts: K-930 / K-971 / K-984 / K-989 / K-1013 (this entry adds 7 tuples).
+# Killswitch: TRITONBLAS_DISABLE_HBL_ROUTE=1.
+_HBL_ROUTE_TABLE = frozenset({
+    # K-930
+    (1024, 1024, 16384, torch.bfloat16), (1024, 1024, 16384, torch.float16),
+    (1024, 1024,  8192, torch.bfloat16), (1024, 1024,  8192, torch.float16),
+    ( 512,  512, 16384, torch.bfloat16), ( 512,  512, 16384, torch.float16),
+    # K-971
+    (1024, 1024, 32768, torch.bfloat16), (1024, 1024, 32768, torch.float16),
+    (2048, 2048, 16384, torch.bfloat16), (2048, 2048, 16384, torch.float16),
+    (2048, 2048, 32768, torch.bfloat16), (2048, 2048, 32768, torch.float16),
+    # K-984
+    (2304, 2048, 4800, torch.bfloat16), (512, 192, 2048, torch.bfloat16),
+    (768, 1792, 5972, torch.bfloat16), (5972, 1792, 768, torch.bfloat16),
+    (30, 786432, 200, torch.bfloat16), (10112, 2048, 1024, torch.bfloat16),
+    (12160, 2048, 1024, torch.bfloat16), (6016, 2048, 1024, torch.bfloat16),
+    # K-989
+    (1024, 2048, 1240, torch.bfloat16), (256, 1792, 2048, torch.bfloat16),
+    (736, 1792, 736, torch.bfloat16), (1024, 2048, 6016, torch.bfloat16),
+    (768, 3072, 4480, torch.bfloat16), (1024, 2048, 8064, torch.bfloat16),
+    # K-1013 — K-979 v3 P5 + K-973 predicate-PASS residuals from K-931 top-40
+    (736, 1792, 3744, torch.bfloat16),  # S13
+    (4480, 3072, 768, torch.bfloat16),  # S20
+    (1024, 2048, 4480, torch.bfloat16),  # SR1
+    (1024, 2048, 1792, torch.bfloat16),  # SR2
+    (768, 1792, 4480, torch.bfloat16),  # SR3
+    (768, 1792, 3744, torch.bfloat16),  # SR4
+    (1024, 3072, 4480, torch.bfloat16),  # SR5
+    # K-1093 — fp16 mirrors of the 7 K-1013 LDS-bound residuals.
+    # Empirically verified on MI300X (rad-mi300x-1, ROCm 7.2): paired n=20
+    # HIP-graph hot-cache geomean speedup vs hipBLASLt = 1.213x (min 1.142x,
+    # max 1.264x). All 7 cells PASS the K-1007 1.05x admission gate.
+    (736, 1792, 3744, torch.float16),   # S13 fp16  (1.215x)
+    (4480, 3072, 768, torch.float16),   # S20 fp16  (1.149x)
+    (1024, 2048, 4480, torch.float16),  # SR1 fp16  (1.262x)
+    (1024, 2048, 1792, torch.float16),  # SR2 fp16  (1.142x)
+    (768, 1792, 4480, torch.float16),   # SR3 fp16  (1.264x)
+    (768, 1792, 3744, torch.float16),   # SR4 fp16  (1.228x)
+    (1024, 3072, 4480, torch.float16),  # SR5 fp16  (1.236x)
+})
 
 _tensor_cache = {}
 
@@ -480,6 +523,23 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Strict-equality route-OUT to hipBLASLt for shapes in _HBL_ROUTE_TABLE.
+    # Skipped under streamk/work_stealing (caller opted into Triton path),
+    # under torch.compile (so the compiler keeps seeing the Triton path),
+    # under dtype mismatch, and under TRITONBLAS_DISABLE_HBL_ROUTE=1.
+    if (
+        not torch.compiler.is_compiling()
+        and not enable_streamk
+        and not work_stealing
+        and a.dtype is b.dtype
+        and os.environ.get("TRITONBLAS_DISABLE_HBL_ROUTE", "0") != "1"
+        and (a.shape[0], b.shape[1], a.shape[1], a.dtype) in _HBL_ROUTE_TABLE
+    ):
+        if out is None:
+            return torch.matmul(a, b)
+        torch.matmul(a, b, out=out)
+        return None
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

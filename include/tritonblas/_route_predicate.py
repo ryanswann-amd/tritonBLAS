@@ -3488,3 +3488,31 @@ _K2147_P55_SKINNY_N1520_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2147_p55_skinny_n1520_alias_stack.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2156 (S-002): P56 skinny_N1584 K-COMPLEMENT alias-stack — 18-cell
+# verified-winner subset for the off-by-48 wave-misaligned N=1584 rung
+# (1584 mod 64 = 48; mod 128 = 48 — sibling residue to N=1456, N=1328, N=1200).
+# 12th rung of the off-by-48 contiguous ladder past K-2147 P55 N=1520.
+# K-2156 paired n=30 HIP-graph hot-cache MI300X / gfx942 4-engine bench
+# (TB-BEFORE / TB-AFTER / hipBLASLt / rocBLAS) on c42 vs the live post-K-2147
+# P55 oracle (fix/K-2156 base 5e35d4e). Sibling-N firewall disjoint by
+# construction with every prior K-COMPLEMENT alias-stack slot.
+#
+# Mechanism (R-1811 wave-misalignment + K-913 §3 LDS-bank-conflict):
+# BLOCK_N=128 packs N=1584 into 12.375 BLOCK_N tiles per N-row → 24.75
+# fractional waves on 304-CU gfx942 — same SCHEDULER_LDS A4 wave-misalignment
+# failure mode as every prior rung. hipBLASLt's split-K kernel selection
+# clears the band on the K-major bf16/fp16 grid. Per K-1908 closed-form
+# analysis, (N % 64 == 48) ∧ (880 ≤ N ≤ 1584) covers 12 contiguous off-by-48
+# rungs at single-N granularity once K-2156 admits — crosses the K-1908
+# ≥12-rung closed-form refactor actionability threshold.
+# Termination criterion: if N=1584 admits, ladder extends to 12th contiguous
+# rung; if not, this terminates the residue-48 ladder and PMC delta-attribution
+# for why residue-48 family bounds at this N is required (per task PRD).
+_K2156_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1584, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)
+# Cardinality (==18) gated by tests/test_k2156_p56_n1584_skinny_kcompl.py
+# per the minimalist split: src holds data, tests hold invariants
+# (R-1532 / R-1720 / R-1775).

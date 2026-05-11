@@ -2888,3 +2888,11 @@ def _k1611_p26_skinny_n2048_kcompl_aliasstack_routeout(
         (int(M), int(N), int(K), str(dtype))
         in _K1611_P26_SKINNY_N2048_KCOMPL_ALIASSTACK_30
     )
+
+
+# K-1633 P27 18th-slot audit handle — bit-identical to K-1552 P23 (same
+# N=512 K-COMPLEMENT 30-cell envelope, re-verified post-P26).  Per K-1581
+# / K-1489 minimalist precedent: alias only, no duplicate predicate.
+_K1633_P27_SKINNY_N512_KCOMPL_ALIASSTACK_30 = (
+    _K1552_P23_SKINNY_N512_KCOMPL_ALIASSTACK_30
+)

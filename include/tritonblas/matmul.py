@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from ._skinny_n_kc_alias import KC_ALIAS_STACK_N_RES48
 
 
 
@@ -52,6 +53,7 @@ def _make_matmul_selector(
     num_stages: int = 2,
 ):
     # Run Heuristic Results (Only if key has not been seen before)
+    _kc_alias_stack = N in KC_ALIAS_STACK_N_RES48  # residue-48 wave-misaligned skinny-N admit
     return OrigamiMatmulSelector(
         M,
         N,

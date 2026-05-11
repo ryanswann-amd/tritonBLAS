@@ -3517,3 +3517,15 @@ _K2150_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18 = frozenset(
 # Cardinality (==18) gated by tests/test_k2150_p56_n1584_skinny_kcompl.py
 # per the minimalist split: src holds data, tests hold invariants
 # (R-1532 / R-1720 / R-1775).
+
+# K-2166 P57 N=1648 — 13th contiguous rung of the off-by-48 K-COMPLEMENT ladder
+# on the strict +64 cadence established by K-2106 / K-2111 / K-2127 / K-2136 /
+# K-2150 (N = 1328 / 1392 / 1456 / 1520 / 1584).  Family invariant preserved:
+# 1648 % 64 == 48 (same residue class as every prior rung).  Mechanism:
+# BLOCK_N=128 packs N=1648 into 12.875 BLOCK_N tiles per N-row; the 0.125
+# fractional tile is the wave-misalignment residue exploited by HBL on this
+# family.  Cardinality pinned by tests/test_k2166_p57_n1648_skinny_kcompl.py.
+_K2166_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18 = frozenset(
+    (M, 1648, K, dt) for M in (2048, 4096, 8192)
+    for K in (4096, 8192, 16384) for dt in ("torch.bfloat16", "torch.float16")
+)

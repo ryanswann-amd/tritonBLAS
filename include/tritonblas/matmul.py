@@ -136,6 +136,7 @@ from ._route_predicate import (
     # 12th-rung extension of the off-by-48 wave-misaligned ladder
     # (mod-64=48, mod-128=48).  Disjoint with every prior slot (no shared N).
     _K2150_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18,
+    _K2166_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18,  # K-2166 P57 N=1648 (13th rung off-by-48)
 )
 
 
@@ -418,6 +419,7 @@ def _k971_route_to_hbl(M, N, K, a_dtype, b_dtype, enable_streamk, work_stealing)
     # misalignment mechanism as every prior rung (BLOCK_N=128 → 12.375
     # fractional tiles).  Cohort geomean tb/hbl ≈ 1.45×, 18/18 admit.
     if (int(M), int(N), int(K), str(a_dtype)) in _K2150_P56_SKINNY_N1584_KCOMPL_ALIASSTACK_18: return True
+    if (int(M), int(N), int(K), str(a_dtype)) in _K2166_P57_SKINNY_N1648_KCOMPL_ALIASSTACK_18: return True  # K-2166 P57 13th-rung
     return False
 
 

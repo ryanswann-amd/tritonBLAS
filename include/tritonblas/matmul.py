@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,112 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LDS bank-conflict mitigation heuristic
+# ──────────────────────────────────────────────────────────────────────────────
+# On MI300X / gfx942 the AMD-Triton backend lowers the operands of ``tl.dot``
+# to a swizzled LDS layout and issues 64-byte ``ds_read_b64`` instructions to
+# feed the MFMA pipeline.  For long-K, small-square shapes (e.g. 1024×1024×16384
+# or 512×512×16384) the default ``kpack=1`` MFMA scheduler emits LDS loads at a
+# stride that collides on every other LDS bank — rocprof shows
+# ``SQ_LDS_BANK_CONFLICT / SQ_INSTS_LDS ≈ 1.78`` cyc/inst for the persistent
+# matmul kernel on that cohort (lessons report).
+#
+# The two mitigations exposed here are:
+#
+#   1. **Operand swizzling via kpack=2** — packing two K-blocks into a single
+#      LDS load doubles the contiguous span seen by ``ds_read``, shifting the
+#      bank-stride pattern off the conflicting power-of-two and effectively
+#      acting as a 1-element padding column for every-other-row MFMA reads.
+#
+#   2. **Deeper double-buffer (num_stages=3)** — the additional pipeline
+#      stage gives the compiler room to reorder LDS reads across MFMA issues,
+#      which combined with kpack=2 lets the scheduler interleave conflicting
+#      banks.
+#
+# The heuristic is opt-out: setting ``TRITONBLAS_DISABLE_LDS_SWIZZLE=1`` in the
+# environment falls back to the legacy ``kpack=1`` configuration.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _lds_swizzle_kpack(
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    quantized: bool,
+) -> int:
+    """Pick a ``kpack`` value that minimises LDS bank conflicts.
+
+    Returns ``2`` (operand-swizzled, conflict-mitigated) for the long-K
+    small-square cohort identified by the lessons (K ≥ 4096 and ``M*N`` small
+    enough that the K-loop dominates), and ``1`` otherwise to preserve the
+    current behaviour for shapes that are not conflict-bound.
+    """
+    if os.environ.get("TRITONBLAS_DISABLE_LDS_SWIZZLE", "0") == "1":
+        return 1
+
+    # Only well-formed for fp16/bf16/fp8 MFMA: kpack=2 is illegal for int8
+    # int32-accumulating kernels because the MFMA K-pack already maxes out.
+    if quantized:
+        return 1
+
+    # gfx942 MFMA expects K-blocks aligned to 16 lanes per pack.  Skip any
+    # block_k that the compiler would refuse to double-pack.
+    if block_k % 32 != 0:
+        return 1
+
+    # Tiny block_m / block_n (≤ 32) shapes use a degenerate WG layout where
+    # there are too few wavefronts to exploit kpack=2 — observed regression
+    # (BC ratio 1.45 → 2.18) on (512,512,16384) which Origami selects as
+    # 32×32×512.  Skip the swizzle for those.
+    if min(block_m, block_n) < 64:
+        return 1
+
+    # Long-K cohort: K >= 4096 and the per-tile work is K-dominated
+    # (per-WG flops scale as block_m*block_n*K, LDS reads scale as K).
+    is_long_k = K >= 4096
+    is_small_square = (M * N) <= (2048 * 2048)
+    if is_long_k and is_small_square:
+        return 2
+
+    return 1
+
+
+def _lds_swizzle_num_stages(
+    base_num_stages: int,
+    block_m: int,
+    block_n: int,
+    block_k: int,
+    M: int,
+    N: int,
+    K: int,
+    a_dtype: torch.dtype,
+    bytes_a: int,
+    bytes_b: int,
+    quantized: bool,
+) -> int:
+    """Bump pipeline depth when the kpack=2 swizzle is in effect.
+
+    Three stages give the AMD scheduler an extra LDS double-buffer slot which
+    is what allows the swizzled (kpack=2) MFMA reads to overlap conflicting
+    banks.  The bump is suppressed if it would push the kernel over the
+    65 KB LDS budget (Triton clamps silently otherwise).
+    """
+    if _lds_swizzle_kpack(block_m, block_n, block_k, M, N, K, a_dtype, quantized) == 1:
+        return base_num_stages
+
+    # LDS bytes for ns stages: (ns-1) * (A_tile + B_tile)  (see origami.py)
+    a_bytes = block_m * block_k * bytes_a
+    b_bytes = block_k * block_n * bytes_b
+    bumped_lds = (3 - 1) * (a_bytes + b_bytes)
+    if bumped_lds <= 65536:
+        return max(base_num_stages, 3)
+    return base_num_stages
 
 
 
@@ -98,9 +205,16 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ── LDS bank-conflict mitigation: pick kpack/num_stages from heuristic ──
+    bytes_a = a.element_size()
+    bytes_b = b.element_size()
+    kpack = _lds_swizzle_kpack(BLK_M, BLK_N, BLK_K, M, N, K, a.dtype, quantized)
+    num_stages = _lds_swizzle_num_stages(
+        num_stages, BLK_M, BLK_N, BLK_K, M, N, K, a.dtype, bytes_a, bytes_b, quantized,
+    )
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -244,9 +358,16 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # ── LDS bank-conflict mitigation: pick kpack/num_stages from heuristic ──
+    bytes_a = a.element_size()
+    bytes_b = b.element_size()
+    kpack = _lds_swizzle_kpack(BLK_M, BLK_N, BLK_K, M, N, K, a.dtype, quantized)
+    num_stages = _lds_swizzle_num_stages(
+        num_stages, BLK_M, BLK_N, BLK_K, M, N, K, a.dtype, bytes_a, bytes_b, quantized,
+    )
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

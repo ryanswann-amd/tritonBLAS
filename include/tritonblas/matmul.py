@@ -95,6 +95,24 @@ def persistent_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
+    # Resolve LDS swizzle/padding-equivalent knobs.  These flow into the
+    # AMD MFMA layout selection (kpack, mfma_nonkdim) and may also override
+    # BLOCK_K to break the bank-conflict cycle on the long-K small-square
+    # cohort.  See lds_swizzle.py for the rocprof-derived recipe.
+    swizzle = resolve_swizzle(
+        kpack=kpack,
+        matrix_instr_nonkdim=matrix_instr_nonkdim,
+        waves_per_eu=waves_per_eu,
+        num_warps=num_warps,
+        M=M, N=N, K=K, BLK_M=BLK_M, BLK_N=BLK_N,
+    )
+    if swizzle.block_k_override is not None:
+        # Honor the cohort/env override only when it divides K evenly so the
+        # kernel still hits the EVEN_K fast path; otherwise keep the
+        # selector's choice for correctness/perf.
+        if K % swizzle.block_k_override == 0:
+            BLK_K = swizzle.block_k_override
+
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
@@ -103,19 +121,14 @@ def persistent_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
 
-    # Resolve LDS swizzle/padding-equivalent knobs.  These flow into the
-    # AMD MFMA layout selection so they directly change the LDS bank
-    # mapping of the A/B operands without altering kernel correctness.
-    swizzle = resolve_swizzle(
-        kpack=kpack,
-        matrix_instr_nonkdim=matrix_instr_nonkdim,
-        waves_per_eu=waves_per_eu,
-        num_warps=num_warps,
-    )
     num_warps = swizzle.num_warps
     waves_per_eu = swizzle.waves_per_eu
     mfmaInstrSize = swizzle.matrix_instr_nonkdim
     kpack = swizzle.kpack
+    # MFMA nonkdim must divide BLK_M and BLK_N; fall back if the override
+    # picked 32 but the (possibly user-provided) BLK_M/N don't allow it.
+    if mfmaInstrSize == 32 and (BLK_M % 32 != 0 or BLK_N % 32 != 0):
+        mfmaInstrSize = 16
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -244,6 +257,19 @@ def streamk_matmul_lt(
     gsize_m  = selector.group_m
     num_xcds = selector.num_sms
 
+    # Resolve LDS swizzle/padding-equivalent knobs (K-3022).  See
+    # lds_swizzle.py.  May override BLOCK_K to break the bank-conflict
+    # cycle on the long-K small-square cohort.
+    swizzle = resolve_swizzle(
+        kpack=kpack,
+        matrix_instr_nonkdim=matrix_instr_nonkdim,
+        waves_per_eu=waves_per_eu,
+        num_warps=num_warps,
+        M=M, N=N, K=K, BLK_M=BLK_M, BLK_N=BLK_N,
+    )
+    if swizzle.block_k_override is not None and K % swizzle.block_k_override == 0:
+        BLK_K = swizzle.block_k_override
+
     total_blocks_M = triton.cdiv(M, BLK_M)
     total_blocks_N = triton.cdiv(N, BLK_N)
     total_tiles = total_blocks_M * total_blocks_N
@@ -264,17 +290,12 @@ def streamk_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
 
-    # Resolve LDS swizzle/padding-equivalent knobs.  See lds_swizzle.py.
-    swizzle = resolve_swizzle(
-        kpack=kpack,
-        matrix_instr_nonkdim=matrix_instr_nonkdim,
-        waves_per_eu=waves_per_eu,
-        num_warps=num_warps,
-    )
     num_warps = swizzle.num_warps
     waves_per_eu = swizzle.waves_per_eu
     mfmaInstrSize = swizzle.matrix_instr_nonkdim
     kpack = swizzle.kpack
+    if mfmaInstrSize == 32 and (BLK_M % 32 != 0 or BLK_N % 32 != 0):
+        mfmaInstrSize = 16
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

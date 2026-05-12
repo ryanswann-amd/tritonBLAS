@@ -23,6 +23,8 @@ def _clean_env(monkeypatch):
         "TRITONBLAS_WAVES_PER_EU",
         "TRITONBLAS_NUM_WARPS",
         "TRITONBLAS_LDS_SWIZZLE",
+        "TRITONBLAS_LDS_AUTO",
+        "TRITONBLAS_BLOCK_K",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -90,4 +92,45 @@ def test_as_kwargs_round_trip():
         "matrix_instr_nonkdim": 32,
         "waves_per_eu": 2,
         "num_warps": 4,
+        "block_k_override": None,
     }
+
+
+def test_cohort_auto_picks_block_k_64():
+    # Long-K small-square cohort triggers the BLOCK_K=64 + mfma=32 + kpack=2
+    # auto-mitigation that drives SQ_LDS_BANK_CONFLICT to 0 in rocprof.
+    cfg = _resolve(M=1024, N=1024, K=16384, BLK_M=64, BLK_N=64)
+    assert cfg.block_k_override == 64
+    assert cfg.matrix_instr_nonkdim == 32
+    assert cfg.kpack == 2
+
+
+def test_cohort_auto_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("TRITONBLAS_LDS_AUTO", "0")
+    cfg = _resolve(M=1024, N=1024, K=16384, BLK_M=64, BLK_N=64)
+    assert cfg.block_k_override is None
+    assert cfg.kpack == 1
+
+
+def test_cohort_skipped_outside_long_k(monkeypatch):
+    cfg = _resolve(M=4096, N=4096, K=4096, BLK_M=128, BLK_N=128)
+    assert cfg.block_k_override is None
+    assert cfg.kpack == 1
+
+
+def test_cohort_falls_back_when_blk_not_div_32(monkeypatch):
+    # If user-provided BLK_M is not divisible by 32, the auto recipe must
+    # downgrade mfma_nonkdim to 16 to keep the kernel launchable.
+    cfg = _resolve(M=1024, N=1024, K=16384, BLK_M=16, BLK_N=16)
+    assert cfg.matrix_instr_nonkdim == 16
+
+
+def test_env_block_k_override():
+    import os
+    os.environ["TRITONBLAS_BLOCK_K"] = "32"
+    try:
+        cfg = _resolve(M=4096, N=4096, K=4096)
+        assert cfg.block_k_override == 32
+    finally:
+        del os.environ["TRITONBLAS_BLOCK_K"]
+

@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .lds_swizzle import resolve_swizzle
 
 
 
@@ -77,6 +78,12 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    # ── LDS bank-conflict mitigation knobs (K-3022) ────────────────────────
+    # Pass None to defer to env vars / baseline.  See lds_swizzle.py.
+    kpack: Optional[int] = None,
+    matrix_instr_nonkdim: Optional[int] = None,
+    waves_per_eu: Optional[int] = None,
+    num_warps: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -95,10 +102,20 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+
+    # Resolve LDS swizzle/padding-equivalent knobs.  These flow into the
+    # AMD MFMA layout selection so they directly change the LDS bank
+    # mapping of the A/B operands without altering kernel correctness.
+    swizzle = resolve_swizzle(
+        kpack=kpack,
+        matrix_instr_nonkdim=matrix_instr_nonkdim,
+        waves_per_eu=waves_per_eu,
+        num_warps=num_warps,
+    )
+    num_warps = swizzle.num_warps
+    waves_per_eu = swizzle.waves_per_eu
+    mfmaInstrSize = swizzle.matrix_instr_nonkdim
+    kpack = swizzle.kpack
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -200,10 +217,10 @@ def persistent_matmul_lt(
     return c
 
 def streamk_matmul_lt(
-    a: torch.Tensor, 
-    b: torch.Tensor, 
-    c: torch.Tensor, 
-    selector, 
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    selector,
     config: Optional[MatmulConfig] = None,
     bias: Optional[torch.Tensor] = None,
     sk_grid: Optional[int] = None,
@@ -211,6 +228,11 @@ def streamk_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    # ── LDS bank-conflict mitigation knobs (K-3022) ───────────────────
+    kpack: Optional[int] = None,
+    matrix_instr_nonkdim: Optional[int] = None,
+    waves_per_eu: Optional[int] = None,
+    num_warps: Optional[int] = None,
 ):
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
@@ -241,10 +263,18 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+
+    # Resolve LDS swizzle/padding-equivalent knobs.  See lds_swizzle.py.
+    swizzle = resolve_swizzle(
+        kpack=kpack,
+        matrix_instr_nonkdim=matrix_instr_nonkdim,
+        waves_per_eu=waves_per_eu,
+        num_warps=num_warps,
+    )
+    num_warps = swizzle.num_warps
+    waves_per_eu = swizzle.waves_per_eu
+    mfmaInstrSize = swizzle.matrix_instr_nonkdim
+    kpack = swizzle.kpack
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

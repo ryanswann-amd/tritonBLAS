@@ -12,6 +12,7 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+from .lds_tuning import get_lds_tuning
 
 
 
@@ -96,9 +97,22 @@ def persistent_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # ─── LDS bank-conflict mitigation knobs (see tritonblas.lds_tuning) ──────
+    # The TRITONBLAS_LDS_MITIGATION env var (default ``auto``) selects between:
+    #   off      – baseline (kpack=1, matrix_instr_nonkdim=16)
+    #   pad      – kpack=2 ("1-element padding column" LDS analogue)
+    #   swizzle  – matrix_instr_nonkdim=32 (rotated-shared MFMA layout)
+    #   both     – kpack=2 AND matrix_instr_nonkdim=32
+    #   auto     – pad ON only for the K-913 long-K small-square cohort
+    # See lessons.md "K-913 / TRITONBLAS-0065" for the SQ_LDS_BANK_CONFLICT
+    # signature and "K-868-FINAL P3" / "K-971" for prior frontend-knob results.
+    kpack, mfmaInstrSize, waves_per_eu, _nw_override, _ns_override = (
+        get_lds_tuning(M, N, K)
+    )
+    if _nw_override is not None:
+        num_warps = _nw_override
+    if _ns_override is not None:
+        num_stages = _ns_override
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 
@@ -242,9 +256,14 @@ def streamk_matmul_lt(
 
     num_stages = getattr(selector, "num_stages", 2)
     num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # LDS bank-conflict mitigation knobs (see tritonblas.lds_tuning).
+    kpack, mfmaInstrSize, waves_per_eu, _nw_override, _ns_override = (
+        get_lds_tuning(M, N, K)
+    )
+    if _nw_override is not None:
+        num_warps = _nw_override
+    if _ns_override is not None:
+        num_stages = _ns_override
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
 

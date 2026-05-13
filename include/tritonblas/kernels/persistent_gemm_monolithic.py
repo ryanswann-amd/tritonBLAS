@@ -1,8 +1,14 @@
+import os
+
 import triton
 import triton.language as tl
 import torch
 
 from .stages.indexing.pid_transforms import chiplet_transform_chunked
+
+# K-4213: opt-in inner-K unroll factor (module-level constexpr).
+# See include/tritonblas/kernels/stages/gemm_context.py for full notes.
+_K_LOOP_UNROLL = tl.constexpr(max(1, int(os.environ.get("TBLAS_K_LOOP_UNROLL", "1"))))
 
 @triton.jit()
 def persistent_matmul(
@@ -80,7 +86,8 @@ def persistent_matmul(
         tl.assume(loop_k > 1)
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for k in range(0, loop_k):
+        # K-4213: configurable inner-K unroll (default 1 = no unroll).
+        for k in tl.range(0, loop_k, loop_unroll_factor=_K_LOOP_UNROLL):
             if stride_ak == 1:
                 a = tl.load(tl.multiple_of(A_BASE, (1, 16)), cache_modifier=CACHE_MODIFIER_A)
             else:

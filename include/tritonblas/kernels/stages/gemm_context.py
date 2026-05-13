@@ -7,31 +7,7 @@ GemmContext aggregate for tritonblas shards.
 Provides the K-loop execution context for GEMM operations, managing
 the accumulator and iteration over the reduction dimension. Also bundles
 all GEMM configuration parameters (block sizes, scheduling, computation options).
-
-Environment variables
----------------------
-``TBLAS_K_LOOP_UNROLL`` (default ``1``)
-    Loop unroll factor passed to ``tl.range`` for the inner K loop. Set to
-    ``2`` to instruct the Triton/AMDGPU compiler to unroll dependent MFMA
-    chains, exposing additional reorder freedom to the scheduler. This is
-    K-4213's "stall-mitigation" lever (see K-4184 for the SQ_WAIT_INST_ANY
-    background).
-
-    Trade-off: with the default launch ``num_stages=2`` software pipeliner
-    enabled, an inner unroll of 2 doubles LDS occupancy, which overflows
-    the 64 KB MI300X budget at large block configs (e.g. 256x256x64,
-    selected for 3072^3 fp16). To use a non-default unroll factor on
-    such configs you must also pin ``num_stages=1`` either at the launch
-    site (``selector.num_stages = 1``) or — manually — by adding
-    ``num_stages=1`` to the ``tl.range`` call below.
-
-    Empirical measurement on MI300X / fp16 / K-3019 worst-gap cohort
-    (64,128,256,512,3072 cubed) showed a strict regression for the
-    naive (unroll=2 + num_stages=1) combination at 3072^3 (-10.9% vs
-    baseline). Default ships unroll=1 so behavior is unchanged.
 """
-
-import os
 
 import triton
 import triton.language as tl
@@ -39,12 +15,6 @@ from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
 from .matrix_view import InputView
-
-
-# Resolved once at import time; constexpr-baked into JIT-compiled kernels.
-# Set TBLAS_K_LOOP_UNROLL=2 (or higher) to enable stall-mitigation unrolling.
-# Wrapped in `tl.constexpr` so it's reachable from inside @triton.jit kernels.
-_K_LOOP_UNROLL = tl.constexpr(max(1, int(os.environ.get("TBLAS_K_LOOP_UNROLL", "1"))))
 
 
 @aggregate
@@ -291,12 +261,13 @@ class GemmContext:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
-        # Main K loop
-        # K-4213: ``loop_unroll_factor`` is module-level constexpr (read once
-        # from TBLAS_K_LOOP_UNROLL at import). Default 1 = no unroll, matches
-        # baseline. Setting >1 exposes more MFMA-chain reorder freedom to the
-        # AMDGPU scheduler at the cost of LDS pressure (see module docstring).
-        for k_idx in tl.range(num_k_tiles, loop_unroll_factor=_K_LOOP_UNROLL):
+        # Main K loop.
+        # NOTE: K-4184/K-4213 investigated emitting ``tl.range(..., loop_unroll_factor=2)``
+        # here as an inner-MFMA stall mitigation. On MI300X / fp16 with the default
+        # autotuner-selected blocks the 2x unroll either overflows LDS (combined with
+        # ``num_stages=2``) or regresses 3072^3 by ~11% (with ``num_stages=1``), so it
+        # is intentionally NOT used. Revisit only with paired smaller-block configs.
+        for k_idx in range(num_k_tiles):
             acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=False)
         
         # Handle K tail if needed

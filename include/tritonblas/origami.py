@@ -109,7 +109,7 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
-        schedule_hint: str = "auto",
+        schedule_hint: str = "none",
     ):
         # Save tensor sizes
         self._m = m
@@ -119,9 +119,14 @@ class OrigamiMatmulSelector:
         self._num_stages = num_stages
         # Triton AMD-backend instruction-scheduling hint plumbed to triton.jit.
         # Valid values (Triton 3.5+): "none", "default", "attention", "interleave",
-        # "iglp_opt". "auto" lets the selector pick a value per-shape; see
-        # `schedule_hint` property below.
-        self._schedule_hint_user = schedule_hint
+        # "iglp_opt". Default "none" (no behaviour change). See `schedule_hint`
+        # property below for the empirical envelope from K-6009.
+        if schedule_hint not in ("none", "default", "attention", "interleave", "iglp_opt"):
+            raise ValueError(
+                f"schedule_hint must be one of 'none', 'default', 'attention', "
+                f"'interleave', 'iglp_opt'; got {schedule_hint!r}"
+            )
+        self._schedule_hint = schedule_hint
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -352,8 +357,8 @@ class OrigamiMatmulSelector:
         Default: ``"none"`` — opt-in only. Set ``schedule_hint="interleave"``
         (or another variant) on the selector to enable.
 
-        Background and empirical envelope (K-5156 / K-5748 / K-5810 / K-5961
-        / K-5990 / K-6009):
+        Empirical envelope (K-5156 / K-5748 / K-5810 / K-5961 / K-5990 /
+        K-6009):
 
         - K-5748 measured 0 % load-during-MFMA overlap on the K-5156
           worst-gap BF16 cohort (shape2 64×64×4096, shape3 1×4096×4096,
@@ -363,30 +368,21 @@ class OrigamiMatmulSelector:
           forced reorders break correctness (NaN).
         - K-5990 iter-3 / K-5810 iter-4 confirmed the ``s_waitcnt vmcnt(0)``
           before each MFMA group is a *true* IR-level data dependency
-          (Regime C), so a pre-RA scheduling hint can only help when there
-          is enough independent MFMA mass to reorder *around*.
+          (Regime C).
         - K-6009 measured ``schedule_hint="interleave"`` directly on the
-          three worst-gap shapes (MI300X / gfx942):
-          all three deltas land inside the run-to-run noise floor
-          (shape2 ±5 %, shape3 ±3 %, shape4 ±2 %). The ~15-30 % TFLOPS
-          recovery the K-6009 brief hypothesised does **not** materialise,
-          which independently confirms the K-5990 finding above:
-          pre-register-allocation scheduling cannot fix the load↔MFMA
-          serialisation because the ``v_perm/ds_write`` RAW edge is real.
+          three worst-gap shapes (MI300X / gfx942): the deltas land inside
+          the run-to-run noise floor (shape2 -4.9 %, shape3 -0.4 %,
+          shape4 +1.7 %; noise ±5/±3/±2 % respectively). The 15-30 %
+          TFLOPS recovery the K-6009 brief hypothesised does **not**
+          materialise — pre-register-allocation scheduling cannot break
+          the ``v_perm/ds_write`` RAW edge.
 
-        The plumbing therefore ships as opt-in infrastructure. The
-        ``"auto"`` keyword is wired up so a future selector with stronger
-        evidence can swap in a per-shape policy without changing the
-        public API.
+        The hint is therefore shipped as opt-in plumbing only (no auto
+        policy, no per-shape table). Callers that have measured a benefit
+        on their workload can pass ``schedule_hint="interleave"`` (or
+        another variant) explicitly.
         """
-        if self._schedule_hint_user != "auto":
-            return self._schedule_hint_user
-
-        # K-6009 empirical conclusion: no shape in the K-5156 cohort
-        # benefits from a pre-RA scheduling hint by more than the noise
-        # floor. Keep the auto-policy a no-op until measurement says
-        # otherwise.
-        return "none"
+        return self._schedule_hint
 
     @property
     def waves_per_eu(self):

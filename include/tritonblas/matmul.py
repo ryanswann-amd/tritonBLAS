@@ -75,7 +75,7 @@ def _make_matmul_selector(
     mx_block_size=0,
     streamk=False,
     num_stages: int = 2,
-    schedule_hint: str = "auto",
+    schedule_hint: str = "none",
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(

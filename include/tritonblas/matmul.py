@@ -36,6 +36,31 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+def _triton_compile_kwargs(selector):
+    """
+    Build the dict of Triton AMD-backend compile-options to thread through
+    ``kernel[grid](..., **opts)``. Returns an empty dict for any field the
+    installed Triton does not recognise (e.g. older releases without
+    ``schedule_hint``), so this stays backward-compatible.
+
+    See K-6009 / origami.OrigamiMatmulSelector.schedule_hint for the heuristic
+    that selects the AMD-backend instruction-scheduling variant.
+    """
+    opts: Dict[str, Any] = {}
+    hint = getattr(selector, "schedule_hint", "none")
+    if hint and hint != "none":
+        try:
+            from triton.backends.amd.compiler import HIPOptions  # noqa: F401
+            # Field is present from Triton 3.0+ on AMD; avoid passing it on
+            # builds where parse_options() would reject the kwarg.
+            if "schedule_hint" in HIPOptions.__dataclass_fields__:
+                opts["schedule_hint"] = hint
+        except Exception:
+            # Non-AMD backend or older Triton — silently fall back to default.
+            pass
+    return opts
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -50,6 +75,7 @@ def _make_matmul_selector(
     mx_block_size=0,
     streamk=False,
     num_stages: int = 2,
+    schedule_hint: str = "auto",
 ):
     # Run Heuristic Results (Only if key has not been seen before)
     return OrigamiMatmulSelector(
@@ -63,6 +89,7 @@ def _make_matmul_selector(
         mx_block_size=mx_block_size,
         streamk=streamk,
         num_stages=num_stages,
+        schedule_hint=schedule_hint,
     )
 
 
@@ -101,6 +128,8 @@ def persistent_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+    # K-6009: AMD-backend instruction-scheduling hint; opt-in per-shape.
+    extra_compile_opts = _triton_compile_kwargs(selector)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -156,6 +185,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **extra_compile_opts,
         )
     else:
         grids = total_tiles
@@ -195,6 +225,7 @@ def persistent_matmul_lt(
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+            **extra_compile_opts,
         )
 
     return c
@@ -247,6 +278,8 @@ def streamk_matmul_lt(
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+    # K-6009: AMD-backend instruction-scheduling hint; opt-in per-shape.
+    extra_compile_opts = _triton_compile_kwargs(selector)
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -321,6 +354,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **extra_compile_opts,
         )
     else:
         kk = _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
@@ -361,6 +395,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **extra_compile_opts,
         )
 
     return c

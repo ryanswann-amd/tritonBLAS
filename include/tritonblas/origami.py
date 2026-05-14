@@ -109,6 +109,7 @@ class OrigamiMatmulSelector:
         total_cus: int = None,
         active_cus: int = None,
         num_stages: int = 2,
+        schedule_hint: str = "auto",
     ):
         # Save tensor sizes
         self._m = m
@@ -116,6 +117,11 @@ class OrigamiMatmulSelector:
         self._k = k
         self.streamk = streamk
         self._num_stages = num_stages
+        # Triton AMD-backend instruction-scheduling hint plumbed to triton.jit.
+        # Valid values (Triton 3.5+): "none", "default", "attention", "interleave",
+        # "iglp_opt". "auto" lets the selector pick a value per-shape; see
+        # `schedule_hint` property below.
+        self._schedule_hint_user = schedule_hint
         # Save tensor dtypes as strings
         self._a_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(a_dtype, a_dtype)
         self._b_dtype_str = OrigamiMatmulSelector.dtype_to_str.get(b_dtype, b_dtype)
@@ -333,6 +339,54 @@ class OrigamiMatmulSelector:
     @property
     def num_stages(self):
         return self._num_stages
+
+    @property
+    def schedule_hint(self):
+        """
+        Triton AMD-backend instruction-scheduling hint plumbed to ``triton.jit``.
+
+        Returns one of: ``"none"``, ``"default"``, ``"attention"``,
+        ``"interleave"``, ``"iglp_opt"``. Threaded through to
+        ``triton.jit(..., schedule_hint=...)`` by ``matmul._triton_compile_kwargs``.
+
+        Default: ``"none"`` — opt-in only. Set ``schedule_hint="interleave"``
+        (or another variant) on the selector to enable.
+
+        Background and empirical envelope (K-5156 / K-5748 / K-5810 / K-5961
+        / K-5990 / K-6009):
+
+        - K-5748 measured 0 % load-during-MFMA overlap on the K-5156
+          worst-gap BF16 cohort (shape2 64×64×4096, shape3 1×4096×4096,
+          shape4 128×1024×8192) versus 7-11 % for hipBLASLt.
+        - K-5961 proved post-RA peephole reordering cannot break the
+          ``buffer_load → v_perm_b32 → ds_write → MFMA`` RAW chain —
+          forced reorders break correctness (NaN).
+        - K-5990 iter-3 / K-5810 iter-4 confirmed the ``s_waitcnt vmcnt(0)``
+          before each MFMA group is a *true* IR-level data dependency
+          (Regime C), so a pre-RA scheduling hint can only help when there
+          is enough independent MFMA mass to reorder *around*.
+        - K-6009 measured ``schedule_hint="interleave"`` directly on the
+          three worst-gap shapes (MI300X / gfx942):
+          all three deltas land inside the run-to-run noise floor
+          (shape2 ±5 %, shape3 ±3 %, shape4 ±2 %). The ~15-30 % TFLOPS
+          recovery the K-6009 brief hypothesised does **not** materialise,
+          which independently confirms the K-5990 finding above:
+          pre-register-allocation scheduling cannot fix the load↔MFMA
+          serialisation because the ``v_perm/ds_write`` RAW edge is real.
+
+        The plumbing therefore ships as opt-in infrastructure. The
+        ``"auto"`` keyword is wired up so a future selector with stronger
+        evidence can swap in a per-shape policy without changing the
+        public API.
+        """
+        if self._schedule_hint_user != "auto":
+            return self._schedule_hint_user
+
+        # K-6009 empirical conclusion: no shape in the K-5156 cohort
+        # benefits from a pre-RA scheduling hint by more than the noise
+        # floor. Keep the auto-policy a no-op until measurement says
+        # otherwise.
+        return "none"
 
     @property
     def waves_per_eu(self):

@@ -1,5 +1,4 @@
 import functools
-import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -13,41 +12,6 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
-from .hip_kernels import (
-    hip_interleaved_matmul,
-    hip_kernel_available,
-    should_use_hip_fallback,
-)
-
-
-# K-6953: opt-out for the K-6808 hand-written HIP fallback path.  The kernel
-# is registered for a hand-picked set of MI300X shapes (see
-# hip_kernels/dispatch.py::HIP_FALLBACK_SHAPES) where K-6808 measured the
-# hand-written kernel beating tritonblas's persistent_matmul by ~3-4x.
-# Set TRITONBLAS_DISABLE_HIP_FALLBACK=1 to force the Triton path everywhere.
-_HIP_FALLBACK_ENABLED = os.environ.get(
-    "TRITONBLAS_DISABLE_HIP_FALLBACK", "0"
-).lower() not in ("1", "true", "yes")
-
-
-def _try_hip_fallback(
-    a: torch.Tensor, b: torch.Tensor, out: Optional[torch.Tensor]
-) -> Optional[torch.Tensor]:
-    """If (M, N, K, dtype) is in the HIP fallback table and the kernel is
-    available on this device, dispatch and return the result.  Otherwise
-    return None and let the caller continue with the Triton path.
-    """
-    if not _HIP_FALLBACK_ENABLED:
-        return None
-    if a.dim() != 2 or b.dim() != 2 or a.shape[1] != b.shape[0]:
-        return None
-    M, K = a.shape
-    _, N = b.shape
-    if not should_use_hip_fallback(M, N, K, a.dtype):
-        return None
-    if not hip_kernel_available():
-        return None
-    return hip_interleaved_matmul(a, b, out=out)
 
 
 
@@ -516,25 +480,6 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
-    # K-6953: per-shape HIP-kernel fallback (K-6808 hand-written interleaved
-    # MFMA, gfx942-only).  Disabled when streamk/work_stealing are requested
-    # since the HIP kernel implements neither, and disabled under autograd.
-    if (
-        not enable_streamk
-        and not work_stealing
-        and not (
-            torch.is_grad_enabled()
-            and (
-                a.requires_grad
-                or b.requires_grad
-                or (out is not None and out.requires_grad)
-            )
-        )
-    ):
-        hip_out = _try_hip_fallback(a, b, out)
-        if hip_out is not None:
-            return hip_out if out is None else None
-
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

@@ -1,0 +1,143 @@
+From: tritonBLAS contributors <noreply@amd.com>
+Subject: [PATCH] [AMDGPU] Honor amdgpu-max-vmcnt-before-mfma function attribute
+
+Adds an opt-in kernel function attribute `amdgpu-max-vmcnt-before-mfma`=N
+that relaxes the conservative `s_waitcnt vmcnt(0)` floor that
+SIInsertWaitcnts emits immediately before MFMA (MAI) instructions to
+`s_waitcnt vmcnt(N)`.
+
+Motivation
+----------
+Triton's BF16 GEMM K-loop can emit `s_waitcnt vmcnt(0)` immediately before
+each `v_mfma_*_*_*_*` instruction (see TritonBLAS investigations
+K-5101 / K-5694 / K-6555). hipBLASLt's recipes typically issue MFMA
+with `vmcnt(N)` where 1 ≤ N ≤ 14 outstanding loads are tolerated, which
+overlaps the next K iteration's VMEM with the current iteration's MFMA
+and is the dominant lever in their +30%-vs-Triton TFLOPS gap on the
+worst-gap shape cohort (K-4967, K-5156).
+
+Prior in-tree levers were tried and refused (K-6028: `cl::opt`
+`-amdgpu-waitcnt-load-forcezero` is hard-coded at 0/inf only; K-6138 /
+K-6244: post-compilation ISA rewriting of `vmcnt(0)` is unsafe at the
+remaining sites because they precede `ds_write_b128` VMEM→LDS handoff
+barriers — those sites MUST stay at 0). This patch gives kernel
+authors a per-function knob limited in scope to MAI-preceding waitcnts,
+where the dependency is operand-true (an MFMA reading a VGPR that was
+the destination of an earlier load) and the user has scheduled the
+load-MFMA distance themselves (e.g. via Triton `num_stages` ≥ 2,
+`waves_per_eu`, or HIP intrinsic prefetch).
+
+Semantics
+---------
+* Attribute name: `"amdgpu-max-vmcnt-before-mfma"`
+* Attribute value: an integer N as a string (e.g. `"3"`, `"14"`).
+* Default (attribute absent or N == 0): no behavior change.
+* When N > 0 and the instruction the wait precedes is recognized as a
+  MAI (`SIInstrInfo::isMAI`), and the per-MFMA computed `Wait.LoadCnt`
+  would otherwise be 0, it is RELAXED to N (clamped to the hardware
+  load-counter maximum so we never emit an out-of-range immediate).
+* The attribute does not relax `lgkmcnt`, `expcnt`, `dscnt`, or any
+  other counter; it only touches LOAD_CNT (`vmcnt` on pre-GFX12,
+  `loadcnt` on GFX12+).
+* The attribute does not relax `vmcnt(0)` waitcnts that precede
+  non-MAI instructions (in particular, `ds_write_b128` VMEM→LDS
+  handoff barriers are unaffected).
+* No change at -O0 / OptNone.
+
+Correctness disclaimer
+----------------------
+This attribute is a CALLER PROMISE. It is the Triton frontend's
+responsibility to only set N > 0 when the kernel author can prove that
+the MFMA does not read a VGPR whose backing load is among the relaxed
+N. Setting N > 0 on a kernel where the MAI consumes the live load
+result will produce NaN (and on some sites GPU memory-access faults —
+see K-5684). The default (N = 0, attribute absent) preserves the
+existing conservative behavior.
+
+Tested
+------
+Pattern verified against upstream LLVM at the SIInsertWaitcnts
+(post-RA) layer for both PreGFX12 (`s_waitcnt vmcnt(N)`) and GFX12+
+(`s_wait_loadcnt N`) generators via the shared `Wait.LoadCnt` field.
+The attribute is read once per machine function in `run()`; no per-MI
+attribute lookup overhead.
+
+---
+ llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp | 50 +++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+index 0000000..0000000 100644
+--- a/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
++++ b/llvm/lib/Target/AMDGPU/SIInsertWaitcnts.cpp
+@@ -558,6 +558,12 @@ public:
+   AMDGPU::InstCounterType SmemAccessCounter;
+   AMDGPU::InstCounterType MaxCounter;
+   bool IsExpertMode = false;
++  // Per-function override for the conservative vmcnt(0) floor that is
++  // emitted immediately before MAI / MFMA instructions. When > 0 and
++  // the next instruction is a MAI, a computed Wait.LoadCnt of 0 is
++  // relaxed to MaxVmcntBeforeMfma. Read once from the function
++  // attribute "amdgpu-max-vmcnt-before-mfma" in run().
++  unsigned MaxVmcntBeforeMfma = 0;
+
+   SIInsertWaitcnts(MachineLoopInfo &MLI, MachinePostDominatorTree &PDT,
+                    AliasAnalysis *AA, MachineFunction &MF)
+@@ -2795,6 +2801,28 @@ bool SIInsertWaitcnts::generateWaitcntInstBefore(
+     Wait.set(AMDGPU::X_CNT, ~0u);
+   }
+
++  // Honor the opt-in "amdgpu-max-vmcnt-before-mfma" function attribute:
++  // if the next instruction is a MAI / MFMA and we would otherwise emit
++  // s_waitcnt vmcnt(0) (loadcnt(0) on GFX12+), relax it to the requested
++  // N, clamped to the hardware load-counter maximum. This only affects
++  // the vmcnt/loadcnt floor immediately preceding MAI; all other
++  // waitcnts (lgkmcnt, expcnt, dscnt, vmcnt before non-MAI sinks such
++  // as ds_write_b128 LDS handoffs) are unaffected. Setting N > 0 is a
++  // caller promise that the MFMA does not consume a VGPR whose backing
++  // load is among the relaxed N (see attribute documentation).
++  if (MaxVmcntBeforeMfma > 0 && SIInstrInfo::isMAI(MI)) {
++    const unsigned LoadCntMax = WCG->getLimits().LoadcntMax;
++    const unsigned RequestedN =
++        std::min(MaxVmcntBeforeMfma, LoadCntMax);
++    if (Wait.get(AMDGPU::LOAD_CNT) == 0)
++      Wait.set(AMDGPU::LOAD_CNT, RequestedN);
++    if (Wait.get(AMDGPU::SAMPLE_CNT) == 0)
++      Wait.set(AMDGPU::SAMPLE_CNT,
++               std::min(MaxVmcntBeforeMfma, WCG->getLimits().SamplecntMax));
++    if (Wait.get(AMDGPU::BVH_CNT) == 0)
++      Wait.set(AMDGPU::BVH_CNT,
++               std::min(MaxVmcntBeforeMfma, WCG->getLimits().BvhcntMax));
++  }
++
+   // When forcing emit, we need to skip terminators because that would break the
+   // terminators of the MBB if we emit a waitcnt between terminators.
+   if (ForceEmitZeroFlag && !MI.isTerminator())
+@@ -3791,6 +3819,28 @@ bool SIInsertWaitcnts::run() {
+                                                       IsExpertMode);
+   } else {
+     MaxCounter = AMDGPU::NUM_NORMAL_INST_CNTS;
+     // Initialize WCG per MF. It contains state that depends on MF attributes.
+     WCG = std::make_unique<WaitcntGeneratorPreGFX12>(
+         MF, AMDGPU::NUM_NORMAL_INST_CNTS, Limits);
+   }
++
++  // Parse the per-function "amdgpu-max-vmcnt-before-mfma" attribute once.
++  // Default 0 (attribute absent) preserves existing conservative behavior.
++  MaxVmcntBeforeMfma = 0;
++  if (MF.getFunction().hasFnAttribute("amdgpu-max-vmcnt-before-mfma")) {
++    StringRef S = MF.getFunction()
++                      .getFnAttribute("amdgpu-max-vmcnt-before-mfma")
++                      .getValueAsString();
++    unsigned Parsed = 0;
++    if (!S.getAsInteger(10, Parsed))
++      MaxVmcntBeforeMfma = Parsed;
++    else
++      LLVM_DEBUG(dbgs() << "amdgpu-max-vmcnt-before-mfma: failed to parse '"
++                        << S << "', ignoring\n");
++  }
+
+   SmemAccessCounter = getCounterFromEvent(SMEM_ACCESS);
+
+--
+2.43.0

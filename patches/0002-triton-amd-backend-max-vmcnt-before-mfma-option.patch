@@ -1,0 +1,74 @@
+From: tritonBLAS contributors <noreply@amd.com>
+Subject: [PATCH] [AMD] Plumb max_vmcnt_before_mfma kernel option to LLVM attribute
+
+Adds a new HIPOptions field `max_vmcnt_before_mfma: int = 0` to Triton's
+AMD backend. When non-zero, the AMD backend stamps the LLVM kernel
+function with the attribute `amdgpu-max-vmcnt-before-mfma=<N>`, which
+the patched SIInsertWaitcnts pass (see the companion LLVM patch
+`0001-llvm-amdgpu-max-vmcnt-before-mfma-attr.patch`) honors by relaxing
+the conservative `s_waitcnt vmcnt(0)` floor that immediately precedes
+MAI/MFMA instructions to `vmcnt(N)`.
+
+User-facing surface
+-------------------
+A Triton kernel author can now write:
+
+    matmul_kernel[grid](
+        a, b, c, ...,
+        BLOCK_SIZE_M=..., BLOCK_SIZE_N=..., BLOCK_SIZE_K=...,
+        num_warps=8,
+        num_stages=2,
+        waves_per_eu=0,
+        max_vmcnt_before_mfma=3,   # opt-in, default 0
+    )
+
+and the resulting amdgcn will contain `s_waitcnt vmcnt(3)` (instead of
+`vmcnt(0)`) before MFMAs whose computed wait would otherwise be 0.
+
+Default (0) preserves the existing conservative behavior.
+
+Correctness disclaimer
+----------------------
+Setting `max_vmcnt_before_mfma > 0` is a kernel-author promise that the
+MFMA does not consume a VGPR whose backing load is among the relaxed N
+outstanding loads. Setting it incorrectly will produce NaN output.
+This is documented in the companion LLVM patch and in the tritonblas
+`persistent_matmul_lt` wrapper.
+
+---
+ third_party/amd/backend/compiler.py | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/third_party/amd/backend/compiler.py b/third_party/amd/backend/compiler.py
+index 0000000..0000000 100644
+--- a/third_party/amd/backend/compiler.py
++++ b/third_party/amd/backend/compiler.py
+@@ -65,6 +65,12 @@ class HIPOptions:
+     #            - sink-insts-to-avoid-spills flag to avoid register spills
+     schedule_hint: str = 'none'
+
++    # OPT-IN: relax the conservative s_waitcnt vmcnt(0) floor that the LLVM
++    # AMDGPU SIInsertWaitcnts pass emits immediately before MFMA / MAI
++    # instructions to s_waitcnt vmcnt(N). Default 0 (no change). Requires
++    # the companion LLVM patch (amdgpu-max-vmcnt-before-mfma function
++    # attribute) to be applied to LLVM. See tritonblas patches/ README.
++    max_vmcnt_before_mfma: int = 0
++
+     def __post_init__(self):
+         gfx_major = int(self.arch[3:-2])  # Drop "gfx" prefix and minor/patch number
+         warp_size = 32 if gfx_major >= 10 else 64
+@@ -360,6 +366,12 @@ class HIPBackend(BaseBackend):
+         fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}")
+         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
+         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
++        # Opt-in: relax the s_waitcnt vmcnt(0) floor before MFMA.
++        # The default (0) leaves the attribute unset, preserving today's
++        # conservative LLVM behavior. When set, the LLVM AMDGPU patch
++        # (see tritonblas/patches/) reads this attribute in SIInsertWaitcnts.
++        if options.max_vmcnt_before_mfma > 0:
++            fns[0].add_fn_attr("amdgpu-max-vmcnt-before-mfma", f"{options.max_vmcnt_before_mfma}")
+         if knobs.compilation.enable_asan:
+             fns[0].add_fn_target_feature("+xnack")
+             fns[0].add_fn_asan_attr()
+--
+2.43.0

@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,43 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# OPT-IN: relax the conservative `s_waitcnt vmcnt(0)` floor that LLVM's
+# AMDGPU SIInsertWaitcnts pass emits immediately before MFMA / MAI
+# instructions in the K-loop body, by stamping the kernel function with
+# the LLVM attribute "amdgpu-max-vmcnt-before-mfma=<N>". When N > 0 and
+# the next instruction is a MAI, a computed `Wait.LoadCnt` of 0 is relaxed
+# to N (clamped to the hardware load-counter max).
+#
+# Default 0 (off). Requires:
+#   1. Triton built against LLVM with `patches/0001-llvm-amdgpu-max-vmcnt-
+#      before-mfma-attr.patch` applied.
+#   2. The Triton AMD backend with `patches/0002-triton-amd-backend-max-
+#      vmcnt-before-mfma-option.patch` applied.
+# Without those patches the attribute is silently ignored by LLVM and the
+# kernel kwarg is silently dropped by the AMD backend; this is safe (no
+# behavior change) but the option is also a no-op.
+#
+# CORRECTNESS DISCLAIMER: setting N > 0 is a kernel-author promise that
+# the MFMA does not consume a VGPR whose backing load is among the
+# relaxed N outstanding loads. Setting it incorrectly will produce NaN.
+# Use Triton `num_stages` >= 2 to ensure the K iteration whose loads are
+# being relaxed is not the same iteration whose loads the MFMA reads.
+def _max_vmcnt_before_mfma_default() -> int:
+    """Read the env-var override TRITONBLAS_MAX_VMCNT_BEFORE_MFMA.
+
+    Returns 0 (preserve current LLVM conservative behavior) when unset
+    or unparsable.
+    """
+    raw = os.environ.get("TRITONBLAS_MAX_VMCNT_BEFORE_MFMA", "")
+    if not raw:
+        return 0
+    try:
+        n = int(raw)
+        return n if n >= 0 else 0
+    except ValueError:
+        return 0
 
 
 
@@ -77,7 +115,21 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    max_vmcnt_before_mfma: Optional[int] = None,
 ):
+    # OPT-IN vmcnt-before-MFMA relaxation. None falls back to the env-var
+    # override TRITONBLAS_MAX_VMCNT_BEFORE_MFMA, which itself defaults to 0
+    # (preserve LLVM's conservative vmcnt(0) floor). See module-level
+    # comment and patches/README.md. We only forward the kwarg into the
+    # Triton kernel launch when N > 0, so unpatched Triton installs are
+    # not affected (Triton would raise KeyError on unknown compile kwargs).
+    if max_vmcnt_before_mfma is None:
+        max_vmcnt_before_mfma = _max_vmcnt_before_mfma_default()
+    _vmcnt_kwargs = (
+        {"max_vmcnt_before_mfma": max_vmcnt_before_mfma}
+        if max_vmcnt_before_mfma > 0
+        else {}
+    )
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -156,6 +208,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **_vmcnt_kwargs,
         )
     else:
         grids = total_tiles
@@ -194,6 +247,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            **_vmcnt_kwargs,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
         )
 

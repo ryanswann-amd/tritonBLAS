@@ -41,10 +41,15 @@ import torch
 
 logger = logging.getLogger("tritonblas.hip_dispatch")
 
-# K-7078: when set, every dispatch decision is printed to stderr.  The default
-# is silent; turn on with TRITONBLAS_HIP_DISPATCH_LOG=1 for routing audits.
-_DISPATCH_LOG_ENV = os.environ.get("TRITONBLAS_HIP_DISPATCH_LOG", "0").lower()
-_DISPATCH_LOG = _DISPATCH_LOG_ENV in ("1", "true", "yes")
+# K-7078: when TRITONBLAS_HIP_DISPATCH_LOG is set, every dispatch decision
+# is printed to stdout.  The env var is read on EVERY call so tests (and
+# the K-7054-style audit script) can toggle it at runtime without forcing
+# a re-import of the module — see TestDispatchLogging.
+_DISPATCH_LOG_TRUTHY = ("1", "true", "yes")
+
+
+def _dispatch_log_enabled() -> bool:
+    return os.environ.get("TRITONBLAS_HIP_DISPATCH_LOG", "0").lower() in _DISPATCH_LOG_TRUTHY
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB_PATH = os.path.join(_HERE, "libmfma_gemm.so")
@@ -79,8 +84,13 @@ _load_error: Optional[str] = None
 
 
 def _log_dispatch(reason: str, M: int, N: int, K: int, dtype: torch.dtype, took_hip: bool) -> None:
-    """K-7078: emit a one-line dispatch decision for routing audits."""
-    if not _DISPATCH_LOG:
+    """K-7078: emit a one-line dispatch decision for routing audits.
+
+    Gated by TRITONBLAS_HIP_DISPATCH_LOG; the env var is consulted on every
+    call so callers (tests, audit scripts, mid-process bench harnesses) can
+    flip the flag without re-importing.
+    """
+    if not _dispatch_log_enabled():
         return
     path = "HIP" if took_hip else "TRITON"
     msg = f"[tritonblas.hip_dispatch] M={M} N={N} K={K} dtype={dtype} -> {path} ({reason})"

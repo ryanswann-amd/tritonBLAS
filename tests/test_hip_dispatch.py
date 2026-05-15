@@ -1,9 +1,12 @@
-"""K-7078: unit tests for the HIP fallback dispatch predicate and the
-M-padding wrapper used for the gemv-shaped 1x4096x4096 cohort entry.
+"""K-7078: unit tests for the HIP fallback dispatch predicate, the
+M-padding wrapper used for the gemv-shaped 1x4096x4096 cohort entry,
+and the TRITONBLAS_HIP_DISPATCH_LOG audit hook.
 
 Predicate tests are pure-Python and run on any host (no GPU / no .so
 needed).  Numerical-correctness tests for `hip_interleaved_matmul` are
 skipped when the kernel .so is unavailable or the GPU isn't gfx942.
+The dispatch-log tests are host-runnable except for the end-to-end
+`_try_hip_fallback` checks, which need CUDA to import `tritonblas.matmul`.
 """
 from __future__ import annotations
 
@@ -185,3 +188,144 @@ class TestHipInterleavedMatmulNumerics:
         )
         max_err = (out.float() - ref.float()).abs().max().item()
         assert max_err < self._bf16_tolerance(K)
+
+
+# --- TRITONBLAS_HIP_DISPATCH_LOG audit hook ----------------------------
+
+class TestDispatchLogging:
+    """K-7078: protect the K-7054 audit instrumentation.
+
+    Reviewer (Testing Zealot) flagged that without a regression test for
+    the `_log_dispatch()` / `TRITONBLAS_HIP_DISPATCH_LOG=1` hook, a future
+    edit could silently disable it and re-create the exact bug this PR
+    exists to prevent.  These tests pin two invariants:
+
+      1. The env var gate is consulted at *call* time (so a runtime
+         toggle works — the audit script and these tests rely on it).
+      2. Both the HIP-taken and HIP-skipped branches emit a log line
+         tagged with the path taken.
+
+    The direct `_log_dispatch` tests are host-runnable.  The end-to-end
+    `_try_hip_fallback` tests need CUDA only because `tritonblas.matmul`
+    queries `torch.cuda.current_device()` at import time.
+    """
+
+    def test_env_unset_is_silent(self, capsys, monkeypatch):
+        monkeypatch.delenv("TRITONBLAS_HIP_DISPATCH_LOG", raising=False)
+        hip_dispatch._log_dispatch("any reason", 64, 64, 4096, torch.bfloat16, took_hip=True)
+        hip_dispatch._log_dispatch("any reason", 64, 64, 4096, torch.bfloat16, took_hip=False)
+        assert capsys.readouterr().out == ""
+
+    def test_env_zero_is_silent(self, capsys, monkeypatch):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "0")
+        hip_dispatch._log_dispatch("any reason", 64, 64, 4096, torch.bfloat16, took_hip=True)
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize("truthy", ["1", "true", "yes", "TRUE", "Yes"])
+    def test_env_truthy_emits_on_hip_taken(self, capsys, monkeypatch, truthy):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", truthy)
+        hip_dispatch._log_dispatch("dispatched", 64, 64, 4096, torch.bfloat16, took_hip=True)
+        out = capsys.readouterr().out
+        assert "-> HIP" in out, out
+        assert "M=64 N=64 K=4096" in out
+        assert "dispatched" in out
+
+    def test_env_truthy_emits_on_hip_skipped(self, capsys, monkeypatch):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        hip_dispatch._log_dispatch("not in table", 32, 32, 4096, torch.bfloat16, took_hip=False)
+        out = capsys.readouterr().out
+        assert "-> TRITON" in out, out
+        assert "M=32 N=32 K=4096" in out
+        assert "not in table" in out
+
+    def test_env_is_read_per_call(self, capsys, monkeypatch):
+        # Toggle the env var between two calls and confirm only the
+        # second one emits.  Pins the "no module-level capture" contract.
+        monkeypatch.delenv("TRITONBLAS_HIP_DISPATCH_LOG", raising=False)
+        hip_dispatch._log_dispatch("first", 64, 64, 4096, torch.bfloat16, took_hip=True)
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        hip_dispatch._log_dispatch("second", 64, 64, 4096, torch.bfloat16, took_hip=True)
+        out = capsys.readouterr().out
+        assert "first" not in out
+        assert "second" in out
+
+
+# End-to-end audit-hook tests through `_try_hip_fallback`.  These require
+# CUDA only because `tritonblas.matmul` does `torch.cuda.current_device()`
+# at import time — the *logic* under test is pure Python.
+_SKIP_NO_CUDA = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="tritonblas.matmul cannot be imported without CUDA",
+)
+
+
+@_SKIP_NO_CUDA
+class TestTryHipFallbackLogging:
+    """K-7078: end-to-end check that `_try_hip_fallback` emits a log line
+    on every exit branch (the K-7054 audit hook).  Each branch is reached
+    by setting the conditions that gate it; we don't actually need the
+    HIP kernel to execute, just to observe the log line for each path.
+    """
+
+    @pytest.fixture
+    def matmul_module(self):
+        # Lazy import: the module pulls in CUDA at import time.
+        # `from tritonblas import matmul` would bind the *function*
+        # (re-exported in tritonblas/__init__.py); we want the module
+        # itself so we can monkey-patch `_HIP_FALLBACK_ENABLED`.
+        import importlib
+        return importlib.import_module("tritonblas.matmul")
+
+    def _make_inputs(self, M, N, K):
+        a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+        b = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
+        return a, b
+
+    def test_logs_on_disabled_by_env_branch(self, capsys, monkeypatch, matmul_module):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        monkeypatch.setattr(matmul_module, "_HIP_FALLBACK_ENABLED", False)
+        a, b = self._make_inputs(64, 64, 4096)  # would otherwise route to HIP
+        out = matmul_module._try_hip_fallback(a, b, out=None)
+        assert out is None  # disabled → falls through
+        captured = capsys.readouterr().out
+        assert "-> TRITON" in captured
+        assert "disabled by env" in captured
+
+    def test_logs_on_shape_not_eligible_branch(self, capsys, monkeypatch, matmul_module):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        monkeypatch.setattr(matmul_module, "_HIP_FALLBACK_ENABLED", True)
+        a, b = self._make_inputs(32, 32, 4096)  # not in HIP_FALLBACK_SHAPES
+        out = matmul_module._try_hip_fallback(a, b, out=None)
+        assert out is None
+        captured = capsys.readouterr().out
+        assert "-> TRITON" in captured
+        assert "shape not in HIP_FALLBACK_SHAPES" in captured
+
+    def test_logs_on_so_unavailable_branch(self, capsys, monkeypatch, matmul_module):
+        # Force the .so-availability check to report False, even on a
+        # gfx942 box where it would normally pass.  Confirms the log
+        # fires on this branch too.
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        monkeypatch.setattr(matmul_module, "_HIP_FALLBACK_ENABLED", True)
+        monkeypatch.setattr(matmul_module, "hip_kernel_available", lambda: False)
+        a, b = self._make_inputs(64, 64, 4096)
+        out = matmul_module._try_hip_fallback(a, b, out=None)
+        assert out is None
+        captured = capsys.readouterr().out
+        assert "-> TRITON" in captured
+        assert ".so unavailable" in captured or "not gfx942" in captured
+
+    @pytest.mark.skipif(
+        not hip_kernel_available(),
+        reason="HIP kernel .so unavailable or not gfx942 (skipping HIP-taken log test)",
+    )
+    def test_logs_on_dispatched_branch(self, capsys, monkeypatch, matmul_module):
+        monkeypatch.setenv("TRITONBLAS_HIP_DISPATCH_LOG", "1")
+        monkeypatch.setattr(matmul_module, "_HIP_FALLBACK_ENABLED", True)
+        a, b = self._make_inputs(64, 64, 4096)
+        result = matmul_module._try_hip_fallback(a, b, out=None)
+        torch.cuda.synchronize()
+        assert result is not None, "HIP path must fire for the cohort shape"
+        captured = capsys.readouterr().out
+        assert "-> HIP" in captured
+        assert "interleaved MFMA kernel" in captured

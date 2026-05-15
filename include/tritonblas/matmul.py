@@ -18,6 +18,7 @@ from .hip_kernels import (
     hip_kernel_available,
     should_use_hip_fallback,
 )
+from .hip_kernels.dispatch import _log_dispatch as _log_hip_dispatch
 
 
 # K-6953: opt-out for the K-6808 hand-written HIP fallback path.  The kernel
@@ -36,17 +37,32 @@ def _try_hip_fallback(
     """If (M, N, K, dtype) is in the HIP fallback table and the kernel is
     available on this device, dispatch and return the result.  Otherwise
     return None and let the caller continue with the Triton path.
+
+    K-7078: every exit path emits a one-line dispatch decision via
+    `_log_hip_dispatch` (gated by TRITONBLAS_HIP_DISPATCH_LOG=1) so the
+    K-7054-style routing audit can be re-run from saved logs.
     """
+    if a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]:
+        M, K = a.shape
+        _, N = b.shape
+    else:
+        # Shape can't be analysed; defer to Triton.  No log here; Triton
+        # path will assert/error in its own validation.
+        return None
+
     if not _HIP_FALLBACK_ENABLED:
+        _log_hip_dispatch("disabled by env", M, N, K, a.dtype, took_hip=False)
         return None
-    if a.dim() != 2 or b.dim() != 2 or a.shape[1] != b.shape[0]:
-        return None
-    M, K = a.shape
-    _, N = b.shape
     if not should_use_hip_fallback(M, N, K, a.dtype):
+        _log_hip_dispatch("shape not in HIP_FALLBACK_SHAPES (or tile mismatch)",
+                          M, N, K, a.dtype, took_hip=False)
         return None
     if not hip_kernel_available():
+        _log_hip_dispatch("HIP .so unavailable / not gfx942",
+                          M, N, K, a.dtype, took_hip=False)
         return None
+    _log_hip_dispatch("dispatched to interleaved MFMA kernel",
+                      M, N, K, a.dtype, took_hip=True)
     return hip_interleaved_matmul(a, b, out=out)
 
 

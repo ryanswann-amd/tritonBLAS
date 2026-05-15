@@ -18,14 +18,33 @@ Constraints (kernel-side, from K-6808 mfma_gemm.hip):
   converts the FP32 accumulator back to the requested out_dtype).
 - A is (M,K) row-major; B is (K,N) row-major (NOT the K-major B used by
   Triton's persistent_matmul — we restride accordingly in the wrapper).
+
+K-7078: dispatch routing fix.  K-7054 found that the K-6953 routing fired
+for *zero* of the S-002 cohort shapes:
+  - 64x64x4096 BF16     — was in table, but K-6953 was reverted on main
+  - 128x1024x8192 BF16  — was NOT in table
+  - 1x4096x4096 BF16    — was NOT in table AND violates M%16==0 tile
+                           constraint (gemv-shaped)
+This file extends the table to cover all three cohort shapes and adds an
+M-padding wrapper so the gemv shape can use the same MFMA tile.  The
+dispatch decision is logged via _log_dispatch() so K-7054-style routing
+audits can be re-run from saved logs.
 """
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 from typing import Optional, Tuple
 
 import torch
+
+logger = logging.getLogger("tritonblas.hip_dispatch")
+
+# K-7078: when set, every dispatch decision is printed to stderr.  The default
+# is silent; turn on with TRITONBLAS_HIP_DISPATCH_LOG=1 for routing audits.
+_DISPATCH_LOG_ENV = os.environ.get("TRITONBLAS_HIP_DISPATCH_LOG", "0").lower()
+_DISPATCH_LOG = _DISPATCH_LOG_ENV in ("1", "true", "yes")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB_PATH = os.path.join(_HERE, "libmfma_gemm.so")
@@ -33,25 +52,41 @@ _LIB_PATH = os.path.join(_HERE, "libmfma_gemm.so")
 # Per-shape dispatch table.  Entries are (M, N, K, dtype) tuples; if the
 # incoming GEMM matches one of these, we dispatch to the HIP kernel.
 #
-# Selection rationale (K-6953 brief):
-# - 64x64x4096:    K-6860 sh2, highest clustering ratio, K-6808 baseline
-# - 128x128x4096:  K-6860 sh3, same TB cluster ratio (0.0781), small-tile
-# - 256x256x4096:  K-6860 sh7, same TB cluster ratio, large-enough that
-#                  K-6808 measured a 3.8x speedup over tritonblas
+# K-6953 baseline (3 shapes K-6808 measured speedups on):
+# - 64x64x4096:    K-6860 sh2, highest clustering ratio, 3.73x in K-6953 bench
+# - 256x256x4096:  K-6860 sh7, 3.76x in K-6953 bench
+# - 1024x1024x4096: K-6953 measured 1.50x speedup
 #
-# K-6860 iter-2 found TB cluster ratios are *identical* across the cohort
-# (TB always emits a 5-ds_read prefix), so "the next two worst from K-6860"
-# is operationally any other small BF16 shape where the K-6808 hand kernel
-# also beat tritonblas.  We use the three K-6808 measured shapes here.
+# K-7078 additions (S-002 cohort, the actual shapes that gate the spike):
+# - 128x1024x8192:  S-002 medium-shape gap; M=128, N=1024 both %16==0,
+#                   K=8192 %64==0 → fits the 16x16 MFMA tile cleanly.
+# - 1x4096x4096:    S-002 gemv-shaped; M=1 violates BLOCK_M=16 tile
+#                   constraint, so the wrapper M-pads to 16 (only first
+#                   output row is sliced back).  Pre-fix this shape was
+#                   100% Triton path; now eligible for HIP.
 HIP_FALLBACK_SHAPES: Tuple[Tuple[int, int, int, torch.dtype], ...] = (
-    (64,   64,  4096, torch.bfloat16),
-    (256, 256,  4096, torch.bfloat16),
+    # K-6953 originals
+    (64,    64,  4096, torch.bfloat16),
+    (256,  256,  4096, torch.bfloat16),
     (1024, 1024, 4096, torch.bfloat16),
+    # K-7078 S-002 cohort additions
+    (128, 1024, 8192, torch.bfloat16),
+    (1,   4096, 4096, torch.bfloat16),
 )
 
 
 _lib: Optional[ctypes.CDLL] = None
 _load_error: Optional[str] = None
+
+
+def _log_dispatch(reason: str, M: int, N: int, K: int, dtype: torch.dtype, took_hip: bool) -> None:
+    """K-7078: emit a one-line dispatch decision for routing audits."""
+    if not _DISPATCH_LOG:
+        return
+    path = "HIP" if took_hip else "TRITON"
+    msg = f"[tritonblas.hip_dispatch] M={M} N={N} K={K} dtype={dtype} -> {path} ({reason})"
+    print(msg, flush=True)
+    logger.info(msg)
 
 
 def _try_load() -> None:
@@ -94,9 +129,41 @@ def hip_kernel_available() -> bool:
     return arch.startswith("gfx942")
 
 
+# K-7078: kernel tile constants (must mirror BLOCK_M / BLOCK_N / BLOCK_K
+# / K_UNROLL in mfma_gemm.hip).  Used both by the dispatch predicate and
+# by the M-padding wrapper for the gemv-shaped 1x4096x4096 cohort entry.
+_BLOCK_M = 16
+_BLOCK_N = 16
+_BLOCK_K = 16
+_K_UNROLL = 4
+_K_DIVISOR = _BLOCK_K * _K_UNROLL  # = 64
+
+
+def _kernel_can_handle(M: int, N: int, K: int) -> bool:
+    """True iff the raw kernel can handle (M,N,K) with no padding/dispatch
+    workaround.  M-pad wrapper handles the M%16!=0 case separately.
+    """
+    return (M % _BLOCK_M == 0) and (N % _BLOCK_N == 0) and (K % _K_DIVISOR == 0)
+
+
 def should_use_hip_fallback(M: int, N: int, K: int, dtype: torch.dtype) -> bool:
-    """Shape-table lookup. Cheap; called on every matmul()."""
-    return (M, N, K, dtype) in HIP_FALLBACK_SHAPES
+    """Shape-table lookup. Cheap; called on every matmul().
+
+    K-7078: this is the predicate K-7054 found was never satisfied for the
+    S-002 cohort.  The fix is two-pronged: (a) the table now lists the
+    cohort shapes, (b) the predicate accepts shapes whose M dim is < 16
+    as long as N/K satisfy the tile divisibility — those are M-padded by
+    `hip_interleaved_matmul`.
+    """
+    if (M, N, K, dtype) not in HIP_FALLBACK_SHAPES:
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    # Shapes that need M-padding (gemv-like, M < BLOCK_M).  N and K still
+    # have to satisfy tile divisibility for the underlying kernel.
+    if M < _BLOCK_M:
+        return (N % _BLOCK_N == 0) and (K % _K_DIVISOR == 0)
+    return _kernel_can_handle(M, N, K)
 
 
 def hip_interleaved_matmul(
@@ -106,7 +173,10 @@ def hip_interleaved_matmul(
 ) -> torch.Tensor:
     """C = A @ B via the K-6808 interleaved HIP kernel.
 
-    Requires gfx942, BF16 inputs, and (M,N) divisible by 16, K divisible by 64.
+    Requires gfx942, BF16 inputs, and (N,K) divisible by 16/64.  M may be
+    < BLOCK_M; the wrapper pads A with zero rows up to BLOCK_M and slices
+    the corresponding output rows on the way out (K-7078: needed for the
+    1x4096x4096 S-002 cohort entry).
 
     Returns a tensor with dtype matching `a` (same convention as
     tritonblas.matmul).  The kernel writes FP32 internally; we cast on output.
@@ -123,28 +193,43 @@ def hip_interleaved_matmul(
 
     M, K = a.shape
     _, N = b.shape
-    assert M % 16 == 0 and N % 16 == 0 and K % 64 == 0, (
-        f"HIP kernel requires M,N % 16 == 0 and K % 64 == 0; got {M}x{N}x{K}"
+    assert N % _BLOCK_N == 0 and K % _K_DIVISOR == 0, (
+        f"HIP kernel requires N % {_BLOCK_N} == 0 and K % {_K_DIVISOR} == 0; "
+        f"got {M}x{N}x{K}"
     )
 
-    # Kernel expects row-major contiguous A (M,K) and B (K,N), and writes
-    # FP32 C (M,N) row-major.
+    # K-7078: M-padding for gemv-shaped GEMMs (e.g. 1x4096x4096).  The
+    # kernel is launched on (16, N) but only the first M rows of the output
+    # are real; the remaining (16-M) rows of A are zero so no extra rows
+    # of B contribute.  We slice the output back to (M, N).
     a_c = a.contiguous()
     b_c = b.contiguous()
-    c_fp32 = torch.empty((M, N), dtype=torch.float32, device=a.device)
+    pad_M = (-M) % _BLOCK_M  # 0 if already aligned, else 16-M etc.
+    if pad_M:
+        a_padded = torch.zeros((M + pad_M, K), dtype=a_c.dtype, device=a_c.device)
+        a_padded[:M].copy_(a_c)
+        a_kernel = a_padded
+        M_kernel = M + pad_M
+    else:
+        a_kernel = a_c
+        M_kernel = M
+
+    c_fp32 = torch.empty((M_kernel, N), dtype=torch.float32, device=a.device)
 
     stream = torch.cuda.current_stream(a.device).cuda_stream
     _lib.launch_interleaved(
-        ctypes.c_void_p(a_c.data_ptr()),
+        ctypes.c_void_p(a_kernel.data_ptr()),
         ctypes.c_void_p(b_c.data_ptr()),
         ctypes.c_void_p(c_fp32.data_ptr()),
-        ctypes.c_int(M),
+        ctypes.c_int(M_kernel),
         ctypes.c_int(N),
         ctypes.c_int(K),
         ctypes.c_void_p(stream),
     )
 
+    c_real = c_fp32[:M] if pad_M else c_fp32
+
     if out is None:
-        return c_fp32.to(a.dtype)
-    out.copy_(c_fp32.to(out.dtype))
+        return c_real.to(a.dtype)
+    out.copy_(c_real.to(out.dtype))
     return out

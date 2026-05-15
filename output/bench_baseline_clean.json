@@ -2,7 +2,7 @@
   "label": "baseline_clean",
   "arch": "gfx942:sramecc+:xnack-",
   "triton_version": "3.7.0+git3c71c5f3",
-  "torch_version": "2.10.0+rocm7.2.0.gitb6ee5fde",
+  "torch_version": "2.10.0+rocm-redacted",
   "shape": {
     "M": 64,
     "N": 64,

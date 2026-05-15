@@ -9,12 +9,83 @@ the accumulator and iteration over the reduction dimension. Also bundles
 all GEMM configuration parameters (block sizes, scheduling, computation options).
 """
 
+import os
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 
 from .tile import Tile
 from .matrix_view import InputView
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# K-6154: Inline-asm vmcnt(N) injection control
+# ════════════════════════════════════════════════════════════════════════════
+# Read once at module-import time. Treated as a constexpr closure inside the
+# @triton.jit kernels below. Valid values: 0 (baseline / no injection),
+# 3, 5, 7, 9. Sweeping requires a fresh Python process per N (Triton caches
+# the compiled kernel based on the captured closure).
+_K6154_VMCNT_N = tl.constexpr(int(os.environ.get("K6154_VMCNT_N", "0")))
+# K-6154: optional flag to also force the K-loop to num_stages=1 even when
+# no waitcnt is injected. Lets us isolate "NS=1 baseline" from "NS=1 + inject"
+# for a fair comparison.
+_K6154_FORCE_NS1 = tl.constexpr(int(os.environ.get("K6154_FORCE_NS1", "0")))
+
+
+@triton.jit
+def _k6154_vmcnt_3(x):
+    """Inject `s_waitcnt vmcnt(3)` and return `x` unchanged (elementwise identity).
+
+    Threading `x` through makes the inline asm an elementwise transform of a
+    real loaded tensor — the Triton AMD pipeliner can predicate transforms of
+    loaded data. is_pure=False marks the asm as side-effecting so the waitcnt
+    instruction survives MLIR DCE. The asm body emits the waitcnt then does
+    a 32-bit identity move ($0 = $1) to satisfy the elementwise contract.
+    """
+    return tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(3)\nv_mov_b32 $0, $1",
+        "=v,v",
+        [x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=1,
+    )
+
+
+@triton.jit
+def _k6154_vmcnt_5(x):
+    return tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(5)\nv_mov_b32 $0, $1",
+        "=v,v",
+        [x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=1,
+    )
+
+
+@triton.jit
+def _k6154_vmcnt_7(x):
+    return tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(7)\nv_mov_b32 $0, $1",
+        "=v,v",
+        [x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=1,
+    )
+
+
+@triton.jit
+def _k6154_vmcnt_9(x):
+    return tl.inline_asm_elementwise(
+        "s_waitcnt vmcnt(9)\nv_mov_b32 $0, $1",
+        "=v,v",
+        [x],
+        dtype=x.dtype,
+        is_pure=False,
+        pack=1,
+    )
 
 
 @aggregate
@@ -213,7 +284,29 @@ class GemmContext:
         else:
             a = tl.load(a_ptrs, cache_modifier=self.cache_modifier_a)
             b = tl.load(b_ptrs, cache_modifier=self.cache_modifier_b)
-        
+
+        # ═══════════════════════════════════════════════════════════════════
+        # K-6154: INJECT s_waitcnt vmcnt(N) BETWEEN LOADS AND DOT
+        # ═══════════════════════════════════════════════════════════════════
+        # Goal: bypass AMDGPUInsertWaitcnts conservative vmcnt(0) drain.
+        # _K6154_VMCNT_N is a module-level closure constant (constexpr) read
+        # from env K6154_VMCNT_N at import time. N=0 means baseline (no inject).
+        # The injection threads `a` through inline_asm so the AMD pipeliner
+        # treats it as an elementwise transform of a loaded tensor (predicateable).
+        # The asm body emits `s_waitcnt vmcnt(N)` then a 32-bit identity move
+        # so $0 = $1 — the move is normally folded by the post-RA scheduler.
+        # is_pure=False keeps the waitcnt as a side-effecting LLVM inline asm
+        # that neither SIInsertWaitcnts nor the post-RA scheduler may reorder.
+        if _K6154_VMCNT_N == 3:
+            a = _k6154_vmcnt_3(a)
+        elif _K6154_VMCNT_N == 5:
+            a = _k6154_vmcnt_5(a)
+        elif _K6154_VMCNT_N == 7:
+            a = _k6154_vmcnt_7(a)
+        elif _K6154_VMCNT_N == 9:
+            a = _k6154_vmcnt_9(a)
+        # else: N=0 baseline, no injection
+
         # ═══════════════════════════════════════════════════════════════════
         # ACCUMULATE
         # ═══════════════════════════════════════════════════════════════════
@@ -221,7 +314,7 @@ class GemmContext:
             acc += tl.dot(a, b, out_dtype=tl.int32)
         else:
             acc += tl.dot(a, b, allow_tf32=self.allow_tf32)
-        
+
         return acc
     
     @triton.jit
@@ -261,9 +354,17 @@ class GemmContext:
             num_k_tiles -= 1
         tl.assume(num_k_tiles > 0)
         
-        # Main K loop
-        for k_idx in range(num_k_tiles):
-            acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=False)
+        # K-6154: when injection is active, force num_stages=1 for THIS loop so
+        # the AMD pipeliner doesn't try to predicate the inline-asm op (it can't).
+        # K6154_FORCE_NS1=1 also disables pipelining without injecting (NS=1 baseline).
+        # When both are 0, the loop uses Triton's default pipelining.
+        if _K6154_VMCNT_N != 0 or _K6154_FORCE_NS1 != 0:
+            for k_idx in tl.range(num_k_tiles, num_stages=1):
+                acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=False)
+        else:
+            # Main K loop (default pipelining)
+            for k_idx in range(num_k_tiles):
+                acc = self.reduce_tile(A, B, out_tile, k_idx, acc, boundary=False)
         
         # Handle K tail if needed
         if not self.even_k:

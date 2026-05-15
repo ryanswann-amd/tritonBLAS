@@ -497,6 +497,15 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+    # K-6154: env override for num_stages (Triton pipeliner cannot predicate
+    # `tt.elementwise_inline_asm` so injecting vmcnt(N) requires num_stages=1).
+    import os as _os
+    _ns_override = _os.environ.get("K6154_NUM_STAGES")
+    if _ns_override is not None:
+        try:
+            selector.num_stages = int(_ns_override)
+        except (AttributeError, ValueError):
+            pass
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

@@ -1,40 +1,52 @@
-# `amdgpu-max-vmcnt-before-mfma` — opt-in vmcnt(0)→vmcnt(N) relaxation
+# `amdgpu-max-vmcnt-before-mfma` — upstream-fixable lever (REFERENCE ONLY, do not enable)
 
-This directory contains two cross-repo patches that, together with the
-`max_vmcnt_before_mfma` kwarg / `TRITONBLAS_MAX_VMCNT_BEFORE_MFMA` env-var
-plumbed through `include/tritonblas/matmul.py`, give kernel authors a
-per-function knob to relax the conservative `s_waitcnt vmcnt(0)` floor that
-LLVM's `SIInsertWaitcnts` pass emits immediately before MFMA / MAI
-instructions to `s_waitcnt vmcnt(N)`.
+This directory contains two cross-repo patches that, *if applied to LLVM
+and the Triton AMD backend*, would expose a per-function attribute
+`amdgpu-max-vmcnt-before-mfma=<N>` allowing kernel authors to relax the
+conservative `s_waitcnt vmcnt(0)` floor that LLVM's `SIInsertWaitcnts`
+pass emits immediately before MFMA / MAI instructions to
+`s_waitcnt vmcnt(N)`.
 
-## Why this exists
+The patches are checked in as the documented **upstream-fixable** form
+of this lever — the clean alternative to the post-compilation ISA
+rewriter scaffold investigated and rejected in K-6138 / K-6244.
+
+> **The matching tritonblas Python wrapper plumbing was deliberately
+> NOT shipped.** Empirical results from the prior tickets in this line
+> (K-6244, K-6635, K-6663) show no surviving vmcnt site in current
+> Triton + current ROCm codegen where `N > 0` is both correct *and* faster
+> on the K-5156 / K-4967 worst-gap shape cohort. Until a benchmark
+> identifies such a site, exposing a configurable Python surface in
+> tritonblas would be unverified scaffolding.
+
+## Why this lever was investigated
 
 On the K-5156 / K-4967 worst-gap shape cohort (BF16 GEMM, MI300X /
 gfx942), tritonblas's persistent matmul issues each MFMA preceded by
 `s_waitcnt vmcnt(0)` (drain ALL outstanding loads), while hipBLASLt
-issues MFMA with `vmcnt(N)` where 1 ≤ N ≤ 14. K-5101, K-5694, K-5647,
-and K-6555 quantified this as the dominant lever in the +30% TFLOPS gap.
+issues MFMA with `vmcnt(N)` where 1 ≤ N ≤ 14. K-5101 / K-5694 / K-5647
+/ K-6555 quantified this as the dominant single lever in the +30%
+TFLOPS gap.
 
-Prior in-tree levers were tried and refused:
+## Why no Python wrapper is shipped — the empirical record
+
+Every prior in-tree attempt to lower the floor was tried and refused:
 
 | Ticket  | Lever                                                                | Outcome                                                                          |
 |---------|----------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | K-6028  | `cl::opt -amdgpu-waitcnt-load-forcezero=N`                           | hard-coded 0/inf; AMDGCN byte-identical                                          |
 | K-6138  | post-compilation ISA rewriter `vmcnt(0)` → `vmcnt(N)`                | 14/18 noop, strict variants fault, lenient produces NaN                          |
 | K-6244  | full-suite rewriter on 27 shapes × 5 modes                           | 0/27 sites rewritten — current Triton+ROCm no longer emits the K-loop pattern    |
-| K-6244† | remaining 3 vmcnt(0) sites                                           | all immediately precede `ds_write_b128` (VMEM→LDS handoff barriers, MUST stay 0) |
+| K-6244† | the remaining 3 vmcnt(0) sites that do exist                         | all immediately precede `ds_write_b128` (VMEM→LDS handoff barriers, MUST stay 0) |
 | K-6635  | analogous `lgkmcnt(N)` ISA rewriter on the 7 candidate sites         | all 7 are operand-true RAW edges (correctness collapse on N=1, NaN on N≥2)       |
 | K-6663  | joint `(vmcnt(N), lgkmcnt(M))` 5×5 grid                              | joint best matches single-axis, all N≥1 cells produce NaN                        |
 
 K-6244 explicitly recommends: **CLOSE the entire vmcnt(N) line of
-investigation.** This patch is the clean upstream-fixable expression of
-the lever, intended for kernels where the author *can* prove the
-operand-true RAW dependency does not bind — e.g., persistent matmuls
-with `num_stages` ≥ 2 where the K iteration whose loads are being
-relaxed is not the same iteration whose loads the MFMA reads.
-
-The default (`max_vmcnt_before_mfma=0`, attribute absent) is a no-op
-and preserves today's correctness-first LLVM behavior.
+investigation.** The patches in this directory are checked in as the
+clean upstream-fixable expression of the lever for completeness —
+**they are not wired into tritonblas's matmul API** until a follow-up
+ticket identifies a vmcnt site in current codegen where `N > 0` is
+provably both correct (no NaN) and faster on a real shape.
 
 ## Files
 
@@ -42,9 +54,11 @@ and preserves today's correctness-first LLVM behavior.
 |---------------------------------------------------------------------|-----------------|----------------------------------------------------------------------------------|
 | `0001-llvm-amdgpu-max-vmcnt-before-mfma-attr.patch`                 | `llvm-project`  | Adds `amdgpu-max-vmcnt-before-mfma` function attribute to `SIInsertWaitcnts.cpp` |
 | `0002-triton-amd-backend-max-vmcnt-before-mfma-option.patch`        | `triton`        | Adds `HIPOptions.max_vmcnt_before_mfma` and stamps the LLVM attribute            |
-| `../include/tritonblas/matmul.py` (already in this repo)            | `tritonblas`    | Accepts `max_vmcnt_before_mfma=N` kwarg and `TRITONBLAS_MAX_VMCNT_BEFORE_MFMA` env-var |
 
-## How to apply
+`include/tritonblas/matmul.py` is intentionally left untouched — see
+the boxed note above.
+
+## How to apply (for follow-up investigation only)
 
 ```bash
 # 1. LLVM (against the commit Triton's third_party/amd pins to)
@@ -58,49 +72,40 @@ cd ${TRITON_DIR}
 git apply --3way --reject ${TRITONBLAS_DIR}/patches/0002-triton-amd-backend-max-vmcnt-before-mfma-option.patch
 
 # 3. Build LLVM, then Triton against it (see triton/python/setup.py
-#    for the $LLVM_INCLUDE_DIRS / $LLVM_LIBRARY_DIR knobs), then
-#    pip install -e ${TRITONBLAS_DIR}.
+#    for the $LLVM_INCLUDE_DIRS / $LLVM_LIBRARY_DIR knobs).
 ```
 
-## How to use
+After the patches are built in, the attribute can be stamped on a
+per-kernel basis from the Triton backend by passing
+`max_vmcnt_before_mfma=N` through the kernel launch. **Do not surface
+this as a tritonblas-level kwarg** until a follow-up benchmark
+satisfies the gating below.
 
-After the patches are built in:
+## Gating: what a follow-up ticket must demonstrate before any wrapper lands
 
-```python
-from tritonblas import matmul                # public API
-out = matmul(a, b, max_vmcnt_before_mfma=3)  # OPT-IN (when wired through)
-```
+A future ticket may revive a tritonblas Python wrapper iff *all* of
+the following hold on at least one shape from the K-5156 / K-4967
+worst-gap cohort, on MI300X with the patched LLVM + patched Triton AMD
+backend:
 
-Or via env-var (no code changes):
+1. **AMDGCN diff**: at least one `s_waitcnt vmcnt(0)` immediately
+   preceding a `v_mfma_*` instruction in the K-loop body is rewritten
+   to `s_waitcnt vmcnt(N)` with `N > 0`.
+   `TRITON_ALWAYS_COMPILE=1 TRITON_KERNEL_DUMP=1` and
+   `grep -nE 's_waitcnt vmcnt\([1-9][0-9]*\)'` on the dumped
+   `*.amdgcn` is the witness.
+2. **Numerical correctness**: output is bit-equivalent or within 1e-2
+   (BF16) of the reference `torch.matmul` on the same inputs. **Past
+   attempts produced NaN** (K-6635 / K-6663); this is the gate that
+   has so far not been passed.
+3. **TFLOPS delta**: measured TFLOPS exceeds the same shape's measured
+   TFLOPS with the attribute absent, on at least 3 independent runs,
+   and is reported alongside hipBLASLt's TFLOPS on the same shape.
 
-```bash
-TRITONBLAS_MAX_VMCNT_BEFORE_MFMA=3 python my_benchmark.py
-```
+Without all three, do not ship a Python wrapper. The patches stay in
+this directory as documentation of the lever.
 
-The kwarg is **only forwarded into the Triton kernel launch when N > 0**
-so unpatched Triton installs are unaffected (`HIPOptions` does not yet
-have the field; passing it would `KeyError`).
-
-## Verifying the attribute took effect
-
-Dump the AMDGCN of a compiled kernel and grep:
-
-```bash
-TRITON_ALWAYS_COMPILE=1 TRITON_KERNEL_DUMP=1 \
-TRITONBLAS_MAX_VMCNT_BEFORE_MFMA=3 \
-python -c "import torch, tritonblas as tb; \
-           a=torch.randn(256,16384,device='cuda',dtype=torch.bfloat16); \
-           b=torch.randn(16384,256,device='cuda',dtype=torch.bfloat16); \
-           tb.matmul(a, b)"
-
-grep -nE 's_waitcnt vmcnt\([1-9][0-9]*\)' ~/.triton/dump/*/persistent_matmul.amdgcn | \
-  awk -F: '/s_waitcnt vmcnt\([1-9]/{print $0}' | head -5
-```
-
-You should see `s_waitcnt vmcnt(3)` immediately preceding `v_mfma_*`
-where the upstream compiler would have emitted `vmcnt(0)`.
-
-## Correctness disclaimer
+## Correctness rationale
 
 `max_vmcnt_before_mfma > 0` is a **caller promise** that the MFMA does
 not consume a VGPR whose backing load is among the relaxed N
@@ -111,13 +116,8 @@ patches that violated this promise:
 * **GPU memory-access fault** when the relaxed load fed an SGPR/scalar
   index used for address computation.
 
-The Triton frontend (or the kernel author) is responsible for proving
-the dependency does not bind. For tritonblas's `persistent_matmul`,
-this is true iff:
-
-1. `num_stages >= 2` (so the prefetched K iteration's loads are at
-   least one MFMA-burst behind the consuming MFMAs), AND
-2. The chosen N is < the number of outstanding loads from the
-   prefetched-but-not-yet-consumed K iteration.
-
-If unsure, leave the default (0).
+K-6244 / K-6635 / K-6663 then established empirically that in current
+Triton + current ROCm codegen for tritonblas's persistent matmul, every
+surviving `vmcnt(0)` site has the operand-true RAW dependency that
+binds — i.e., the caller cannot honestly make the promise. That is why
+no Python wrapper is shipped here.

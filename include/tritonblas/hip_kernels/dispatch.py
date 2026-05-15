@@ -52,12 +52,15 @@ _LIB_PATH = os.path.join(_HERE, "libmfma_gemm.so")
 # Per-shape dispatch table.  Entries are (M, N, K, dtype) tuples; if the
 # incoming GEMM matches one of these, we dispatch to the HIP kernel.
 #
-# K-6953 baseline (3 shapes K-6808 measured speedups on):
-# - 64x64x4096:    K-6860 sh2, highest clustering ratio, 3.73x in K-6953 bench
-# - 256x256x4096:  K-6860 sh7, 3.76x in K-6953 bench
-# - 1024x1024x4096: K-6953 measured 1.50x speedup
+# K-7078 / S-002 cohort — only shapes this PR actually benchmarks and
+# verifies are listed.  The K-6953 entries (256x256x4096, 1024x1024x4096)
+# from the original table were dropped because they are not part of the
+# S-002 cohort and have no benchmark/correctness coverage in this branch
+# (Minimalist review feedback).  Add them back via a separate ticket if
+# they regain a verified benchmark.
 #
-# K-7078 additions (S-002 cohort, the actual shapes that gate the spike):
+# - 64x64x4096:     S-002 small-shape gap (the K-6808 hand-written kernel's
+#                   native target).  M=N=64 → 4x4 grid of 16x16 tiles.
 # - 128x1024x8192:  S-002 medium-shape gap; M=128, N=1024 both %16==0,
 #                   K=8192 %64==0 → fits the 16x16 MFMA tile cleanly.
 # - 1x4096x4096:    S-002 gemv-shaped; M=1 violates BLOCK_M=16 tile
@@ -65,11 +68,7 @@ _LIB_PATH = os.path.join(_HERE, "libmfma_gemm.so")
 #                   output row is sliced back).  Pre-fix this shape was
 #                   100% Triton path; now eligible for HIP.
 HIP_FALLBACK_SHAPES: Tuple[Tuple[int, int, int, torch.dtype], ...] = (
-    # K-6953 originals
-    (64,    64,  4096, torch.bfloat16),
-    (256,  256,  4096, torch.bfloat16),
-    (1024, 1024, 4096, torch.bfloat16),
-    # K-7078 S-002 cohort additions
+    (64,    64, 4096, torch.bfloat16),
     (128, 1024, 8192, torch.bfloat16),
     (1,   4096, 4096, torch.bfloat16),
 )

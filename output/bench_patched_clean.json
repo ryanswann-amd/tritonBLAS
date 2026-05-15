@@ -1,0 +1,29 @@
+{
+  "label": "patched_clean",
+  "arch": "gfx942:sramecc+:xnack-",
+  "triton_version": "3.7.0+gitf7feddad",
+  "torch_version": "2.10.0+rocm7.2.0.gitb6ee5fde",
+  "shape": {
+    "M": 64,
+    "N": 64,
+    "K": 4096,
+    "dtype": "bf16",
+    "num_stages": 4,
+    "block_k": 64
+  },
+  "max_abs_err": 0.000244140625,
+  "triton_us": 74.75805852343053,
+  "triton_tflops": 0.44884033457722067,
+  "hipblaslt_us": 9.797987113270962,
+  "hipblaslt_tflops": 3.4246250390094852,
+  "isa": [
+    {
+      "path": "/tmp/k6830_patched_clean_x8209qml/3WSUKDRTBJDO3W6RKG5UOVYCFNZFFVH6TKOZWG6OPAWO7RQ7K25A/matmul_kernel.amdgcn",
+      "ds_read": 64,
+      "v_mfma": 32,
+      "ds_write": 40,
+      "longest_mfma_run": 8,
+      "lds_mfma_transitions": 49
+    }
+  ]
+}

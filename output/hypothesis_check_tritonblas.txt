@@ -1,0 +1,10 @@
+K-6830 hypothesis check  shape=(64, 64, 4096)  strict=False
+  triton_version: baseline='3.7.0+git3c71c5f3'  patched='3.7.0+gitf7feddad'
+  ISA longest_mfma_run:        28 -> 28 (drop>=1?)
+  ISA lds_mfma_transitions:    180 -> 180 (rise>=4?)
+  ISA ds_write:                96 -> 96 (drop>=4?)
+  ISA gate FAILED: hypothesis predicted at least one of (longest_mfma_run drop, transitions rise, ds_write drop), observed deltas are within noise.
+  ISA multiset is BIT-IDENTICAL between baseline and patched (same cached kernels, same counters). The patch did not alter the compiled AMDGCN on this workload.
+  TFLOPS @ (64, 64, 4096): baseline=0.134  patched=0.131  ratio=0.974  (need>=1.05)
+
+VERDICT: hypothesis NOT SUPPORTED — file as negative finding, do NOT ship as a fix PR.

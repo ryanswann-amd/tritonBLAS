@@ -1,0 +1,115 @@
+{
+  "label": "patched_clean",
+  "arch": "gfx942:sramecc+:xnack-",
+  "triton_version": "3.7.0+gitf7feddad",
+  "torch_version": "2.10.0+rocm7.2.0.gitb6ee5fde",
+  "results": [
+    {
+      "M": 64,
+      "N": 64,
+      "K": 4096,
+      "dtype": "bfloat16",
+      "tritonblas_us": 256.4148700390106,
+      "tritonblas_tflops": 0.13085993021736636,
+      "hipblaslt_us": 9.668421673467037,
+      "hipblaslt_tflops": 3.4705180569526797,
+      "max_abs_err_tritonblas": 0.00390625,
+      "speedup_vs_hipblaslt": 0.037706166073738605
+    },
+    {
+      "M": 64,
+      "N": 64,
+      "K": 8192,
+      "dtype": "bfloat16",
+      "tritonblas_us": 257.43418633937836,
+      "tritonblas_tflops": 0.2606835749138991,
+      "hipblaslt_us": 10.39395381853012,
+      "hipblaslt_tflops": 6.456528975562672,
+      "max_abs_err_tritonblas": 0.0009765625,
+      "speedup_vs_hipblaslt": 0.04037518857277042
+    },
+    {
+      "M": 64,
+      "N": 64,
+      "K": 16384,
+      "dtype": "bfloat16",
+      "tritonblas_us": 257.650900236855,
+      "tritonblas_tflops": 0.5209286203798064,
+      "hipblaslt_us": 11.646308095784804,
+      "hipblaslt_tflops": 11.524487150445383,
+      "max_abs_err_tritonblas": 0.125,
+      "speedup_vs_hipblaslt": 0.04520189172666778
+    },
+    {
+      "M": 128,
+      "N": 128,
+      "K": 4096,
+      "dtype": "bfloat16",
+      "tritonblas_us": 257.8206689834594,
+      "tritonblas_tflops": 0.5205856013375357,
+      "hipblaslt_us": 10.318833928189717,
+      "hipblaslt_tflops": 13.007063485471413,
+      "max_abs_err_tritonblas": 0.0009765625,
+      "speedup_vs_hipblaslt": 0.04002329979545481
+    },
+    {
+      "M": 256,
+      "N": 256,
+      "K": 4096,
+      "dtype": "bfloat16",
+      "tritonblas_us": 255.0435996775786,
+      "tritonblas_tflops": 2.105016211654408,
+      "hipblaslt_us": 13.475253809263206,
+      "hipblaslt_tflops": 39.84124674749668,
+      "max_abs_err_tritonblas": 0.5,
+      "speedup_vs_hipblaslt": 0.052835098886223265
+    },
+    {
+      "M": 1024,
+      "N": 1024,
+      "K": 4096,
+      "dtype": "bfloat16",
+      "tritonblas_us": 253.65293069941097,
+      "tritonblas_tflops": 33.86491363736467,
+      "hipblaslt_us": 33.806198696153835,
+      "hipblaslt_tflops": 254.09347762537067,
+      "max_abs_err_tritonblas": 1.0,
+      "speedup_vs_hipblaslt": 0.13327738261465447
+    }
+  ],
+  "isa": [
+    {
+      "name": "persistent_matmul.amdgcn",
+      "ds_read": 64,
+      "v_mfma": 64,
+      "ds_write": 24,
+      "longest_mfma_run": 10,
+      "lds_mfma_transitions": 51
+    },
+    {
+      "name": "persistent_matmul.amdgcn",
+      "ds_read": 64,
+      "v_mfma": 64,
+      "ds_write": 24,
+      "longest_mfma_run": 10,
+      "lds_mfma_transitions": 51
+    },
+    {
+      "name": "persistent_matmul.amdgcn",
+      "ds_read": 64,
+      "v_mfma": 64,
+      "ds_write": 24,
+      "longest_mfma_run": 10,
+      "lds_mfma_transitions": 51
+    },
+    {
+      "name": "persistent_matmul.amdgcn",
+      "ds_read": 48,
+      "v_mfma": 64,
+      "ds_write": 24,
+      "longest_mfma_run": 28,
+      "lds_mfma_transitions": 27
+    }
+  ],
+  "cache_dir": "/tmp/k6830_tb_patched_clean_xtrdm43t"
+}

@@ -98,6 +98,13 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-4449 investigation (negative result): wiring Triton-AMD's
+    # schedule_hint={"attention","memory-bound-attention"} and toggling
+    # kpack=1↔2 here were both ±2% on the K-4394 FP16/BF16 residual cohort
+    # ({256,512,3072,4096}^3). The hipBLASLt MFMA/load interleave (K-4396)
+    # cannot be reproduced via the schedule_hint axis — follow-on work
+    # belongs in tile/grid mapping and occupancy (the autotune config
+    # space), not here.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
@@ -244,6 +251,8 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
+    # K-4449 investigation (negative result): see persistent_matmul_lt above
+    # for the schedule_hint / kpack write-up. Same conclusion applies here.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None

@@ -1,9 +1,16 @@
 from __future__ import annotations
 import itertools
+import logging
 import torch
 import origami
 import math
 from math import ceil
+
+# Module logger so per-shape override rejections are visible to operators
+# (e.g. when a new dispatch_table entry violates Triton's LDS budget on a
+# specific dtype). Stays silent by default; configure root logging or this
+# module's logger explicitly to surface the warnings.
+_logger = logging.getLogger(__name__)
 
 
 def estimate_triton_lds_bytes(
@@ -309,7 +316,31 @@ class OrigamiMatmulSelector:
             self._hardware.lds_capacity,
             override.num_stages,
         ):
-            # Reject silently — Origami's pick remains in place.
+            # Reject the override but keep going on Origami's pick. Log a
+            # warning so a mismatched table entry (e.g. a tile that fits at
+            # FP16 but overflows LDS at FP32 / on a smaller-LDS arch) is
+            # visible to operators instead of silently bypassed.
+            estimated = estimate_triton_lds_bytes(
+                override.block_m,
+                override.block_n,
+                override.block_k,
+                bytes_a,
+                bytes_b,
+                override.num_stages,
+            )
+            _logger.warning(
+                "dispatch_table override rejected for shape "
+                "(M=%d, N=%d, K=%d, dtype=%s): tile (%d,%d,%d) at "
+                "num_stages=%d needs ~%d B LDS but capacity is %d B; "
+                "falling back to Origami pick (%d,%d,%d).",
+                self._m, self._n, self._k, self._a_dtype_str,
+                override.block_m, override.block_n, override.block_k,
+                override.num_stages,
+                int(estimated), int(self._hardware.lds_capacity),
+                self._result.config.mt.m,
+                self._result.config.mt.n,
+                self._result.config.mt.k,
+            )
             self._dispatch_table_hit = False
             return
 

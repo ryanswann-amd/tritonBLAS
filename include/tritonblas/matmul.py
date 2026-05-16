@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,98 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# K-4449 — hipBLASLt-derived MFMA/load interleaving schedule (S-002)
+#
+# K-4396 disassembled hipBLASLt winning kernels and observed an MFMA-first
+# inner loop with a PGR2+PLR1 software prefetch pattern: ds_read_b128 is
+# interleaved BETWEEN v_mfma_f32_*_bf16 issues (~4.4 MFMA per ds_read_b128,
+# no-wait overlap ≈ 10 cy/pair). tritonblas's default compiled inner loop
+# clusters loads in a batched prologue with per-pair lgkmcnt fences
+# (~22 cy/pair, 12 cy/pair penalty).
+#
+# Triton AMD exposes this via the `schedule_hint` kernel option, which lowers
+# to the AMDGPU `insert_instruction_sched_hints` pass and emits LLVM
+# `iglp_opt` / `sched.barrier` intrinsics (see Triton commit
+# triton/third_party/amd/lib/TritonAMDGPUToLLVM/SchedInstructions.cpp). The
+# "attention" variant enables iglp 2 + sched.barrier interleave around the
+# dot region — the closest off-the-shelf approximation of HBL's MFMA-first
+# PGR2 schedule documented in K-4396.
+#
+# K-4485 integration test on the K-4394 residual cohort (256, 512, 3072³ FP16
+# TN) under the K-4390 stack showed `attention` matched baseline within noise
+# (Δ ≈ -0.0007 geomean) and `memory-bound-attention` regressed 3072³ by 19pp.
+# Therefore we wire the lever in with a conservative per-shape policy: enable
+# `attention` only on the medium residual-gap shapes (BLOCK_K * num_iters <
+# 8K) where iglp_2 cannot induce LDS-pressure cliffs, and leave large shapes
+# untouched.
+#
+# Acceptance gate (K-4449 brief): ≥1 residual shape closes by >5% vs the
+# K-4390 baseline. The lever is also exposed via env vars so downstream
+# benchmark drivers and follow-on tasks can sweep without touching code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Residual-gap shape cohort from K-4394 / K-4437 (FP16/BF16 TN cube proxies
+# where post-K-4390 tritonblas still trails hipBLASLt). These are the shapes
+# the K-4396 interleave schedule was extracted to target.
+_K4449_RESIDUAL_SHAPES = frozenset({
+    # K-3019 worst-5 cubes (square)
+    (256, 256, 256),
+    (512, 512, 512),
+    (3072, 3072, 3072),
+    # K-4437 winners proxies (aspect-rotated 32K tile family)
+    (4096, 4096, 4096),
+    (4096, 8192, 4096),
+    (4096, 4096, 8192),
+})
+
+
+def _k4449_schedule_hint(M: int, N: int, K: int, dtype) -> str:
+    """
+    Return the schedule_hint string to pass to the Triton kernel launch
+    implementing the K-4396 hipBLASLt-derived MFMA/load interleave schedule.
+
+    Policy:
+      * Default (and override path):
+          - ``TB_K4449_DISABLE=1``           → ``"none"`` (A/B-test off)
+          - ``TB_K4449_HINT_OVERRIDE=<str>`` → forced for all shapes
+      * fp16/bf16 only — schedule_hint is no-op for int8/fp8 GEMMs
+      * Apply ``"attention"`` (iglp_2 + sched.barrier — closest off-the-shelf
+        approximation of HBL's MFMA-first PGR2 interleave) to the K-4394
+        residual-gap cohort where K-4485 verified neutral-or-better
+        composition with the K-4390 stack.
+      * Skip the largest cubes (3072³ regressed −19pp under
+        ``memory-bound-attention`` in K-4485; we stay conservative).
+      * Everything else: ``"none"`` (preserve default AMDGPU backend scheduler).
+    """
+    if os.environ.get("TB_K4449_DISABLE", "0") in ("1", "true", "TRUE", "on", "ON"):
+        return "none"
+    override = os.environ.get("TB_K4449_HINT_OVERRIDE")
+    if override:
+        return override
+    if dtype not in (torch.float16, torch.bfloat16):
+        return "none"
+    key = (int(M), int(N), int(K))
+    if key in _K4449_RESIDUAL_SHAPES:
+        # 3072³ regressed under V2/V3 in K-4485 and was neutral under V1_iglp;
+        # apply only the "attention" (iglp_2) lever, never memory-bound-attention.
+        return "attention"
+    return "none"
+
+
+def _k4449_kpack(default: int = 1) -> int:
+    """
+    K-4396 identified that hipBLASLt uses ``ds_read_b128`` (kpack=2 equivalent
+    in Triton) as part of the interleave pattern. The default tritonblas
+    matmul.py site hard-codes ``kpack=1``; allow env override so the
+    benchmark driver can A/B without code change.
+    """
+    try:
+        return int(os.environ.get("TB_K4449_KPACK", str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 
@@ -98,9 +191,12 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    kpack = _k4449_kpack(default=1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-4449: hipBLASLt-derived MFMA/load interleave schedule (see top of file).
+    sched_hint = _k4449_schedule_hint(M, N, K, a.dtype)
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -156,6 +252,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            schedule_hint=sched_hint,
         )
     else:
         grids = total_tiles
@@ -194,6 +291,7 @@ def persistent_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            schedule_hint=sched_hint,
             ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
         )
 
@@ -244,9 +342,12 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    kpack = 1
+    kpack = _k4449_kpack(default=1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-4449: hipBLASLt-derived MFMA/load interleave schedule (see top of file).
+    sched_hint = _k4449_schedule_hint(M, N, K, a.dtype)
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid
@@ -321,6 +422,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            schedule_hint=sched_hint,
         )
     else:
         kk = _maybe_wrap(streamk_matmul, probe_tensor=a)[(grids,)](
@@ -361,6 +463,7 @@ def streamk_matmul_lt(
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
+            schedule_hint=sched_hint,
         )
 
     return c

@@ -37,6 +37,35 @@ def _maybe_wrap(fn, probe_tensor):
     return fn
 
 
+def _k4449_should_override_blkn(BLK_M, BLK_N, M, N, max_sms=None):
+    """K-4449 guard predicate (pure function, GPU-free, test-friendly).
+
+    Returns True iff the K-4449 CU-underutilization fix-up should override
+    BLK_N=128 + kpack=2 + waves_per_eu=1 for this (BLK_M, BLK_N, M, N).
+
+    Predicate (must ALL hold):
+      (1) Origami picked the 256x256 macro-tile (BLK_M == BLK_N == 256).
+      (2) N is divisible by 128 (so the smaller N tile is alignment-safe).
+      (3) Doubling tile count via BLK_N=128 still fits one wave:
+          cdiv(M, 256) * cdiv(N, 128) <= MAX_SMS.
+      (4) The TB_K4449_DISABLE escape hatch is NOT set (rollback / A-B).
+
+    `max_sms` defaults to the module-level MAX_SMS detected from the live
+    device; it is overridable so unit tests can exercise the guard band
+    without a specific GPU.
+    """
+    if os.environ.get("TB_K4449_DISABLE"):
+        return False
+    if not (BLK_M == 256 and BLK_N == 256):
+        return False
+    if N % 128 != 0:
+        return False
+    if max_sms is None:
+        max_sms = MAX_SMS
+    tiles_after = ((M + 255) // 256) * ((N + 127) // 128)
+    return tiles_after <= max_sms
+
+
 # Function will behave like an LRU-Cache of heuristic results
 # Saves several microseconds for previously seen problems by not rerunning the heuristic unnecessarily
 #@functools.lru_cache(maxsize=1024)
@@ -117,17 +146,14 @@ def persistent_matmul_lt(
     # untouched where doubling tile count would spill to a 2nd wave and
     # regress).  An escape hatch TB_K4449_DISABLE=1 bypasses the rule
     # for A/B verification and rollback.
-    if (BLK_M == 256 and BLK_N == 256 and (N % 128 == 0)
-            and not os.environ.get("TB_K4449_DISABLE")):
-        _tiles_after = triton.cdiv(M, 256) * triton.cdiv(N, 128)
-        if _tiles_after <= MAX_SMS:
-            BLK_N = 128
-            kpack = 2
-            waves_per_eu = 1
-            # Recompute grid for the new tile shape.
-            total_blocks_N = triton.cdiv(N, BLK_N)
-            total_tiles = total_blocks_M * total_blocks_N
-            total_programs = total_tiles
+    if _k4449_should_override_blkn(BLK_M, BLK_N, M, N):
+        BLK_N = 128
+        kpack = 2
+        waves_per_eu = 1
+        # Recompute grid for the new tile shape.
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
+        total_programs = total_tiles
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -280,15 +306,12 @@ def streamk_matmul_lt(
     # measurements. The same selector picks the same 256x256 macro-tile
     # for stream-k, and the same MAX_SMS guard avoids spilling to a 2nd
     # wave for shapes ≥ 3328³.
-    if (BLK_M == 256 and BLK_N == 256 and (N % 128 == 0)
-            and not os.environ.get("TB_K4449_DISABLE")):
-        _tiles_after = triton.cdiv(M, 256) * triton.cdiv(N, 128)
-        if _tiles_after <= MAX_SMS:
-            BLK_N = 128
-            kpack = 2
-            waves_per_eu = 1
-            total_blocks_N = triton.cdiv(N, BLK_N)
-            total_tiles = total_blocks_M * total_blocks_N
+    if _k4449_should_override_blkn(BLK_M, BLK_N, M, N):
+        BLK_N = 128
+        kpack = 2
+        waves_per_eu = 1
+        total_blocks_N = triton.cdiv(N, BLK_N)
+        total_tiles = total_blocks_M * total_blocks_N
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

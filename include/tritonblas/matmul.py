@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -98,16 +99,35 @@ def persistent_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-4449 investigation (negative result): wiring Triton-AMD's
-    # schedule_hint={"attention","memory-bound-attention"} and toggling
-    # kpack=1↔2 here were both ±2% on the K-4394 FP16/BF16 residual cohort
-    # ({256,512,3072,4096}^3). The hipBLASLt MFMA/load interleave (K-4396)
-    # cannot be reproduced via the schedule_hint axis — follow-on work
-    # belongs in tile/grid mapping and occupancy (the autotune config
-    # space), not here.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-4449 (CU-underutilization fix). Origami picks BLK_M=BLK_N=256 for
+    # cube-ish shapes in the ~2304–3072 range, which yields only 81–144
+    # work-groups on MI300X's 304 CUs (27–47% peak occupancy). hipBLASLt
+    # closes this gap by issuing twice the tile count via a smaller N tile.
+    # When (i) Origami picked the 256x256 macro-tile, (ii) the resulting
+    # tile count is below half of MAX_SMS (so halving BLK_N still lands in
+    # one wave), and (iii) N is divisible by 128 (alignment), halve BLK_N
+    # to 128 and apply kpack=2 + waves_per_eu=1 (which K-4396's MFMA/load
+    # interleave analysis pointed at and which a per-shape sweep on this
+    # cohort confirms: +20.7% at 2304³, +18.0% at 2560³, +13.4% at 2816³,
+    # +11.0% at 3072³, with the rule's guard correctly leaving 3328³+
+    # untouched where doubling tile count would spill to a 2nd wave and
+    # regress).  An escape hatch TB_K4449_DISABLE=1 bypasses the rule
+    # for A/B verification and rollback.
+    if (BLK_M == 256 and BLK_N == 256 and (N % 128 == 0)
+            and not os.environ.get("TB_K4449_DISABLE")):
+        _tiles_after = triton.cdiv(M, 256) * triton.cdiv(N, 128)
+        if _tiles_after <= MAX_SMS:
+            BLK_N = 128
+            kpack = 2
+            waves_per_eu = 1
+            # Recompute grid for the new tile shape.
+            total_blocks_N = triton.cdiv(N, BLK_N)
+            total_tiles = total_blocks_M * total_blocks_N
+            total_programs = total_tiles
 
     # Set chunk size to same area as L2 tiles.
     chunk_size = gsize_m * gsize_m
@@ -251,11 +271,24 @@ def streamk_matmul_lt(
     num_warps = 8
     waves_per_eu = 0
     mfmaInstrSize = 16
-    # K-4449 investigation (negative result): see persistent_matmul_lt above
-    # for the schedule_hint / kpack write-up. Same conclusion applies here.
     kpack = 1
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
+
+    # K-4449: mirror the persistent_matmul_lt CU-underutilization fix.
+    # See the comment block in persistent_matmul_lt for rationale and
+    # measurements. The same selector picks the same 256x256 macro-tile
+    # for stream-k, and the same MAX_SMS guard avoids spilling to a 2nd
+    # wave for shapes ≥ 3328³.
+    if (BLK_M == 256 and BLK_N == 256 and (N % 128 == 0)
+            and not os.environ.get("TB_K4449_DISABLE")):
+        _tiles_after = triton.cdiv(M, 256) * triton.cdiv(N, 128)
+        if _tiles_after <= MAX_SMS:
+            BLK_N = 128
+            kpack = 2
+            waves_per_eu = 1
+            total_blocks_N = triton.cdiv(N, BLK_N)
+            total_tiles = total_blocks_M * total_blocks_N
 
     if sk_grid is not None:
         total_programs_streamk = sk_grid

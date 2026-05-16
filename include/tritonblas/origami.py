@@ -247,6 +247,13 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # Per-shape dispatch override (K-4108). Consults a small empirical
+        # ``(M, N, K, dtype) -> ShapeConfig`` table built from K-3019 /
+        # K-4437 / K-4484 sweep winners. A miss leaves the Origami selection
+        # untouched. Must run BEFORE sk_grid / workgroup-mapping computation
+        # so those derive from the override tile, not the Origami tile.
+        self._apply_per_shape_override()
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -268,6 +275,56 @@ class OrigamiMatmulSelector:
             self._workgroup_mapping = _wg_result.wgm
 
         self._select_ws_params()
+
+    def _apply_per_shape_override(self) -> None:
+        """Apply an empirical per-shape config override if one is registered.
+
+        Looks up ``(M, N, K, a_dtype_str)`` in
+        :data:`tritonblas.dispatch_table.SHAPE_DISPATCH_TABLE`; on a hit, this
+        rewrites ``self._result.config.mt.{m,n,k}`` and ``self._num_stages``,
+        and stashes the secondary knobs (``num_warps``, ``waves_per_eu``,
+        ``mfma``, ``kpack``) under ``_override_*`` attributes for the matmul
+        dispatcher to read via ``getattr``. A miss is a no-op.
+        """
+        # Local import so origami.py stays importable even if dispatch_table
+        # is removed (e.g. for an A/B comparison with the table disabled).
+        from .dispatch_table import lookup as _dispatch_lookup
+
+        override = _dispatch_lookup(self._m, self._n, self._k, self._a_dtype_str)
+        if override is None:
+            self._dispatch_table_hit = False
+            return
+
+        # Validate the override fits within Triton's LDS budget at the
+        # requested num_stages so we never replace a working Origami
+        # selection with a config that won't compile.
+        bytes_a = self._a_dtype_bitsize / 8
+        bytes_b = self._b_dtype_bitsize / 8
+        if not check_triton_lds_capacity(
+            override.block_m,
+            override.block_n,
+            override.block_k,
+            bytes_a,
+            bytes_b,
+            self._hardware.lds_capacity,
+            override.num_stages,
+        ):
+            # Reject silently — Origami's pick remains in place.
+            self._dispatch_table_hit = False
+            return
+
+        self._result.config.mt.m = override.block_m
+        self._result.config.mt.n = override.block_n
+        self._result.config.mt.k = override.block_k
+        self._num_stages = override.num_stages
+
+        # Consumed by persistent_matmul_lt / streamk_matmul_lt via getattr.
+        self._override_num_warps = override.num_warps
+        self._override_waves_per_eu = override.waves_per_eu
+        self._override_mfma_instr_size = override.mfma
+        self._override_kpack = override.kpack
+
+        self._dispatch_table_hit = True
 
     def _select_ws_params(self):
         """Select work-stealing parameters based on tile count.

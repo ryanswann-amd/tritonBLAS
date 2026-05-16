@@ -122,10 +122,14 @@ def persistent_matmul_lt(
     even_k = K % BLK_K == 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # Per-shape dispatch overrides (K-4108). The selector sets these via
+    # OrigamiMatmulSelector._apply_per_shape_override when (M, N, K, dtype)
+    # is in the empirical dispatch table; defaults reproduce the previous
+    # hardcoded values when no override is present.
+    num_warps = getattr(selector, "_override_num_warps", 8)
+    waves_per_eu = getattr(selector, "_override_waves_per_eu", 0)
+    mfmaInstrSize = getattr(selector, "_override_mfma_instr_size", 16)
+    kpack = getattr(selector, "_override_kpack", 1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
     # K-6009: AMD-backend instruction-scheduling hint; opt-in per-shape.
@@ -272,10 +276,11 @@ def streamk_matmul_lt(
         total_tiles_streamk = 0
 
     num_stages = getattr(selector, "num_stages", 2)
-    num_warps = 8
-    waves_per_eu = 0
-    mfmaInstrSize = 16
-    kpack = 1
+    # Per-shape dispatch overrides (K-4108) — see persistent_matmul_lt above.
+    num_warps = getattr(selector, "_override_num_warps", 8)
+    waves_per_eu = getattr(selector, "_override_waves_per_eu", 0)
+    mfmaInstrSize = getattr(selector, "_override_mfma_instr_size", 16)
+    kpack = getattr(selector, "_override_kpack", 1)
     CACHE_MODIFIER_A = None
     CACHE_MODIFIER_B = None
     # K-6009: AMD-backend instruction-scheduling hint; opt-in per-shape.

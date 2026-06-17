@@ -22,45 +22,18 @@ def gluon_matmul_lt(
     b_scale=None,
     quantized=False,
 ):
-    """Launch the Gluon FP16/BF16 GEMM kernel on gfx950."""
+    """Launch the Gluon FP16/BF16 GEMM kernel on gfx950.
+
+    The v9 kernel has layouts hardcoded for 256x256x64 tiles. We use the
+    kernel's own matmul() wrapper which handles tile config and grid setup.
+    Origami tile selection will be integrated once the kernel is parameterized
+    for multiple tile sizes.
+    """
     ensure_scheduler_env()
 
-    from .fp16_gfx950 import v9_beyond_hotloop
+    from .fp16_gfx950 import matmul as _fp16_matmul
 
-    M, K = a.shape
-    _, N = b.shape
-
-    BLK_M = selector.block_m
-    BLK_N = selector.block_n
-    BLK_K = selector.block_k
-    GROUP_SIZE_M = selector.group_m
-    NUM_XCDS = selector.num_sms
-
-    GRID_MN = triton.cdiv(M, BLK_M) * triton.cdiv(N, BLK_N)
-    grid = (GRID_MN, 1)
-
-    v9_beyond_hotloop[grid](
-        a,
-        b,
-        c,
-        M,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        BLOCK_M=BLK_M,
-        BLOCK_N=BLK_N,
-        BLOCK_K=BLK_K,
-        GRID_MN=GRID_MN,
-        NUM_XCDS=NUM_XCDS,
-        GROUP_SIZE_M=GROUP_SIZE_M,
-        num_warps=4,
-    )
-
+    _fp16_matmul(a, b, c)
     return c
 
 

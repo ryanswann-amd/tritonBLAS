@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,27 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+from .kernels.gluon import is_available as _gluon_available
+
+
+def _gluon_enabled():
+    return (
+        os.environ.get("TRITONBLAS_ENABLE_GLUON", "").strip().lower()
+        in ("1", "true", "on", "yes")
+        and _gluon_available()
+    )
+
+
+def _is_gfx950():
+    try:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return "gfx950" in getattr(props, "gcnArchName", "")
+    except Exception:
+        return False
+
+
+_use_gluon = _gluon_enabled() and _is_gfx950()
 
 
 
@@ -404,6 +426,11 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
+    if _use_gluon and not is_fake(a):
+        from .kernels.gluon.dispatch import gluon_matmul_lt
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
+        return gluon_matmul_lt(a, b, out, selector)
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
@@ -461,6 +488,12 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
+    if _use_gluon and not is_fake(a):
+        from .kernels.gluon.dispatch import gluon_matmul_lt
+        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
+        gluon_matmul_lt(a, b, out, selector)
+        return None
+
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
@@ -472,6 +505,12 @@ def _matmul_out(
     return None
 
 
+def _online_enabled() -> bool:
+    return os.environ.get("TRITONBLAS_ONLINE", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -480,6 +519,24 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Online-learning path (issue #95): opt-in via TRITONBLAS_ONLINE.  Restricted
+    # to eager, non-autograd, non-fixed-sk_grid calls; everything else (and the
+    # default with the env unset) takes the unchanged path below.
+    if (
+        _online_enabled()
+        and sk_grid is None
+        and not is_fake(a)
+        and not (
+            torch.is_grad_enabled()
+            and (a.requires_grad or b.requires_grad or (out is not None and out.requires_grad))
+        )
+    ):
+        from .online import get_tuner
+
+        return get_tuner().matmul(
+            a, b, out=out, enable_streamk=enable_streamk, work_stealing=work_stealing
+        )
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

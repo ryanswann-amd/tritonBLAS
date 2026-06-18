@@ -1,71 +1,40 @@
 """
 Gluon kernel dispatch for tritonblas.
 
-Bridges the tritonblas matmul interface to the Gluon gfx950 kernels.
-Each kernel module exports a `matmul(a, b, c=None)` function; this
-module re-exposes them with the tile parameters driven by Origami.
+Routes FP16/BF16 GEMM to the Gluon v9 kernel on gfx950. Falls back to
+the standard Triton kernel path if compilation fails (e.g. wrong Triton build).
 """
 
+import os
 import torch
-import triton
-
-from . import ensure_scheduler_env
 
 
-def gluon_matmul_lt(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    selector,
-    bias=None,
-    a_scale=None,
-    b_scale=None,
-    quantized=False,
-):
-    """Launch the Gluon FP16/BF16 GEMM kernel on gfx950.
+_COMPILE_OK = None
 
-    The v9 kernel has layouts hardcoded for 256x256x64 tiles. We use the
-    kernel's own matmul() wrapper which handles tile config and grid setup.
-    Origami tile selection will be integrated once the kernel is parameterized
-    for multiple tile sizes.
+
+def _ensure_env():
+    os.environ.setdefault("TRITON_ENABLE_LLIR_SCHED", "1")
+    os.environ.setdefault("TRITON_ENABLE_AMDGCN_AS", "1")
+
+
+def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    """Run the Gluon v9 FP16/BF16 GEMM kernel.
+
+    Returns c on success, or None if the kernel fails to compile
+    (signaling the caller to fall back to the standard path).
     """
-    ensure_scheduler_env()
+    global _COMPILE_OK
 
-    from .fp16_gfx950 import matmul as _fp16_matmul
+    if _COMPILE_OK is False:
+        return None
 
-    _fp16_matmul(a, b, c)
-    return c
+    _ensure_env()
 
-
-def gluon_matmul_fp8_lt(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    selector,
-    a_scale=None,
-    b_scale=None,
-):
-    """Launch the Gluon FP8 GEMM kernel on gfx950."""
-    ensure_scheduler_env()
-
-    from .fp8_gfx950 import matmul as _fp8_matmul
-
-    _fp8_matmul(a, b, c)
-    return c
-
-
-def gluon_matmul_fp4_lt(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    c: torch.Tensor,
-    a_scales: torch.Tensor,
-    b_scales: torch.Tensor,
-    selector,
-):
-    """Launch the Gluon MXFP4 GEMM kernel on gfx950."""
-    ensure_scheduler_env()
-
-    from .fp4_gfx950 import matmul as _fp4_matmul
-
-    _fp4_matmul(a, b, c)
-    return c
+    try:
+        from .fp16_gfx950 import matmul as _gluon_matmul
+        _gluon_matmul(a, b, c)
+        _COMPILE_OK = True
+        return c
+    except Exception:
+        _COMPILE_OK = False
+        return None

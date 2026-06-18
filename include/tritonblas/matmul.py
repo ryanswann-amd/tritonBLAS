@@ -14,26 +14,11 @@ from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
 
-from .kernels.gluon import is_available as _gluon_available
-
-
-def _gluon_enabled():
-    return (
-        os.environ.get("TRITONBLAS_ENABLE_GLUON", "").strip().lower()
-        in ("1", "true", "on", "yes")
-        and _gluon_available()
-    )
-
-
-def _is_gfx950():
-    try:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        return "gfx950" in getattr(props, "gcnArchName", "")
-    except Exception:
+def _want_gluon():
+    if os.environ.get("TRITONBLAS_ENABLE_GLUON", "").strip().lower() not in ("1", "true", "on", "yes"):
         return False
-
-
-_use_gluon = _gluon_enabled() and _is_gfx950()
+    from .kernels.gluon import is_available
+    return is_available()
 
 
 
@@ -426,10 +411,11 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    if _use_gluon and not is_fake(a):
-        from .kernels.gluon.dispatch import gluon_matmul_lt
-        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
-        return gluon_matmul_lt(a, b, out, selector)
+    if _want_gluon() and not is_fake(a):
+        from .kernels.gluon.dispatch import gluon_matmul
+        result = gluon_matmul(a, b, out)
+        if result is not None:
+            return result
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
@@ -488,11 +474,11 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    if _use_gluon and not is_fake(a):
-        from .kernels.gluon.dispatch import gluon_matmul_lt
-        selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device)
-        gluon_matmul_lt(a, b, out, selector)
-        return None
+    if _want_gluon() and not is_fake(a):
+        from .kernels.gluon.dispatch import gluon_matmul
+        result = gluon_matmul(a, b, out)
+        if result is not None:
+            return None
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None

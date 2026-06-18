@@ -144,12 +144,7 @@ def v9_128x128_kernel(
     #   Coverage: M = 2 * 8 * 4 = 64, K = 8 * 8 * 1 = 64. Correct!
     #   order = [1, 0] -> K is the fast-moving dimension (coalesced loads)
     # =========================================================================
-    gLoadLayoutA: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[2, 8],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[4, 1],
-        order=[1, 0],
-    )
+    gLoadLayoutA: gl.constexpr = gl.BlockedLayout([2, 8], [8, 8], [4, 1], [1, 0])
 
     # =========================================================================
     # Global load layout for B half-tile [BLOCK_K, BLOCK_N//2] = [64, 64]
@@ -161,12 +156,7 @@ def v9_128x128_kernel(
     #   Coverage: K = 8 * 8 * 1 = 64, N = 2 * 8 * 4 = 64. Correct!
     #   order = [1, 0] -> N is the fast-moving dimension (coalesced loads)
     # =========================================================================
-    gLoadLayoutB: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[8, 2],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[1, 4],
-        order=[1, 0],
-    )
+    gLoadLayoutB: gl.constexpr = gl.BlockedLayout([8, 2], [8, 8], [1, 4], [1, 0])
 
     # =========================================================================
     # Shared memory layouts: SwizzledSharedLayout is portable

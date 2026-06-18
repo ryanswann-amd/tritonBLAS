@@ -163,12 +163,7 @@ def v9_128x256_kernel(
     #   order          = [1, 0]  -> K-major (contiguous along K dimension)
     #
     # This makes global loads coalesced when A is row-major (K-contiguous).
-    gLoadLayoutA: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[2, 8],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[4, 1],
-        order=[1, 0],
-    )
+    gLoadLayoutA: gl.constexpr = gl.BlockedLayout([2, 8], [8, 8], [4, 1], [1, 0])
 
     # Global load layout for B: loads a [BLOCK_K, Half-N] = [64, 128] tile.
     #
@@ -181,12 +176,7 @@ def v9_128x256_kernel(
     # For column-major B (K-contiguous), this yields coalesced global loads.
     # Each thread loads 32 elements (64 bytes in FP16), saturating a single
     # 64B cacheline fetch per thread.
-    gLoadLayoutB: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[8, 4],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[1, 4],
-        order=[0, 1],
-    )
+    gLoadLayoutB: gl.constexpr = gl.BlockedLayout([8, 4], [8, 8], [1, 4], [0, 1])
 
     # Shared memory layouts: SwizzledSharedLayout(vec=1, perPhase=1, maxPhase=1)
     # is the portable baseline that avoids bank conflicts for MFMA-sized accesses.

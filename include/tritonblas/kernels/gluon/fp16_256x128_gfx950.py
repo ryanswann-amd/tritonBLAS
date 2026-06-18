@@ -34,8 +34,8 @@ Layout derivation (256x128 tile, 4 warps, 256 threads total):
   - Accumulators: 4 quadrants of (128, 64) in MFMA layout
 
 Global load layouts use BlockedLayout (portable across Triton versions):
-  - gLoadLayoutA: [128, 64] = sizePerThread=[1,8], threadsPerWarp=[8,8],
-    warpsPerCTA=[4,1], order=[1,0]
+  - gLoadLayoutA: [128, 64] = sizePerThread=[1,8], [8,8],
+    warpsPerCTA=[4,1], [1,0]
     Each thread loads 8 contiguous elements along K (vectorized).
     128 / 1 = 128 threads along M, but 128/8=16 warps along M -- we have
     only 4 warps, so threadsPerWarp covers 8 positions along M.
@@ -49,8 +49,8 @@ Global load layouts use BlockedLayout (portable across Triton versions):
     threadsPerWarp = [512//64, 64//8] = [8, 8]
     This is consistent: 8 threads along M * 8 threads along K = 64 per warp.
 
-  - gLoadLayoutB: [64, 64] = sizePerThread=[8,1], threadsPerWarp=[8,8],
-    warpsPerCTA=[1,4], order=[0,1]
+  - gLoadLayoutB: [64, 64] = sizePerThread=[8,1], [8,8],
+    warpsPerCTA=[1,4], [0,1]
     Each thread loads 8 contiguous elements along K (vectorized).
     Coverage per pass: sizePerThread[0]*threadsPerWarp[0]*warpsPerCTA[0]
     = 8*8*1 = 64 along K, sizePerThread[1]*threadsPerWarp[1]*warpsPerCTA[1]
@@ -184,12 +184,7 @@ def v9_256x128_kernel(
     #   order = [1, 0]: K dimension is contiguous (column-major load pattern)
     #   Per-pass coverage: 1*8*4 = 32 along M, 8*8*1 = 64 along K -> [32, 64]
     #   Needs 128/32 = 4 internal iterations to fill [128, 64]
-    gLoadLayoutA: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[1, 8],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[4, 1],
-        order=[1, 0],
-    )
+    gLoadLayoutA: gl.constexpr = gl.BlockedLayout([1, 8], [8, 8], [4, 1], [1, 0])
 
     # B layout: loads half-N tile [64, 64]
     #   sizePerThread = [8, 1]: each thread owns 8 rows, 1 col (vectorized K load)
@@ -198,12 +193,7 @@ def v9_256x128_kernel(
     #   order = [0, 1]: K dimension is contiguous (row-major load pattern)
     #   Per-pass coverage: 8*8*1 = 64 along K, 1*8*4 = 32 along N -> [64, 32]
     #   Needs 64/32 = 2 internal iterations to fill [64, 64]
-    gLoadLayoutB: gl.constexpr = gl.BlockedLayout(
-        sizePerThread=[8, 1],
-        threadsPerWarp=[8, 8],
-        warpsPerCTA=[1, 4],
-        order=[0, 1],
-    )
+    gLoadLayoutB: gl.constexpr = gl.BlockedLayout([8, 1], [8, 8], [1, 4], [0, 1])
 
     # =========================================================================
     # Shared memory layouts (SwizzledSharedLayout -- hardware bank swizzling)
@@ -478,7 +468,7 @@ def v9_256x128_kernel(
     #   Needs 128/64 * 64/16 = 2*4 = 8 iterations for [128, 64]
     #
     # Alternative (keeping v9's pattern adapted):
-    #   sizePerThread=[1, 8], threadsPerWarp=[4, 16], warpsPerCTA=[4, 1]
+    #   sizePerThread=[1, 8], [4, 16], [4, 1]
     #   Coverage: 1*4*4=16 M, 8*16*1=128 N -- but Half-N=64, not 128.
     #   So we use [1, 4] to fit within 64 columns, or adjust threadPerWarp.
     #

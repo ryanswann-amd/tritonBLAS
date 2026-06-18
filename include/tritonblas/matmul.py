@@ -411,13 +411,14 @@ def _matmul(
 
     out = a.new_empty(M, N)
 
-    if _want_gluon() and not is_fake(a):
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+
+    if _want_gluon() and not is_fake(a) and selector.block_m >= 256 and selector.block_n >= 256:
         from .kernels.gluon.dispatch import gluon_matmul
         result = gluon_matmul(a, b, out)
         if result is not None:
             return result
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -474,13 +475,14 @@ def _matmul_out(
     M, K = a.shape
     _, N = b.shape
 
-    if _want_gluon() and not is_fake(a):
+    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+
+    if _want_gluon() and not is_fake(a) and selector.block_m >= 256 and selector.block_n >= 256:
         from .kernels.gluon.dispatch import gluon_matmul
         result = gluon_matmul(a, b, out)
         if result is not None:
             return None
 
-    selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:

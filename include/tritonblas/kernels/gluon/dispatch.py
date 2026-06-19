@@ -31,9 +31,10 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
     _ensure_env()
 
     try:
+        if b.stride(0) != 1:
+            return None
         from .fp16_gfx950 import matmul as _gluon_matmul
-        b_kcontig = b.t().contiguous().t() if b.stride(0) != 1 else b
-        _gluon_matmul(a, b_kcontig, c)
+        _gluon_matmul(a, b, c)
         _COMPILE_OK = True
         return c
     except Exception:

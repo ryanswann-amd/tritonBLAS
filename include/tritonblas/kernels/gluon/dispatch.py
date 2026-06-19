@@ -32,7 +32,11 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
 
     try:
         from .fp16_gfx950 import matmul as _gluon_matmul
-        _gluon_matmul(a, b, c)
+        # v9 kernel requires b in column-major (N×K).T layout
+        if b.stride(0) == 1:
+            _gluon_matmul(a, b, c)
+        else:
+            _gluon_matmul(a, b.T.contiguous().T, c)
         _COMPILE_OK = True
         return c
     except Exception:

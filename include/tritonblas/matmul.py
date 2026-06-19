@@ -413,7 +413,7 @@ def _matmul(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
 
-    if _want_gluon() and not is_fake(a) and selector.block_m >= 256 and selector.block_n >= 256:
+    if _want_gluon() and not is_fake(a) and M >= 2048 and N >= 2048 and selector.block_m >= 256 and selector.block_n >= 256:
         from .kernels.gluon.dispatch import gluon_matmul
         result = gluon_matmul(a, b, out)
         if result is not None:
@@ -477,7 +477,7 @@ def _matmul_out(
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
 
-    if _want_gluon() and not is_fake(a) and selector.block_m >= 256 and selector.block_n >= 256:
+    if _want_gluon() and not is_fake(a) and M >= 2048 and N >= 2048 and selector.block_m >= 256 and selector.block_n >= 256:
         from .kernels.gluon.dispatch import gluon_matmul
         result = gluon_matmul(a, b, out)
         if result is not None:

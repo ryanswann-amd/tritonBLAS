@@ -32,11 +32,6 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
 
     try:
         from .fp16_gfx950 import matmul as _gluon_matmul
-        # v9 kernel expects b passed as (N,K).T — i.e. shape (K,N) with
-        # K-contiguous strides (stride_bk=1, stride_bn=K). tritonblas passes
-        # b as (K,N) row-major. Convert to the expected layout.
-        if b.stride(0) != 1:
-            b = b.t().contiguous().t()
         _gluon_matmul(a, b, c)
         _COMPILE_OK = True
         return c

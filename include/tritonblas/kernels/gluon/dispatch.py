@@ -1,38 +1,35 @@
 """
 Gluon kernel dispatch for tritonblas.
 
-Routes to the Gluon v9 256x256x64 kernel when Origami selects a 256x256 tile.
-Falls back to standard Triton for smaller tiles or if compilation fails.
+Routes to the Gluon v9 256x256x64 kernel when:
+  - TRITONBLAS_ENABLE_GLUON=1
+  - Origami selects a 256x256 tile
+  - M, N >= 2048
+  - B is K-contiguous (stride(0) == 1)
+
+Falls back to standard Triton otherwise.
+
+For peak Gluon performance, set TRITON_ENABLE_LLIR_SCHED=1 and
+TRITON_ENABLE_AMDGCN_AS=1 externally. These are NOT auto-set because
+they can cause crashes on some shapes.
 """
 
-import os
 import torch
 
 
 _COMPILE_OK = None
 
 
-def _ensure_env():
-    os.environ.setdefault("TRITON_ENABLE_LLIR_SCHED", "1")
-    os.environ.setdefault("TRITON_ENABLE_AMDGCN_AS", "1")
-
-
 def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-    """Run the Gluon v9 256x256x64 GEMM kernel.
-
-    Returns c on success, or None if the kernel fails to compile
-    (signaling the caller to fall back to the standard path).
-    """
     global _COMPILE_OK
 
     if _COMPILE_OK is False:
         return None
 
-    _ensure_env()
+    if b.stride(0) != 1:
+        return None
 
     try:
-        if b.stride(0) != 1:
-            return None
         from .fp16_gfx950 import matmul as _gluon_matmul
         _gluon_matmul(a, b, c)
         _COMPILE_OK = True

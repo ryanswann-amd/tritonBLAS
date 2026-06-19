@@ -32,11 +32,10 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
 
     try:
         from .fp16_gfx950 import matmul as _gluon_matmul
-        # v9 kernel requires b in column-major (N×K).T layout
-        if b.stride(0) == 1:
-            _gluon_matmul(a, b, c)
-        else:
-            _gluon_matmul(a, b.T.contiguous().T, c)
+        # v9 kernel needs K-contiguous b (stride_bk=1). tritonblas passes
+        # b as (K,N) row-major (stride_bn=1). Transpose to get K-contiguous.
+        b_gluon = b.t().contiguous().t() if b.stride(0) != 1 else b
+        _gluon_matmul(a, b_gluon, c)
         _COMPILE_OK = True
         return c
     except Exception:

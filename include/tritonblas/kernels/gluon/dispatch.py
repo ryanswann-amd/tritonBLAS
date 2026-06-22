@@ -22,8 +22,8 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
     if b.stride(0) != 1:
         return None
 
-    # Enable scheduler flags ONLY for the Gluon kernel compilation.
-    # These must NOT be set during standard tritonblas kernel compilation.
+    # Enable LLIR scheduler ONLY for the Gluon kernel compilation.
+    # Must be unset afterward — the standard tritonblas kernel crashes with it.
     os.environ["TRITON_ENABLE_LLIR_SCHED"] = "1"
 
     try:
@@ -34,3 +34,5 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
     except Exception:
         _COMPILE_OK = False
         return None
+    finally:
+        os.environ.pop("TRITON_ENABLE_LLIR_SCHED", None)

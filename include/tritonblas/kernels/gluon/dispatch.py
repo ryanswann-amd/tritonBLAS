@@ -25,7 +25,6 @@ def gluon_matmul(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Ten
     # Enable scheduler flags ONLY for the Gluon kernel compilation.
     # These must NOT be set during standard tritonblas kernel compilation.
     os.environ["TRITON_ENABLE_LLIR_SCHED"] = "1"
-    os.environ["TRITON_ENABLE_AMDGCN_AS"] = "1"
 
     try:
         from .fp16_gfx950 import matmul as _gluon_matmul

@@ -54,7 +54,8 @@ def streamk_matmul(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    # INT8 inputs use int32 accumulation; FP8 and all other inputs use float32
+    acc_dtype = tl.int32 if (QUANTIZED and A.type.element_ty == tl.int8) else tl.float32
 
     # Full tiles loop
     for tile_id in range(pid, total_full_tiles, NUM_SMS):

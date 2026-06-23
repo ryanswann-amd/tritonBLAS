@@ -1,4 +1,5 @@
 import functools
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -12,6 +13,19 @@ from .kernels import persistent_matmul, ws_persistent_matmul, streamk_matmul, ws
 from .kernels.fp4_matmul import fp4_matmul
 from .origami import OrigamiMatmulSelector
 from .config import MatmulConfig, matmul_preamble, COUNTER_STRIDE
+
+def _want_gluon():
+    """Check if the Gluon gfx950 kernel backend should be attempted.
+
+    Requires TRITONBLAS_ENABLE_GLUON=1 and Triton built from the
+    gfx950-tutorial branch (triton-lang/triton). The actual dispatch
+    (in kernels/gluon/dispatch.py) adds further guards: M,N >= 2048,
+    Origami selects 256x256 tile, and B is K-contiguous.
+    """
+    if os.environ.get("TRITONBLAS_ENABLE_GLUON", "").strip().lower() not in ("1", "true", "on", "yes"):
+        return False
+    from .kernels.gluon import is_available
+    return is_available()
 
 
 
@@ -405,6 +419,13 @@ def _matmul(
     out = a.new_empty(M, N)
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+
+    if _want_gluon() and not is_fake(a) and M >= 2048 and N >= 2048 and selector.block_m >= 256 and selector.block_n >= 256:
+        from .kernels.gluon.dispatch import gluon_matmul
+        result = gluon_matmul(a, b, out)
+        if result is not None:
+            return result
+
     config = matmul_preamble(selector) if work_stealing else None
     if enable_streamk:
         return streamk_matmul_lt(a, b, out, selector, config, sk_grid=sk_grid, work_stealing=work_stealing)
@@ -462,6 +483,13 @@ def _matmul_out(
     _, N = b.shape
 
     selector = _make_matmul_selector(M, N, K, a.dtype, b.dtype, out.dtype, a.device, streamk=enable_streamk)
+
+    if _want_gluon() and not is_fake(a) and M >= 2048 and N >= 2048 and selector.block_m >= 256 and selector.block_n >= 256:
+        from .kernels.gluon.dispatch import gluon_matmul
+        result = gluon_matmul(a, b, out)
+        if result is not None:
+            return None
+
     config = matmul_preamble(selector) if work_stealing else None
 
     if enable_streamk:
@@ -472,6 +500,12 @@ def _matmul_out(
     return None
 
 
+def _online_enabled() -> bool:
+    return os.environ.get("TRITONBLAS_ONLINE", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
 def matmul(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -480,6 +514,24 @@ def matmul(
     sk_grid: Optional[int] = None,
     work_stealing: Optional[bool] = False,
 ) -> Optional[torch.Tensor]:
+    # Online-learning path (issue #95): opt-in via TRITONBLAS_ONLINE.  Restricted
+    # to eager, non-autograd, non-fixed-sk_grid calls; everything else (and the
+    # default with the env unset) takes the unchanged path below.
+    if (
+        _online_enabled()
+        and sk_grid is None
+        and not is_fake(a)
+        and not (
+            torch.is_grad_enabled()
+            and (a.requires_grad or b.requires_grad or (out is not None and out.requires_grad))
+        )
+    ):
+        from .online import get_tuner
+
+        return get_tuner().matmul(
+            a, b, out=out, enable_streamk=enable_streamk, work_stealing=work_stealing
+        )
+
     if out is None:
         return _matmul(a, b, enable_streamk, sk_grid, work_stealing)
 

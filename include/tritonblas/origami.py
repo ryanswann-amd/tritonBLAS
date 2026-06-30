@@ -241,6 +241,13 @@ class OrigamiMatmulSelector:
             self._result.config.mt.n = 256
             self._result.config.mt.k = 64
 
+        # Optional ML re-rank of the LDS-legal candidate tiles. Env-gated
+        # (TRITONBLAS_ML_RECOMMENDER=1 + TRITONBLAS_ML_BUNDLE=...); silently
+        # leaves Origami's analytical pick in place when disabled / no model
+        # for this shape / any failure. Runs BEFORE workgroup-mapping below so
+        # the chosen tile flows through the existing mapping + WS sizing.
+        self._maybe_ml_rerank()
+
         if streamk:
             self._grid = self._compute_sk_grid()
         else:
@@ -284,6 +291,28 @@ class OrigamiMatmulSelector:
             self.COUNTERS_PER_XCD = 1
 
         self._workgroup_mapping = min(8, tiles_m)
+
+    def _maybe_ml_rerank(self):
+        """Re-rank the LDS-legal candidate tiles with a trained per-cell model
+        and override Origami's pick with the top-1. No-op (silent fallback) if
+        the recommender is disabled, has no model for this shape, or errors."""
+        try:
+            from .ml_recommender import get_recommender
+
+            rec = get_recommender()
+            if rec is None:
+                return
+            candidates = [
+                (c.mt.m, c.mt.n, c.mt.k, self._num_stages) for c in self._configs
+            ]
+            pick = rec.best_tile(self._m, self._n, self._k, candidates)
+            if pick is None:
+                return
+            self._result.config.mt.m = pick[0]
+            self._result.config.mt.n = pick[1]
+            self._result.config.mt.k = pick[2]
+        except Exception:
+            return
 
     def hierarchical_split(self, num_xcds: int) -> tuple:
         """Compute optimal local/global tile split for hierarchical WS.

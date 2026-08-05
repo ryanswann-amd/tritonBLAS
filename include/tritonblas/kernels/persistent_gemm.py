@@ -54,6 +54,15 @@ def persistent_matmul(
     EVEN_K: tl.constexpr,
     QUANTIZED: tl.constexpr = False,
     ALLOW_TF32: tl.constexpr = True,
+    # ─── Tile signalling (optional) ──────────────────────────────────────────
+    # Advertise each output tile as it is finished, so a dependent consumer -- a
+    # triggered collective with pre-armed chains, typically -- can start moving
+    # it without waiting for the whole GEMM. Off by default and compiled out
+    # entirely when SIGNAL is False, so an ordinary matmul is unchanged.
+    gates=None,
+    signal_of_tile=None,
+    SIGNAL: tl.constexpr = False,
+    SIGNAL_WRITE_THROUGH: tl.constexpr = True,
 ):
     """
     Persistent GEMM kernel using GemmContext aggregate.
@@ -124,3 +133,35 @@ def persistent_matmul(
         # Store Accumulator to output matrix C at pointers defined by out_tile
         # ════════════════════════════════════════════════════════════════════
         tensorC.store(acc, out_tile, scale=scale_view, bias=bias_view)
+
+        # ════════════════════════════════════════════════════════════════════
+        # SIGNAL: advertise this tile to a waiting consumer
+        # ════════════════════════════════════════════════════════════════════
+        # Three lines, each load-bearing:
+        #
+        # * The store above must have reached a coherence point the consumer can
+        #   see. A copy engine sits on the IOD, past this XCD's L2, so a tile
+        #   left dirty in L2 is invisible to it and an open gate lets it copy
+        #   stale bytes -- a fast wrong answer rather than a hang. Callers that
+        #   signal to an off-device consumer must pass a write-through output
+        #   view; SIGNAL_WRITE_THROUGH records that requirement.
+        # * `tl.debug_barrier()` so every lane's stores have retired before any
+        #   lane advertises the tile.
+        # * `sem="release", scope="sys"`: device scope is not enough when the
+        #   consumer is not on the device.
+        #
+        # The gate id comes from a table indexed by linear tile id rather than
+        # from a closed-form map. A closed form needs a new kernel branch per
+        # grouping and the set of useful groupings is open; a table supports any
+        # of them with no kernel change, and the load is issued once per tile
+        # against an L2-resident array.
+        #
+        # `atomic_add` of 1, not a store: a tile may be one of several producers
+        # of a coarser gate, and the consumer's poll threshold is the join. The
+        # producers then need no barrier among themselves and may finish in any
+        # order, which is what lets the GEMM keep its own tile schedule.
+        if SIGNAL:
+            tl.debug_barrier()
+            num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+            gate = tl.load(signal_of_tile + (out_tile.pid_m * num_pid_n + out_tile.pid_n))
+            tl.atomic_add(gates + gate, 1, sem="release", scope="sys")

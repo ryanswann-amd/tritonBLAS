@@ -6,5 +6,6 @@ try:
     from .config import MatmulConfig, matmul_preamble
     from .bench import do_bench
     from .origami import OrigamiMatmulSelector
+    from .schedule import TileSchedule, schedule, schedule_for_problem
 except ImportError:
     pass

@@ -77,7 +77,20 @@ def persistent_matmul_lt(
     b_scale: Optional[torch.Tensor] = None,
     quantized: bool = False,
     work_stealing: bool = False,
+    gates: Optional[torch.Tensor] = None,
+    signal_of_tile: Optional[torch.Tensor] = None,
 ):
+    """
+    ``gates`` / ``signal_of_tile`` turn on per-tile signalling (see ``persistent_matmul``).
+
+    ``signal_of_tile`` is an int32 tensor indexed by linear tile id giving the gate each tile
+    reports to; ``gates`` is the counter array the epilogue atomically increments. Get the
+    former from a signal layout over ``tritonblas.schedule(a, b)``. Both must be supplied
+    together, and the output must be visible to whatever is waiting -- for an off-device
+    consumer that means a write-through store.
+    """
+    assert (gates is None) == (signal_of_tile is None), \
+        "gates and signal_of_tile must be supplied together"
     assert a.shape[1] == b.shape[0], "Incompatible Dimensions"
     M, K = a.shape
     _, N = b.shape
@@ -189,6 +202,9 @@ def persistent_matmul_lt(
             CACHE_MODIFIER_A=CACHE_MODIFIER_A,
             CACHE_MODIFIER_B=CACHE_MODIFIER_B,
             QUANTIZED=quantized,
+            gates=gates,
+            signal_of_tile=signal_of_tile,
+            SIGNAL=gates is not None,
             num_stages=num_stages,
             num_warps=num_warps,
             waves_per_eu=waves_per_eu,

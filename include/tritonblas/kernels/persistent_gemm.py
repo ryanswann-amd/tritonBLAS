@@ -11,6 +11,7 @@ information, enabling clean separation between pointer computation and GEMM logi
 import triton
 import triton.language as tl
 import torch
+from triton.language.extra.hip import memrealtime
 
 from tritonblas.kernels.stages import (
     ScheduleContext,
@@ -61,7 +62,18 @@ def persistent_matmul(
     # entirely when SIGNAL is False, so an ordinary matmul is unchanged.
     gates=None,
     signal_of_tile=None,
+    signal_times=None,
     SIGNAL: tl.constexpr = False,
+    TRACE_SIGNAL: tl.constexpr = False,
+    # Gate array geometry, so the epilogue is not tied to one transport's layout. Supported layouts
+    # include plain int32 counters at unit stride and 64-byte gate structs whose ready word is the
+    # first int64, i.e. a stride of 8 int64 elements. A strided torch view cannot express this because
+    # Triton indexes the raw pointer and ignores torch strides, so the stride has to be a kernel
+    # parameter. GATE_BASE is this rank's offset into a gate array that holds every rank's signals end
+    # to end -- without it a multi-rank caller signals its neighbour's gates and its own never fill,
+    # which presents as a hang in the collective rather than a wrong answer.
+    GATE_STRIDE: tl.constexpr = 1,
+    GATE_BASE: tl.constexpr = 0,
     SIGNAL_WRITE_THROUGH: tl.constexpr = True,
 ):
     """
@@ -163,5 +175,12 @@ def persistent_matmul(
         if SIGNAL:
             tl.debug_barrier()
             num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-            gate = tl.load(signal_of_tile + (out_tile.pid_m * num_pid_n + out_tile.pid_n))
-            tl.atomic_add(gates + gate, 1, sem="release", scope="sys")
+            linear_tile = out_tile.pid_m * num_pid_n + out_tile.pid_n
+            gate = tl.load(signal_of_tile + linear_tile)
+            tl.atomic_add(gates + GATE_BASE + gate * GATE_STRIDE, 1,
+                          sem="release", scope="sys")
+            if TRACE_SIGNAL:
+                tl.debug_barrier()
+                stamp = memrealtime()
+                tl.debug_barrier()
+                tl.store(signal_times + linear_tile, stamp)

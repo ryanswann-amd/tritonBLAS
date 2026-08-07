@@ -42,6 +42,10 @@ def _schedule(m, n, k, dtype=torch.bfloat16):
     return schedule_for_problem(m, n, k, dtype, dtype, dtype, DEVICE)
 
 
+def _arming_ids(schedule):
+    return tuple(arm.signal_id for arm in schedule.signal_plan.arms)
+
+
 # ---------------------------------------------------------------------------
 # Against the device: the only test that can catch a wrong permutation
 # ---------------------------------------------------------------------------
@@ -135,9 +139,68 @@ def test_wg_of_tile_is_the_inverse(m, n, k):
 @pytest.mark.parametrize("m, n, k", SCHEDULE_DIMS)
 def test_coords_agree_with_the_linear_ids(m, n, k):
     s = _schedule(m, n, k)
+    assert s.arming_order == s.coords()
     for (pid_m, pid_n), tile in zip(s.coords(), s.tile_of_wg):
         assert pid_m * s.tiles_n + pid_n == tile
         assert 0 <= pid_m < s.tiles_m and 0 <= pid_n < s.tiles_n
+
+
+def test_default_schedule_is_a_complete_per_tile_signal_plan():
+    """A triggered consumer can use the default schedule without deriving another table."""
+    s = _schedule(4096, 4096, 8192)
+    assert s.num_signals == s.num_tiles
+    assert s.signal_of_tile == tuple(range(s.num_tiles))
+    assert s.producers == (1,) * s.num_tiles
+    assert _arming_ids(s) == s.tile_of_wg
+    assert s.signal_arming_order == s.signal_plan.arms
+    for arm in s.signal_plan.arms:
+        assert arm.producers == 1
+        assert arm.tiles == ((arm.signal_id // s.grid_n, arm.signal_id % s.grid_n),)
+
+
+def test_grouped_signal_plan_contains_thresholds_and_firing_order():
+    s = _schedule(8192, 8192, 4096)
+    group_size = 7
+    signal_of_tile = [0] * s.num_tiles
+    for position, tile in enumerate(s.tile_of_wg):
+        signal_of_tile[tile] = position // group_size
+
+    grouped = s.with_signal_layout(signal_of_tile)
+    expected_signals = triton.cdiv(s.num_tiles, group_size)
+    assert grouped.num_signals == expected_signals
+    assert grouped.producers[:-1] == (group_size,) * (expected_signals - 1)
+    assert grouped.producers[-1] == (s.num_tiles % group_size or group_size)
+    assert _arming_ids(grouped) == tuple(range(expected_signals))
+
+    inverse = grouped.wg_of_tile()
+    ready = [
+        max(inverse[tile] for tile, owner in enumerate(grouped.signal_of_tile) if owner == signal)
+        for signal in range(grouped.num_signals)
+    ]
+    assert _arming_ids(grouped) == tuple(
+        sorted(range(grouped.num_signals), key=ready.__getitem__)
+    )
+    assert grouped.arming_order == s.arming_order
+    for arm in grouped.signal_plan.arms:
+        expected_tiles = tuple(
+            (tile // grouped.grid_n, tile % grouped.grid_n)
+            for tile, signal in enumerate(grouped.signal_of_tile)
+            if signal == arm.signal_id
+        )
+        assert arm.tiles == expected_tiles
+        assert arm.producers == len(expected_tiles)
+
+
+def test_invalid_signal_plans_are_rejected():
+    s = _schedule(4096, 4096, 8192)
+    with pytest.raises(ValueError, match="tile grid"):
+        s.with_signal_layout([0])
+    with pytest.raises(ValueError, match="non-negative"):
+        s.with_signal_layout([-1] * s.num_tiles)
+    sparse = [0] * s.num_tiles
+    sparse[-1] = 2
+    with pytest.raises(ValueError, match="dense"):
+        s.with_signal_layout(sparse)
 
 
 @pytest.mark.parametrize("m, n, k", SCHEDULE_DIMS)
@@ -156,6 +219,17 @@ def test_schedule_from_tensors_matches_schedule_from_dims():
     a = torch.randn(4096, 8192, device=DEVICE, dtype=torch.bfloat16)
     b = torch.randn(8192, 4096, device=DEVICE, dtype=torch.bfloat16)
     assert schedule(a, b).tile_of_wg == _schedule(4096, 4096, 8192).tile_of_wg
+
+
+def test_schedule_accepts_the_device_signal_table_used_by_matmul():
+    a = torch.randn(4096, 8192, device=DEVICE, dtype=torch.bfloat16)
+    b = torch.randn(8192, 4096, device=DEVICE, dtype=torch.bfloat16)
+    base = schedule(a, b)
+    signal_of_tile = torch.arange(base.num_tiles, dtype=torch.int32, device=DEVICE) // 3
+    planned = schedule(a, b, signal_of_tile=signal_of_tile)
+    assert planned.signal_of_tile == tuple(signal_of_tile.cpu().tolist())
+    assert sum(planned.producers) == planned.num_tiles
+    assert sorted(_arming_ids(planned)) == list(range(planned.num_signals))
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +306,21 @@ def test_ready_waves_are_consistent_and_cover_every_tile(m, n, k):
     assert min(waves) >= 1
     for position, tile in enumerate(s.tile_of_wg):
         assert waves[tile] == s.finish_wave(num_cus, position)
+
+
+def test_signal_ready_wave_is_the_last_producer_wave():
+    s = _schedule(8192, 8192, 4096)
+    grouped = s.with_signal_layout([tile // 5 for tile in range(s.num_tiles)])
+    num_cus = max(s.num_xcds, s.num_tiles // 4)
+    tile_waves = grouped.ready_wave_of_tile(num_cus)
+    signal_waves = grouped.ready_wave_of_signal(num_cus)
+    for signal in range(grouped.num_signals):
+        expected = max(
+            tile_waves[tile]
+            for tile, owner in enumerate(grouped.signal_of_tile)
+            if owner == signal
+        )
+        assert signal_waves[signal] == expected
 
 
 def test_finish_wave_is_monotone_in_dispatch_position():

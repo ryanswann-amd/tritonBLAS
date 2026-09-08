@@ -1,8 +1,23 @@
 from __future__ import annotations
 import itertools
 import torch
-import origami
 import math
+
+try:
+    import origami
+except ImportError:  # pragma: no cover - depends on the environment, not the code
+    # The real origami is a compiled extension that ships inside a private image;
+    # `pip install rocm-origami` is the public route. Without it, this bare import
+    # would fail, and tritonblas/__init__.py swallows that in one broad
+    # `except ImportError: pass` -- so `import tritonblas` would still SUCCEED while
+    # exposing neither matmul nor schedule. A missing selector would silently become
+    # a missing library.
+    #
+    # Fall back to an import-only stub so the package stays usable for callers that
+    # pass an explicit tile configuration. The stub raises on any actual selector
+    # call, so this degrades loudly at the point of use rather than quietly choosing
+    # a different kernel than the caller asked for.
+    from . import _origami_stub as origami
 from math import ceil
 
 
